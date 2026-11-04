@@ -1,0 +1,33 @@
+name: Tested with my gear
+description: Tell us how Régie behaved with a camera, capture card, PTZ head or streaming platform
+labels: [hardware-report]
+body:
+  - type: input
+    id: gear
+    attributes:
+      label: What did you test?
+      placeholder: Brand and model, or the streaming platform
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Did it work?
+      options:
+        - Yes, fully
+        - Partly
+        - No
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What did you see?
+      description: Resolution and frame rate, delay, dropped frames, sound, anything odd.
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: Your setup
+      description: Windows version, processor, graphics card, FFmpeg version.
