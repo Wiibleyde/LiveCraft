@@ -1,0 +1,50 @@
+[package]
+name = "regie"
+version = "0.1.0"
+edition = "2024"
+description = "Live video production desk: switching, overlays, audio mixing, recording and streaming, in pure Rust"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+ab_glyph = { version = "0.2.32", features = ["variable-fonts"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+cpal = "0.18.2"
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "accesskit", "wayland", "x11"] }
+epaint_default_fonts = "0.37.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+rayon = "1.12.0"
+rfd = "0.17.2"
+roxmltree = "0.21.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
+ttf-parser = "0.25.1"
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# Pixel loops are far too slow unoptimised, even while developing.
+[profile.dev]
+overflow-checks = false
+debug = "line-tables-only"
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["eframe"] }
+
+
+[lints.clippy]
+# Pixel loops index several buffers side by side, and pictures have many
+# parameters by nature; the suggested forms read worse here.
+enum_variant_names = "allow"
+needless_range_loop = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
