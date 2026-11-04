@@ -17,8 +17,10 @@ mod model_tests;
 mod output;
 mod outputs;
 mod playback;
+mod playtest;
 mod replay;
 mod secret;
+mod selftest;
 mod sources;
 mod text;
 mod titles;
@@ -32,6 +34,9 @@ use eframe::egui;
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     let value_of = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    if let Some(dir) = value_of("--selftest") {
+        std::process::exit(selftest::run(&dir));
+    }
     if let Some(file) = value_of("--import-report") {
         std::process::exit(import_report(&file));
     }
