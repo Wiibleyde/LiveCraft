@@ -1,5 +1,5 @@
 [package]
-name = "regie"
+name = "livecraft"
 version = "0.1.0"
 edition = "2024"
 description = "Live video production desk: switching, overlays, audio mixing, recording and streaming, in pure Rust"

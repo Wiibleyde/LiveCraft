@@ -21,7 +21,7 @@ fn finish_later(list: Vec<Encoder>, patience: Duration) {
 /// Stamp to the millisecond: stopping and starting within a second must not
 /// write over the file still being closed.
 fn stamp() -> String {
-    chrono::Local::now().format("regie-%Y%m%d-%H%M%S-%3f").to_string()
+    chrono::Local::now().format("livecraft-%Y%m%d-%H%M%S-%3f").to_string()
 }
 
 impl Engine {

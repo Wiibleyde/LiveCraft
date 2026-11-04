@@ -149,7 +149,7 @@ impl Engine {
         let p = &s.project;
         let number =
             |id: Option<u64>| id.and_then(|i| p.inputs.iter().position(|x| x.id == i)).map_or(0, |n| n + 1);
-        let mut x = String::from("<vmix><version>29.0.0.0</version><edition>Regie</edition>");
+        let mut x = String::from("<vmix><version>29.0.0.0</version><edition>LiveCraft</edition>");
         x.push_str("<inputs>");
         for (n, i) in p.inputs.iter().enumerate() {
             let rt = self.rt(i.id);
@@ -374,7 +374,7 @@ impl Engine {
             let given = String::from_utf8_lossy(&base64_decode(&auth)).into_owned();
             if given.split_once(':').map(|(_, p)| p) != Some(password.as_str()) {
                 let _ = out.write_all(
-                    b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Regie\"\r\n\
+                    b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"LiveCraft\"\r\n\
                       Content-Length: 0\r\nConnection: close\r\n\r\n",
                 );
                 return;
@@ -491,11 +491,11 @@ impl Engine {
 }
 
 const CONTROLLER_PAGE: &str = r#"<!doctype html><html lang="fr"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Régie</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>LiveCraft</title>
 <style>body{background:#131314;color:#eee;font:16px system-ui;margin:0;padding:12px}
 button{background:#343538;color:#fff;border:0;border-radius:4px;padding:14px;margin:4px;font-size:16px}
 #i button{min-width:130px}.p{background:#f28c00}.o{background:#0a7a16}a{color:#8cf}</style>
-<h3>Régie</h3><div><button onclick="f('Cut')">Coupe</button><button onclick="f('Fade')">Fondu</button>
+<h3>LiveCraft</h3><div><button onclick="f('Cut')">Coupe</button><button onclick="f('Fade')">Fondu</button>
 <button onclick="f('FadeToBlack')">Fondu au noir</button> <a href="/telestrator">Télestrateur</a></div>
 <div id="i"></div><script>
 function f(n,i){fetch('/api/?Function='+n+(i?'&Input='+i:'')).then(r)}

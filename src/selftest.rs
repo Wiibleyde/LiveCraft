@@ -88,7 +88,7 @@ fn check(dir: &str) -> Result<String, String> {
 
     // A web page draws through the windowless browser.
     let web = engine.new_id();
-    let page = "data:text/html,<body style='background:rgb(200,40,40)'><h1>Regie</h1></body>";
+    let page = "data:text/html,<body style='background:rgb(200,40,40)'><h1>LiveCraft</h1></body>";
     engine.add_input(Input::new(web, "Web", Kind::Browser { url: page.into(), alpha: false }));
     let web_rt = engine.rt(web).ok_or("page absente")?;
     for _ in 0..150 {

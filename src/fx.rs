@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn a_lut_file_that_appears_later_is_used() {
-        let dir = std::env::temp_dir().join(format!("regie-lut-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("livecraft-lut-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("late.cube");
         let name = path.to_string_lossy().into_owned();

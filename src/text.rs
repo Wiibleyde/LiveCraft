@@ -172,9 +172,9 @@ mod tests {
     #[test]
     fn draws_visible_pixels_including_accents() {
         let mut f = Frame::new(200, 60);
-        draw(&mut f, "Régie é", 4.0, 4.0, 32.0, [255, 255, 255], true);
+        draw(&mut f, "LiveCraft é", 4.0, 4.0, 32.0, [255, 255, 255], true);
         assert!(f.data.as_chunks::<4>().0.iter().any(|p| p[3] > 200));
-        assert!(measure("Régie", 32.0) > 30.0);
+        assert!(measure("LiveCraft", 32.0) > 30.0);
     }
 
     #[test]

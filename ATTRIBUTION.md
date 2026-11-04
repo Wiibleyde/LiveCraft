@@ -1,6 +1,6 @@
 # Attribution
 
-Régie stands on other people's work.
+LiveCraft stands on other people's work.
 
 ## Bundled in the program
 
@@ -14,7 +14,7 @@ Régie stands on other people's work.
 The direct dependencies are listed in `Cargo.toml`. All crates in `Cargo.lock`
 are available under permissive terms (MIT, Apache-2.0, BSD, ISC, Zlib, BSL-1.0,
 Unicode-3.0 or Unlicense). Where a crate offers a choice that includes a copyleft
-license (`r-efi`, `self_cell`), Régie uses it under its MIT or Apache-2.0 option.
+license (`r-efi`, `self_cell`), LiveCraft uses it under its MIT or Apache-2.0 option.
 
 To list them with their licenses:
 

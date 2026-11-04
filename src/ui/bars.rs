@@ -112,7 +112,8 @@ impl App {
     }
 
     fn open_project(&mut self, append: bool) {
-        let picked = rfd::FileDialog::new().add_filter("Projets", &["regie", "vmix"]).pick_file();
+        let picked =
+            rfd::FileDialog::new().add_filter("Projets", &["livecraft", "regie", "vmix"]).pick_file();
         let Some(path) = picked else { return };
         let path = path.to_string_lossy().into_owned();
         if append {
@@ -159,7 +160,7 @@ impl App {
         self.external_route = Route::Output;
     }
 
-    /// A .vmix opens as a copy: saving always asks for a new .regie file.
+    /// A .vmix opens as a copy: saving always asks for a new .livecraft file.
     fn open_vmix(&mut self, path: String) {
         match crate::vmix_import::load(&path) {
             Ok((p, report)) => {
@@ -183,8 +184,8 @@ impl App {
         let target = match (&self.current_file, ask) {
             (Some(p), false) => Some(p.clone()),
             _ => rfd::FileDialog::new()
-                .add_filter("Projet Régie", &["regie"])
-                .set_file_name("production.regie")
+                .add_filter("Projet LiveCraft", &["livecraft"])
+                .set_file_name("production.livecraft")
                 .save_file()
                 .map(|p| p.to_string_lossy().into_owned()),
         };
@@ -338,7 +339,7 @@ impl App {
                 "  Démarrage…".to_string()
             } else {
                 format!(
-                    "  i/s : {ticks}   Rendu : {render:.1} ms   Processeur Régie : {me} %   Total : {total} %"
+                    "  i/s : {ticks}   Rendu : {render:.1} ms   Processeur LiveCraft : {me} %   Total : {total} %"
                 )
             };
             ui.label(RichText::new(line).size(11.0).color(DIM));

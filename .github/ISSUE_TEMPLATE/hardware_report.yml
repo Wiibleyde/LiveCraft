@@ -1,5 +1,5 @@
 name: Tested with my gear
-description: Tell us how Régie behaved with a camera, capture card, PTZ head or streaming platform
+description: Tell us how LiveCraft behaved with a camera, capture card, PTZ head or streaming platform
 labels: [hardware-report]
 body:
   - type: input

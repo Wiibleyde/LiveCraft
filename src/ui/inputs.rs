@@ -481,7 +481,7 @@ impl App {
             "mp3" | "wav" | "m4a" | "flac" | "ogg" | "aac" => {
                 self.add_input(&name, Kind::AudioFile { path, looped: false });
             }
-            "regie" | "vmix" => {
+            "livecraft" | "regie" | "vmix" => {
                 if self.with(|s| s.padlock) {
                     self.say("Verrouillé : ouvrez le cadenas pour changer de projet");
                 } else if self.with(|s| s.project.inputs.is_empty()) {

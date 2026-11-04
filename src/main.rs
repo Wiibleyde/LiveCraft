@@ -49,14 +49,14 @@ fn main() -> eframe::Result {
     let open = value_of("--open");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Régie")
+            .with_title("LiveCraft")
             .with_inner_size([1600.0, 900.0])
             .with_min_inner_size([1100.0, 640.0])
             .with_maximized(true),
         ..Default::default()
     };
     eframe::run_native(
-        "Régie",
+        "LiveCraft",
         options,
         Box::new(move |cc| Ok(Box::new(ui::App::new(cc, screenshot, open, project)))),
     )

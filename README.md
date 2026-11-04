@@ -1,4 +1,4 @@
-<h1 align="center">Régie</h1>
+<h1 align="center">LiveCraft</h1>
 
 <p align="center"><strong>A live video production desk, written from scratch in pure Rust.</strong></p>
 
@@ -11,7 +11,7 @@
 </p>
 
 > [!NOTE]
-> **Régie needs you.** It works on one desk today, and it needs people with cameras, capture
+> **LiveCraft needs you.** It works on one desk today, and it needs people with cameras, capture
 > cards, PTZ heads, streaming accounts and real shows to break it. See
 > [how to help](#come-build-it-with-us).
 
@@ -23,7 +23,7 @@
   <a href="SECURITY.md">Security</a>
 </p>
 
-![Régie with its worked example open](docs/screenshot.png)
+![LiveCraft with its worked example open](docs/screenshot.png)
 
 ### 🎛️ Familiar by design
 
@@ -32,8 +32,8 @@ below. If you have run a live show on a software mixer, you already know where e
 
 ### 📂 Opens your existing shows
 
-Régie reads `.vmix` project files: inputs, scenes and layers, overlays, tabs, colour settings, LUTs,
-audio routing and the state you left them in. Your file is never changed; you save a new `.regie`.
+LiveCraft reads `.vmix` project files: inputs, scenes and layers, overlays, tabs, colour settings, LUTs,
+audio routing and the state you left them in. Your file is never changed; you save a new `.livecraft`.
 
 ### ⚡ Light on purpose
 
@@ -82,14 +82,14 @@ cargo run --release
 Other ways to start it:
 
 ```sh
-regie --project show.vmix             # open a project
-regie --import-report show.vmix       # say what a project keeps, without opening it
-regie --selftest some-folder          # real end-to-end run: plays, records, streams, replays
-regie --screenshot out.png            # start, save a picture of the window, quit
+livecraft --project show.vmix             # open a project
+livecraft --import-report show.vmix       # say what a project keeps, without opening it
+livecraft --selftest some-folder          # real end-to-end run: plays, records, streams, replays
+livecraft --screenshot out.png            # start, save a picture of the window, quit
 ```
 
 > [!IMPORTANT]
-> Régie is **early alpha and not ready for a show that matters.** It has run on one Windows machine.
+> LiveCraft is **early alpha and not ready for a show that matters.** It has run on one Windows machine.
 > Tests cover the desk, the interface and real encoding to local files and a local stream, but it has
 > **not** been tried with physical cameras, capture cards, PTZ heads or a live streaming platform.
 > The interface is in French only for now.
@@ -130,6 +130,6 @@ vulnerability, see [SECURITY.md](SECURITY.md).
 Licensed under either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at
 your option. Third-party work is credited in [ATTRIBUTION.md](ATTRIBUTION.md).
 
-Régie is an independent project, built from public documentation. It is not affiliated with or endorsed
+LiveCraft is an independent project, built from public documentation. It is not affiliated with or endorsed
 by the makers of vMix or any other product named here; those names are trademarks of their owners and
 appear only to describe compatibility.

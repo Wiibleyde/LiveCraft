@@ -51,12 +51,24 @@ struct Saved {
 
 fn user_dir(sub: &str) -> PathBuf {
     let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(sub).join("Régie")
+    PathBuf::from(home).join(sub).join("LiveCraft")
 }
 
 fn saved_path() -> PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+    PathBuf::from(base).join("LiveCraft").join("session.json")
+}
+
+/// Where the session lived when the program was called Regie.
+fn older_saved_path() -> PathBuf {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
     PathBuf::from(base).join("Regie").join("session.json")
+}
+
+/// A new name must not cost anyone their desk: the old session is read until
+/// the first save under the new name.
+fn session_to_read(current: PathBuf, older: PathBuf) -> PathBuf {
+    if !current.exists() && older.exists() { older } else { current }
 }
 
 impl Default for Saved {
@@ -97,7 +109,7 @@ impl Saved {
     }
 
     fn load() -> Self {
-        let path = saved_path();
+        let path = session_to_read(saved_path(), older_saved_path());
         let Ok(bytes) = std::fs::read(&path) else { return Self::default() };
         match serde_json::from_slice::<Self>(&bytes) {
             Ok(mut saved) => {

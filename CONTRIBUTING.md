@@ -1,6 +1,6 @@
-# Contributing to Régie
+# Contributing to LiveCraft
 
-Thank you for being here. Régie is young, and what you bring will shape it. English and French are both
+Thank you for being here. LiveCraft is young, and what you bring will shape it. English and French are both
 fine in issues and pull requests.
 
 ## Ways to help
@@ -15,12 +15,12 @@ fine in issues and pull requests.
 
 ## The one rule you cannot break: clean room
 
-Régie exists because it was written without looking inside anyone else's software. Please keep it so.
+LiveCraft exists because it was written without looking inside anyone else's software. Please keep it so.
 
 - **Never** decompile, disassemble, trace or copy from vMix or any other closed program, and never
   paste its code, assets, logos, icons or title templates here.
 - Public documentation, your own project files and behaviour you can see from the outside are fine.
-- **No GPL code.** Régie is MIT or Apache-2.0. Reading OBS Studio for ideas is welcome; copying or
+- **No GPL code.** LiveCraft is MIT or Apache-2.0. Reading OBS Studio for ideas is welcome; copying or
   closely translating its code is not, in either direction.
 - Say so in your pull request if you used an AI tool. You remain responsible for what you submit.
 
@@ -28,7 +28,7 @@ Régie exists because it was written without looking inside anyone else's softwa
 
 ```sh
 git clone <this repository>
-cd regie
+cd livecraft
 cargo run
 ```
 

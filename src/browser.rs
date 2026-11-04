@@ -142,7 +142,7 @@ static HOST: Mutex<Option<Host>> = Mutex::new(None);
 
 fn launch(exe: &PathBuf) -> Option<Host> {
     let port = free_port()?;
-    let profile = std::env::temp_dir().join(format!("Regie-web-{port}"));
+    let profile = std::env::temp_dir().join(format!("LiveCraft-web-{port}"));
     let mut cmd = Command::new(exe);
     cmd.args(["--headless=new", "--hide-scrollbars", "--mute-audio", "--no-first-run"])
         .args(["--no-default-browser-check", "--disable-sync", "--disable-extensions"])
@@ -257,7 +257,9 @@ fn clear_old_profiles() {
             let Ok(list) = std::fs::read_dir(std::env::temp_dir()) else { return };
             let day = Duration::from_secs(86_400);
             for entry in list.flatten() {
-                let ours = entry.file_name().to_string_lossy().starts_with("Regie-web-");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // The program was called Regie before, and left the same kind.
+                let ours = name.starts_with("LiveCraft-web-") || name.starts_with("Regie-web-");
                 let age = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
                 if ours && age.is_some_and(|a| a > day) {
                     let _ = std::fs::remove_dir_all(entry.path());

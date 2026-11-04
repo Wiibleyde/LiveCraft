@@ -214,7 +214,7 @@ impl App {
                     }
                 });
                 if ui.button("Démarrer l'enregistrement").clicked() {
-                    let folder = std::env::temp_dir().join("Regie-ralenti");
+                    let folder = std::env::temp_dir().join("LiveCraft-ralenti");
                     let ids = self.replay_cams.clone();
                     if let Err(e) = self.engine.replay_start(&ids, folder) {
                         self.say(e);

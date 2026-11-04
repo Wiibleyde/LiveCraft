@@ -398,7 +398,7 @@ fn tab_data(ui: &mut egui::Ui, p: &mut Project) {
 }
 
 fn tab_about(ui: &mut egui::Ui) {
-    ui.label(RichText::new("Régie").strong());
+    ui.label(RichText::new("LiveCraft").strong());
     ui.label("Mélangeur vidéo en direct, reconstruit à partir de la documentation publique.");
     ui.label(
         RichText::new("Les vidéos, caméras et sorties passent par ffmpeg, à installer séparément.")

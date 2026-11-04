@@ -344,6 +344,25 @@ fn an_empty_desk_shows_its_hint_and_buttons_are_safe() {
     end(h);
 }
 
+/// Files from when the program was called Regie keep working.
+#[test]
+fn the_old_name_still_opens_old_files() {
+    let dir = std::env::temp_dir().join(format!("livecraft-session-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (current, older) = (dir.join("nouvelle.json"), dir.join("ancienne.json"));
+    assert_eq!(session_to_read(current.clone(), older.clone()), current, "nothing saved yet");
+    std::fs::write(&older, "{}").unwrap();
+    assert_eq!(session_to_read(current.clone(), older.clone()), older, "first start after the rename");
+    std::fs::write(&current, "{}").unwrap();
+    assert_eq!(session_to_read(current.clone(), older), current, "the new one wins from then on");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut h = desk(small_project());
+    h.state_mut().add_file(std::path::Path::new("C:/ailleurs/ancienne.regie"));
+    assert!(h.state().confirm_open.is_some(), "still recognised as a project");
+    end(h);
+}
+
 #[test]
 fn a_dragged_card_lands_just_before_its_target() {
     let mut h = desk(small_project());
@@ -381,7 +400,7 @@ fn a_double_click_opens_settings_only_when_the_click_is_harmless() {
 #[test]
 fn a_dropped_project_asks_first_and_respects_the_padlock() {
     let mut h = desk(small_project());
-    h.state_mut().add_file(std::path::Path::new("C:/ailleurs/emission.regie"));
+    h.state_mut().add_file(std::path::Path::new("C:/ailleurs/emission.livecraft"));
     assert!(h.state().confirm_open.is_some());
     h.run_steps(2);
     click(&mut h, "Annuler");
