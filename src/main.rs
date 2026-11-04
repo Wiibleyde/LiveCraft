@@ -22,5 +22,6 @@ mod sources;
 mod text;
 mod titles;
 mod transitions;
+mod vmix_import;
 
 fn main() {}
