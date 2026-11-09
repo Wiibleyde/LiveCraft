@@ -77,7 +77,7 @@ impl App {
             }
         }
         if input != before {
-            let source_changed = input.kind != before.kind;
+            let source_changed = input.kind.restarts_source(&before.kind);
             let live = !matches!(input.kind, Kind::Scene | Kind::Mix { .. });
             let keep = input.kind.same_source(&before.kind);
             self.with(|s| {
@@ -374,6 +374,40 @@ impl App {
                 if ui.button("Dessiner…").clicked() {
                     self.telestrator_for = Some(id);
                 }
+            }
+            Kind::VideoCall { token, address, stun, turn, turn_user, turn_password, return_sound } => {
+                let connected = rt.as_ref().and_then(|r| r.call.as_ref()).is_some_and(|c| c.is_connected());
+                call_editor(ui, token, address, self.api_lan, connected);
+                ui.horizontal(|ui| {
+                    ui.label("Son renvoyé à l'invité");
+                    egui::ComboBox::from_id_salt("retour-appel").selected_text(return_sound.label()).show_ui(
+                        ui,
+                        |ui| {
+                            for choice in ReturnSound::all() {
+                                ui.selectable_value(return_sound, choice, choice.label());
+                            }
+                        },
+                    );
+                });
+                ui.collapsing("Invités hors du réseau local (STUN, TURN)", |ui| {
+                    let hint =
+                        "Plusieurs adresses séparées par des espaces, par exemple stun:stun.exemple.org:3478";
+                    ui.label(RichText::new(hint).small().color(DIM));
+                    egui::Grid::new("ice").num_columns(2).show(ui, |ui| {
+                        ui.label("STUN");
+                        ui.text_edit_singleline(stun);
+                        ui.end_row();
+                        ui.label("TURN");
+                        ui.text_edit_singleline(turn);
+                        ui.end_row();
+                        ui.label("Utilisateur TURN");
+                        ui.text_edit_singleline(turn_user);
+                        ui.end_row();
+                        ui.label("Mot de passe TURN");
+                        ui.add(egui::TextEdit::singleline(turn_password).password(true));
+                        ui.end_row();
+                    });
+                });
             }
             other => {
                 ui.label(RichText::new(other.label()).color(DIM));
@@ -767,4 +801,51 @@ fn tab_copy(ui: &mut egui::Ui, input: &Input, project: &Project) -> Option<u64> 
         }
     }
     chosen
+}
+
+/// The guest's link, and what it takes for the guest to reach it.
+fn call_editor(ui: &mut egui::Ui, token: &mut String, address: &mut String, lan: bool, connected: bool) {
+    ui.label(RichText::new("Lien à envoyer à l'invité").strong());
+    match crate::call::guest_link(token, address, lan) {
+        Some(link) => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(RichText::new(&link).monospace()).selectable(true));
+                if ui.button("Copier le lien").clicked() {
+                    ui.ctx().copy_text(link.clone());
+                }
+            });
+        }
+        None => {
+            ui.label(RichText::new("Pas encore de lien").color(DIM));
+        }
+    }
+    ui.horizontal(|ui| {
+        let fresh = ui
+            .button("Nouveau lien")
+            .on_hover_text("L'ancien lien ne fonctionne plus, et l'invité est déconnecté");
+        if fresh.clicked() {
+            *token = crate::call::new_token();
+        }
+        if connected {
+            ui.label(RichText::new("Invité connecté").color(GREEN).strong());
+        } else {
+            ui.label(RichText::new("En attente de l'invité").color(DIM));
+        }
+    });
+    if !lan && address.trim().is_empty() {
+        let hint = "Seul cet ordinateur peut ouvrir ce lien. Pour un invité ailleurs, cochez « Accessible depuis \
+                    le réseau local » dans Réglages, Contrôle à distance, puis redémarrez.";
+        ui.label(RichText::new(hint).small().color(ORANGE));
+    }
+    let certificate = "LiveCraft signe lui-même ce lien en https : le navigateur de l'invité demande d'accepter le \
+                       certificat avant d'ouvrir la caméra.";
+    ui.label(RichText::new(certificate).small().color(DIM));
+    ui.horizontal(|ui| {
+        ui.label("Adresse dans le lien");
+        ui.text_edit_singleline(address).on_hover_text(format!(
+            "Vide : celle de cet ordinateur sur le réseau. Pour un invité sur Internet : votre nom ou adresse \
+             publique, avec le port {} ouvert vers cet ordinateur, ou l'adresse d'un relais https",
+            crate::api::HTTP_PORT
+        ));
+    });
 }

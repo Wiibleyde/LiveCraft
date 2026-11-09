@@ -272,6 +272,7 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
         Kind::Mix { preview: Some(1), output: Some(2), ms: 500 },
         Kind::Telestrator { background: None },
         Kind::Replay,
+        crate::call::new_call(),
     ];
     for (n, kind) in extra.into_iter().enumerate() {
         p.inputs.push(Input::new(100 + n as u64, format!("Essai {n}"), kind));
@@ -299,6 +300,48 @@ fn a_web_page_added_from_the_menu_opens_its_settings() {
     assert!(added.is_some());
     assert_eq!(h.state().editing, added);
     assert!(h.query_by_label("Adresse de la page").is_some(), "its address can be typed at once");
+    end(h);
+}
+
+fn calls(h: &Harness<'static, App>) -> Vec<(u64, String)> {
+    let p = project(h);
+    p.inputs
+        .iter()
+        .filter_map(|i| match &i.kind {
+            Kind::VideoCall { token, .. } => Some((i.id, token.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The link shown is the one the desk answers, a new one shuts the old one
+/// out, and two guests never share a link.
+#[test]
+fn a_video_call_shows_the_link_that_lets_its_guest_in() {
+    let mut h = desk(small_project());
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Appel vidéo");
+    let found = calls(&h);
+    assert_eq!(found.len(), 1);
+    let (id, first) = found[0].clone();
+    assert_eq!(h.state().editing, Some(id), "its settings open at once, link in view");
+    let link = |token: &str| format!("https://127.0.0.1:{}/call/{token}", crate::api::HTTP_PORT);
+    assert!(h.query_by_label(&link(&first)).is_some(), "shown: {:?}", link(&first));
+    assert!(h.state().engine.guest_page(&first).is_some(), "the link shown opens the guest's page");
+
+    click(&mut h, "Nouveau lien");
+    let renewed = calls(&h)[0].1.clone();
+    assert_ne!(renewed, first);
+    assert!(h.query_by_label(&link(&first)).is_none(), "the old link is no longer shown");
+    assert!(h.query_by_label(&link(&renewed)).is_some());
+    assert!(h.state().engine.guest_page(&first).is_none(), "the old link no longer opens anything");
+    assert!(h.state().engine.guest_page(&renewed).is_some());
+
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Appel vidéo");
+    let both = calls(&h);
+    assert_eq!(both.len(), 2);
+    assert_ne!(both[0].1, both[1].1, "each guest has a link of their own");
     end(h);
 }
 

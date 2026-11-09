@@ -293,6 +293,7 @@ impl App {
     fn tab_remote(&mut self, ui: &mut egui::Ui) {
         ui.label(format!("Contrôle web et API sur le port {HTTP_PORT}, API TCP sur le port {TCP_PORT}."));
         ui.label(RichText::new(format!("Depuis cet ordinateur : http://127.0.0.1:{HTTP_PORT}/")).small());
+        ui.label(RichText::new("Les liens des appels vidéo passent par ce port, en https.").small());
         ui.checkbox(&mut self.saved.remote_lan, "Accessible depuis le réseau local");
         ui.horizontal(|ui| {
             ui.label("Mot de passe");

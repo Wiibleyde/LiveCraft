@@ -48,8 +48,9 @@ The HTTP and TCP interfaces use the published function names, so existing contro
 ## Features
 
 **Inputs.** Video files, image sequences, photo folders, lists, images, audio files, cameras and
-microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP, TS), web pages, solid
-colours, test cards, clocks, and titles with presets, tickers, countdowns and a simple designer.
+microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP, TS), web pages, video
+calls from a guest's browser with the program sent back, solid colours, test cards, clocks, and
+titles with presets, tickers, countdowns and a simple designer.
 
 **Switching.** Cut, fade, zoom, wipes, slides, the cube family, merge and stingers, with four
 transition slots, a T-bar, fade to black and Quick Play.
@@ -98,7 +99,7 @@ livecraft --screenshot out.png            # start, save a picture of the window,
 
 - **Windows only.** The code uses Windows APIs for capture, screens and secrets.
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
-- **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs, no virtual sets.
+- **No NDI or OMT.** Also no PowerPoint or DVD inputs, no virtual sets.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
 
 The full list is in the [roadmap](ROADMAP.md).
@@ -122,7 +123,8 @@ process for each source and output. See [docs/architecture.md](docs/architecture
 
 ## Security
 
-The remote control only listens on this computer unless you turn network access on. To report a
+The remote control only listens on this computer unless you turn network access on. A video call
+guest's link opens that guest's page and call only, never the controls. To report a
 vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License and credits

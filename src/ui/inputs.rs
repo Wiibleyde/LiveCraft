@@ -559,6 +559,13 @@ impl App {
                 self.editing = Some(id);
                 ui.close();
             }
+            if ui.button("Appel vidéo").on_hover_text("Un invité à distance, depuis son navigateur").clicked()
+            {
+                let id = self.add_input("Invité", crate::call::new_call());
+                self.editing = Some(id);
+                self.edit_tab = 0;
+                ui.close();
+            }
             if ui.button("Capture de l'écran").clicked() {
                 self.add_input("Écran", Kind::Screen);
                 ui.close();

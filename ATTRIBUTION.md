@@ -27,7 +27,7 @@ cargo metadata --format-version 1
 | Program | Used for | Note |
 | --- | --- | --- |
 | [FFmpeg](https://ffmpeg.org) | Decoding, capture, encoding, recording, streaming | Started as a separate process. Installed by the user, under its own license. |
-| Microsoft Edge or Google Chrome | Web page inputs | Started as a separate process with no window. |
+| Microsoft Edge or Google Chrome | Web page and video call inputs | Started as a separate process with no window. |
 
 ## Design references
 

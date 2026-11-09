@@ -24,14 +24,15 @@ so a slow window cannot hold up the show.
 | `mixer.rs` | The video loop: what to compose, and reusing what has not changed |
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
 | `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
+| `call.rs` | Video calls: the guest's link and page, and the call received in the windowless browser |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
-| `functions.rs`, `api.rs` | Named functions, and HTTP and TCP remote control |
+| `functions.rs`, `api.rs` | Named functions, and HTTP and TCP remote control, also https for guests |
 | `vmix_import.rs` | Reading `.vmix` projects |
 | `secret.rs` | Sealing secrets in the session file |
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
-| `selftest.rs`, `playtest.rs` | `--selftest`: real end-to-end checks |
+| `selftest.rs`, `playtest.rs`, `calltest.rs` | `--selftest`: real end-to-end checks |
 
 ## Doing less
 

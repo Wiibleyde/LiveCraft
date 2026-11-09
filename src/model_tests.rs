@@ -55,3 +55,45 @@ fn a_new_setting_is_not_a_new_source() {
     assert!(!video("a", 1.0).same_source(&video("b", 1.0)));
     assert!(!Kind::Bars.same_source(&Kind::Clock));
 }
+
+fn call(token: &str, turn_password: &str) -> Kind {
+    Kind::VideoCall {
+        token: token.into(),
+        address: "studio.example".into(),
+        stun: "stun:s:3478".into(),
+        turn: "turn:t:3478".into(),
+        turn_user: "u".into(),
+        turn_password: turn_password.into(),
+        return_sound: ReturnSound::Bus(2),
+    }
+}
+
+#[test]
+fn a_project_file_leaves_the_guest_link_behind() {
+    let mut p = Project::blank();
+    p.inputs.push(Input::new(1, "Invité", call("0123456789abcdef", "mdp")));
+    let p = p.without_secrets();
+    assert_eq!(p.inputs[0].kind, call("", ""), "the link and the TURN password stay on this computer");
+}
+
+#[test]
+fn a_call_saved_with_fewer_settings_still_opens() {
+    let json = r#"{"inputs":[{"id":1,"name":"Invité","kind":{"VideoCall":{"token":"ab"}}}]}"#;
+    let p: Project = serde_json::from_str(json).unwrap();
+    let Kind::VideoCall { token, return_sound, stun, .. } = &p.inputs[0].kind else { panic!() };
+    assert_eq!((token.as_str(), *return_sound, stun.as_str()), ("ab", ReturnSound::MasterMinusGuest, ""));
+}
+
+#[test]
+fn changing_what_a_guest_hears_keeps_them_connected() {
+    let before = call("a", "p");
+    let mut after = before.clone();
+    if let Kind::VideoCall { return_sound, address, .. } = &mut after {
+        *return_sound = ReturnSound::Off;
+        address.clear();
+    }
+    assert!(!after.restarts_source(&before));
+    assert!(call("b", "p").restarts_source(&before), "a new link drops the old guest");
+    assert!(call("a", "q").restarts_source(&before), "new TURN settings need a new call");
+    assert!(Kind::Clock.restarts_source(&Kind::Bars));
+}

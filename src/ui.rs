@@ -90,10 +90,13 @@ impl Saved {
             o.url = f(&o.url);
         }
         for i in &mut self.project.inputs {
-            if let Kind::Network { url, .. } = &mut i.kind
-                && sensitive(url)
-            {
-                *url = f(url);
+            match &mut i.kind {
+                Kind::Network { url, .. } if sensitive(url) => *url = f(url),
+                Kind::VideoCall { token, turn_password, .. } => {
+                    *token = f(token);
+                    *turn_password = f(turn_password);
+                }
+                _ => {}
             }
         }
     }
@@ -210,6 +213,9 @@ pub struct App {
     shot_sent: bool,
     shot_not_before: Instant,
     shot_done: Arc<AtomicBool>,
+    /// Whether the running remote control reaches the network, which can
+    /// differ from the setting until the next start.
+    api_lan: bool,
 }
 
 impl App {
@@ -253,6 +259,7 @@ impl App {
         let engine = Engine::start(saved.project.clone());
         engine.set_repaint(cc.egui_ctx.clone());
         let mut message = None;
+        let api_lan = remote && saved.remote_lan;
         if remote {
             let cfg = ApiConfig { lan: saved.remote_lan, password: saved.remote_password.clone() };
             message = engine.start_api(cfg).map(|e| (e, Instant::now()));
@@ -344,6 +351,7 @@ impl App {
             shot_sent: false,
             shot_not_before: Instant::now() + Duration::from_secs(shot_delay),
             shot_done: Arc::new(AtomicBool::new(false)),
+            api_lan,
         }
     }
 
