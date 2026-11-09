@@ -199,6 +199,9 @@ pub enum Icon {
     Stats,
     Speaker(bool),
     Follow,
+    /// Previous and next chapter: a bar and a triangle pointing at it.
+    Previous,
+    Next,
 }
 
 pub fn icon_button(ui: &mut egui::Ui, icon: Icon, on: Option<Color32>) -> egui::Response {
@@ -276,6 +279,17 @@ pub fn draw_icon(ui: &egui::Ui, c: Pos2, icon: Icon, col: Color32) {
             p.add(egui::Shape::convex_polygon(up, Color32::from_rgb(70, 190, 80), Stroke::NONE));
             let dn = vec![c + vec2(0.0, 0.0), c + vec2(6.0, 0.0), c + vec2(3.0, 4.5)];
             p.add(egui::Shape::convex_polygon(dn, ORANGE, Stroke::NONE));
+        }
+        Icon::Previous | Icon::Next => {
+            let s = if matches!(icon, Icon::Next) { 1.0 } else { -1.0 };
+            let mut t = vec![c + vec2(-3.5 * s, -4.5), c + vec2(2.5 * s, 0.0), c + vec2(-3.5 * s, 4.5)];
+            // Mirrored points turn the other way round; keep one winding for the edges.
+            if s < 0.0 {
+                t.reverse();
+            }
+            p.add(egui::Shape::convex_polygon(t, col, Stroke::NONE));
+            let bar = Rect::from_center_size(c + vec2(3.6 * s, 0.0), vec2(1.8, 9.0));
+            p.rect_filled(bar, 0.0, col);
         }
     }
 }

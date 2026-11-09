@@ -307,6 +307,18 @@ impl App {
                 rt.seek_ms.store(0, Ordering::Relaxed);
             }
         }
+        if let Kind::Dvd { .. } = input.kind {
+            let number = self.input_number(project, id);
+            for (icon, function, tip) in [
+                (Icon::Previous, "PreviousItem", "Chapitre précédent"),
+                (Icon::Next, "NextItem", "Chapitre suivant"),
+            ] {
+                let r = named(icon_button(&mut top, icon, None), format!("{tip} {}", input.name));
+                if r.on_hover_text(tip).clicked() {
+                    self.call(function, &Args::new().input(&number));
+                }
+            }
+        }
         let mut bottom =
             ui.new_child(egui::UiBuilder::new().id_salt((id, "bas")).max_rect(row2).layout(layout));
         bottom.spacing_mut().item_spacing.x = 0.0;
@@ -456,6 +468,17 @@ impl App {
                     }
                 }
             }
+            Kind::Dvd { .. } => {
+                let chapters = self.engine.rt(id).map_or(Vec::new(), |r| r.chapters.lock().unwrap().clone());
+                for (n, start) in chapters.iter().enumerate().take(99) {
+                    if ui.button(format!("Chapitre {} ({})", n + 1, clock(*start))).clicked() {
+                        if let Some(rt) = self.engine.rt(id) {
+                            rt.select.store(n as i64, Ordering::Relaxed);
+                        }
+                        ui.close();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -469,11 +492,27 @@ impl App {
         id
     }
 
+    /// A picked folder or image that turns out not to be a DVD says so,
+    /// rather than becoming a photo slideshow or a broken video.
+    fn add_dvd(&mut self, p: &std::path::Path) {
+        match crate::dvd::recognise(p) {
+            Some(disc) => {
+                self.add_input(&crate::dvd::display_name(&disc), Kind::Dvd { path: disc, title: 1 });
+            }
+            None => self.say("Pas de DVD ici : il faut un dossier VIDEO_TS ou une image ISO"),
+        }
+    }
+
     /// Makes the right kind of input from a file.
     pub(super) fn add_file(&mut self, p: &std::path::Path) {
         let name = file_name(p);
         let path = p.to_string_lossy().into_owned();
         let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        // A disc folder or image wins over the photo folder and video guesses below.
+        if crate::dvd::recognise(p).is_some() {
+            self.add_dvd(p);
+            return;
+        }
         match ext.as_str() {
             "png" | "jpg" | "jpeg" | "webp" | "bmp" => {
                 self.add_input(&name, Kind::Image { path });
@@ -563,6 +602,29 @@ impl App {
                 self.add_input("Écran", Kind::Screen);
                 ui.close();
             }
+            ui.menu_button("DVD", |ui| {
+                for drive in crate::dvd::optical_drives() {
+                    if ui.button(format!("Lecteur {}", drive.trim_end_matches('\\'))).clicked() {
+                        self.add_input(
+                            &crate::dvd::display_name(&drive),
+                            Kind::Dvd { path: drive, title: 1 },
+                        );
+                        ui.close();
+                    }
+                }
+                if ui.button("Dossier VIDEO_TS…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        self.add_dvd(&p);
+                    }
+                    ui.close();
+                }
+                if ui.button("Image ISO…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().add_filter("Image de DVD", &["iso"]).pick_file() {
+                        self.add_dvd(&p);
+                    }
+                    ui.close();
+                }
+            });
             ui.separator();
             if ui.button("Image…").clicked() {
                 let picked = rfd::FileDialog::new()

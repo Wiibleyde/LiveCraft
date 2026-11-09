@@ -142,6 +142,7 @@ impl App {
         let rt = self.engine.rt(input.id);
         let (cams, mics) = self.devices.lock().unwrap().clone();
         let id = input.id;
+        let key = input.key_id();
         let mut change_path = None;
         match &mut input.kind {
             Kind::Solid { color } => {
@@ -275,6 +276,72 @@ impl App {
                 path_row(ui, path);
                 ui.checkbox(looped, "Lecture en boucle");
                 if let Some(rt) = &rt {
+                    video_controls(ui, rt, 440.0);
+                }
+            }
+            Kind::Dvd { path, title } => {
+                path_row(ui, path);
+                ui.horizontal(|ui| {
+                    if ui.button("Changer de dossier…").clicked()
+                        && let Some(p) = rfd::FileDialog::new().pick_folder()
+                    {
+                        match crate::dvd::recognise(&p) {
+                            Some(disc) => *path = disc,
+                            None => self.say("Pas de DVD ici : il faut un dossier VIDEO_TS"),
+                        }
+                    }
+                    if ui.button("Changer d'image ISO…").clicked()
+                        && let Some(p) =
+                            rfd::FileDialog::new().add_filter("Image de DVD", &["iso"]).pick_file()
+                    {
+                        *path = p.to_string_lossy().into_owned();
+                    }
+                });
+                let titles = rt.as_ref().map_or(Vec::new(), |r| r.titles.lock().unwrap().clone());
+                ui.horizontal(|ui| {
+                    ui.label("Titre");
+                    if titles.is_empty() {
+                        // Tables unread yet, or an image only ffmpeg can list.
+                        ui.add(egui::DragValue::new(title).range(1..=99));
+                    } else {
+                        let shown = format!("Titre {}", (*title).max(1));
+                        let combo = egui::ComboBox::from_id_salt("dvd-titre").selected_text(shown).show_ui(
+                            ui,
+                            |ui| {
+                                for t in &titles {
+                                    let text = format!(
+                                        "Titre {} : {} chapitre(s), {}",
+                                        t.number,
+                                        t.chapters,
+                                        clock(t.duration_ms)
+                                    );
+                                    ui.selectable_value(title, t.number, text);
+                                }
+                            },
+                        );
+                        named(combo.response, "Titre du DVD");
+                    }
+                });
+                if let Some(rt) = &rt {
+                    let chapters = rt.chapters.lock().unwrap().clone();
+                    let at = rt.item.load(Ordering::Relaxed) as usize;
+                    ui.horizontal(|ui| {
+                        for (label, function) in
+                            [("Chapitre précédent", "PreviousItem"), ("Chapitre suivant", "NextItem")]
+                        {
+                            if ui.button(label).clicked() {
+                                self.call(function, &Args::new().input(&key));
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for (n, start) in chapters.iter().enumerate() {
+                            let r = ui.selectable_label(n == at, format!("{} · {}", n + 1, clock(*start)));
+                            if named(r, format!("Chapitre {}", n + 1)).clicked() {
+                                rt.select.store(n as i64, Ordering::Relaxed);
+                            }
+                        }
+                    });
                     video_controls(ui, rt, 440.0);
                 }
             }
