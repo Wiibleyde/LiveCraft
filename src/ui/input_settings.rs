@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::dsp::EQ_BANDS;
+use crate::plugins::Owner;
 
 const TABS: [&str; 10] = [
     "Général",
@@ -51,7 +52,13 @@ impl App {
                                 5 => tab_position(ui, &mut input),
                                 6 => self.tab_layers(ui, &mut input, project),
                                 7 => tab_triggers(ui, &mut input),
-                                8 => tab_audio(ui, &mut input),
+                                8 => {
+                                    tab_audio(ui, &mut input);
+                                    if input.kind.has_audio() {
+                                        ui.separator();
+                                        self.plugin_chain(ui, Owner::Input(id), &before.audio.plugins);
+                                    }
+                                }
                                 _ => copy_from = tab_copy(ui, &input, project),
                             }
                         });
@@ -78,6 +85,11 @@ impl App {
             let keep = input.kind.same_source(&before.kind);
             self.with(|s| {
                 if let Some(slot) = s.input_mut(id) {
+                    // Plug-ins are edited straight in the project, and their
+                    // state moves on by itself: this window's copy is stale.
+                    let mut before = before.clone();
+                    before.audio.plugins.clone_from(&slot.audio.plugins);
+                    input.audio.plugins.clone_from(&slot.audio.plugins);
                     slot.merge_changes(&before, input);
                 }
             });

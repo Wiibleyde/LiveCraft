@@ -1,6 +1,7 @@
 //! The audio mixer: outputs on the left, one strip per input with sound.
 
 use super::*;
+use crate::plugins::Owner;
 
 const STRIP: f32 = 92.0;
 const BUSES: [&str; 8] = ["M", "A", "B", "C", "D", "E", "F", "G"];
@@ -16,6 +17,11 @@ fn head(ui: &mut egui::Ui, name: &str, color: Color32) {
         egui::FontId::proportional(10.5),
         Color32::WHITE,
     );
+}
+
+/// Lit when the chain holds something, so a treated bus shows it.
+fn fx_button(ui: &mut egui::Ui, used: bool, label: &str) -> bool {
+    named(tiny(ui, "FX", used.then_some(ORANGE)), label).on_hover_text("Plug-ins").clicked()
 }
 
 impl App {
@@ -50,6 +56,7 @@ impl App {
         let mut phones = project.headphones_level;
         let peak = f32::from_bits(self.engine.bus_peaks[0].load(Ordering::Relaxed));
         let mut open_settings = false;
+        let mut open_fx = false;
         ui.allocate_ui_with_layout(vec2(STRIP, height), egui::Layout::top_down(egui::Align::Center), |ui| {
             ui.set_width(STRIP);
             head(ui, "Général", GREEN);
@@ -59,6 +66,7 @@ impl App {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     open_settings |= gear(ui, BTN).on_hover_text("Réglages audio").clicked();
+                    open_fx |= fx_button(ui, !project.master_plugins.is_empty(), "Plug-ins Général");
                 });
                 ui.spacing_mut().slider_width = fader_h;
                 ui.add(egui::Slider::new(&mut level, 0.0..=1.2).vertical().show_value(false));
@@ -78,6 +86,9 @@ impl App {
         });
         if open_settings {
             self.open_settings(5);
+        }
+        if open_fx {
+            self.plugins_for = Some(Owner::Bus(0));
         }
         if level != project.master_level
             || muted != project.master_muted
@@ -102,9 +113,11 @@ impl App {
         let cfg = &project.buses[b];
         let (mut level, mut muted, mut to_master) = (cfg.level, cfg.muted, cfg.send_to_master);
         let peak = f32::from_bits(self.engine.bus_peaks[b + 1].load(Ordering::Relaxed));
+        let name = format!("Bus {}", BUSES[b + 1]);
+        let mut open_fx = false;
         ui.allocate_ui_with_layout(vec2(STRIP, height), egui::Layout::top_down(egui::Align::Center), |ui| {
             ui.set_width(STRIP);
-            head(ui, &format!("Bus {}", BUSES[b + 1]), BLUE);
+            head(ui, &name, BLUE);
             let fader_h = (height - 56.0).max(40.0);
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
@@ -115,7 +128,7 @@ impl App {
             });
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                ui.add_space(12.0);
+                ui.add_space(4.0);
                 if tiny(ui, "M", to_master.then_some(GREEN)).on_hover_text("Envoyer vers Général").clicked()
                 {
                     to_master = !to_master;
@@ -123,8 +136,12 @@ impl App {
                 if icon_button(ui, Icon::Speaker(!muted), muted.then_some(RED)).clicked() {
                     muted = !muted;
                 }
+                open_fx = fx_button(ui, !cfg.plugins.is_empty(), &format!("Plug-ins {name}"));
             });
         });
+        if open_fx {
+            self.plugins_for = Some(Owner::Bus(b as u8 + 1));
+        }
         if level != cfg.level || muted != cfg.muted || to_master != cfg.send_to_master {
             self.with(|s| {
                 let c = &mut s.project.buses[b];

@@ -28,6 +28,7 @@ cargo metadata --format-version 1
 | --- | --- | --- |
 | [FFmpeg](https://ffmpeg.org) | Decoding, capture, encoding, recording, streaming | Started as a separate process. Installed by the user, under its own license. |
 | Microsoft Edge or Google Chrome | Web page inputs | Started as a separate process with no window. |
+| CLAP plug-ins | Sound treatment on inputs and buses | Installed by the user, under their own licenses, and loaded by LiveCraft. The CLAP interface itself is MIT; LiveCraft reaches it through the `clap-sys` crate. |
 
 ## Design references
 

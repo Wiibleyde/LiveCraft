@@ -6,6 +6,7 @@ pub use crate::desk::*;
 use crate::frame::Frame;
 use crate::model::*;
 use crate::output::Encoder;
+use crate::plugins::PluginHost;
 use crate::replay::ReplayState;
 use crate::sources::{self, InputRt};
 use std::collections::HashMap;
@@ -48,6 +49,7 @@ pub struct Engine {
     pub stats: Stats,
     pub bus_peaks: [AtomicU32; 8],
     pub audio_devices: Mutex<Vec<String>>,
+    pub plugins: PluginHost,
     pub recorders: Mutex<Vec<Encoder>>,
     pub streamers: Mutex<Vec<Encoder>>,
     pub multi: Mutex<Vec<(u64, Encoder)>>,
@@ -83,6 +85,7 @@ impl Engine {
             stats: Stats::default(),
             bus_peaks: Default::default(),
             audio_devices: Mutex::new(Vec::new()),
+            plugins: PluginHost::default(),
             recorders: Mutex::new(Vec::new()),
             streamers: Mutex::new(Vec::new()),
             multi: Mutex::new(Vec::new()),
@@ -99,7 +102,7 @@ impl Engine {
         });
         engine.start_all_inputs(false);
         engine.state.lock().unwrap().note_project_on_air();
-        for job in [Self::video_loop, Self::audio_loop, Self::cpu_loop, Self::data_loop] {
+        for job in [Self::video_loop, Self::audio_loop, Self::cpu_loop, Self::data_loop, Self::plugin_loop] {
             let e = engine.clone();
             thread::spawn(move || job(e));
         }
