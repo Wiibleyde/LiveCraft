@@ -51,6 +51,10 @@ The HTTP and TCP interfaces use the published function names, so existing contro
 microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP, TS), web pages, solid
 colours, test cards, clocks, and titles with presets, tickers, countdowns and a simple designer.
 
+**Virtual sets.** Keyed presenters stand in a decor, behind a desk, and a virtual camera glides
+between presets from a card button, a named function or remote control. Two decors are drawn by
+LiveCraft itself; any image or video can replace them.
+
 **Switching.** Cut, fade, zoom, wipes, slides, the cube family, merge and stingers, with four
 transition slots, a T-bar, fade to black and Quick Play.
 
@@ -82,7 +86,7 @@ cargo run --release
 Other ways to start it:
 
 ```sh
-livecraft --project show.vmix             # open a project
+livecraft --project show.vmix             # open a project, .vmix or .livecraft
 livecraft --import-report show.vmix       # say what a project keeps, without opening it
 livecraft --selftest some-folder          # real end-to-end run: plays, records, streams, replays
 livecraft --screenshot out.png            # start, save a picture of the window, quit
@@ -98,7 +102,7 @@ livecraft --screenshot out.png            # start, save a picture of the window,
 
 - **Windows only.** The code uses Windows APIs for capture, screens and secrets.
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
-- **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs, no virtual sets.
+- **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
 
 The full list is in the [roadmap](ROADMAP.md).
