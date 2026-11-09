@@ -363,6 +363,49 @@ fn the_old_name_still_opens_old_files() {
     end(h);
 }
 
+/// What a double-clicked .livecraft file does: the installer's file type
+/// starts LiveCraft with `--project <file>`.
+#[test]
+fn a_project_opened_from_explorer_saves_back_to_its_own_file() {
+    let dir = std::env::temp_dir().join(format!("livecraft-start-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("emission.livecraft");
+    let mut on_disk = small_project();
+    on_disk.inputs.iter_mut().find(|i| i.id == 1).unwrap().name = "Caméra du public".into();
+    std::fs::write(&file, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+    let start = |path: std::path::PathBuf| {
+        let path = path.to_string_lossy().into_owned();
+        let mut h = Harness::builder()
+            .with_size(vec2(2200.0, 1100.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::start(cc, saved(Project::blank()), None, "", Some(path), false));
+        h.run_steps(4);
+        h
+    };
+
+    let mut h = start(file.clone());
+    assert!(project(&h).inputs.iter().any(|i| i.name == "Caméra du public"), "the file, not the session");
+    h.get_by_label("emission");
+    click(&mut h, "Entrée CAM 2");
+    // The output bar's record button has the same name; this is the top bar's.
+    h.get_all_by_label("Enregistrer")
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .unwrap()
+        .click();
+    h.run_steps(3);
+    assert!(!h.state().engine.is_recording());
+    let back: Project = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(back.preview, Some(2), "saved into the file it came from, without asking where");
+    end(h);
+
+    let h = start(dir.join("absente.livecraft"));
+    assert!(project(&h).inputs.is_empty(), "the session's desk stays");
+    let said = h.state().message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said.starts_with("Projet illisible"), "{said}");
+    end(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_dragged_card_lands_just_before_its_target() {
     let mut h = desk(small_project());

@@ -224,20 +224,52 @@ impl App {
         apply_style(&cc.egui_ctx);
         // The check picture opens the worked example, as the reference picture
         // shows a project already open. A normal first start is an empty desk.
-        let mut imported = None;
-        let mut import_report = None;
-        let opened = project_file.as_deref().and_then(|f| crate::vmix_import::load(f).ok());
-        let saved = if let Some((p, r)) = opened {
-            imported = Some(r.name.clone());
-            import_report = Some(r);
-            Saved::fresh(p)
-        } else if shot_path.is_some() {
+        let saved = if shot_path.is_some() {
             Saved::fresh(if open == "vide" { Project::blank() } else { Project::sample() })
         } else {
             Saved::load()
         };
         let remote = shot_path.is_none();
-        Self::assemble(cc, saved, shot_path, open, imported, import_report, remote)
+        Self::start(cc, saved, shot_path, open, project_file, remote)
+    }
+
+    /// A project named on the command line, as a double-clicked file is,
+    /// replaces the session's. A .vmix comes in as an unnamed copy; a saved
+    /// project comes in as itself, so that saving goes back to that file.
+    /// The session keeps its other settings either way.
+    fn start(
+        cc: &eframe::CreationContext<'_>,
+        mut saved: Saved,
+        shot_path: Option<String>,
+        open: &str,
+        project_file: Option<String>,
+        remote: bool,
+    ) -> Self {
+        let (mut imported, mut import_report, mut current_file, mut failed) = (None, None, None, None);
+        if let Some(path) = project_file {
+            let read = if path.to_lowercase().ends_with(".vmix") {
+                crate::vmix_import::load(&path).map(|(p, r)| {
+                    imported = Some(r.name.clone());
+                    import_report = Some(r);
+                    p
+                })
+            } else {
+                bars::read_project(&path).inspect(|_| current_file = Some(path.clone()))
+            };
+            match read {
+                Ok(p) => {
+                    saved.project = p;
+                    saved.last_file = Some(path);
+                }
+                Err(e) => failed = Some(format!("Projet illisible : {e}")),
+            }
+        }
+        let mut app = Self::assemble(cc, saved, shot_path, open, imported, import_report, remote);
+        app.current_file = current_file;
+        if let Some(e) = failed {
+            app.say(e);
+        }
+        app
     }
 
     #[allow(clippy::too_many_arguments)]
