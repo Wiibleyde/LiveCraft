@@ -2,8 +2,11 @@
 //! decoded by real ffmpeg. Each step states what a person would expect.
 
 use crate::engine::Engine;
+use crate::frame::Frame;
 use crate::functions::Args;
 use crate::model::*;
+use crate::output::{Encoder, Spec, Target};
+use crate::replay::{Camera, ReplayState};
 use crate::sources::{InputRt, ffmpeg};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -238,6 +241,127 @@ impl Desk {
     }
 }
 
+/// A tick's number in its colour: six levels per channel survive encoding.
+fn numbered(n: u32, w: usize, h: usize) -> Arc<Frame> {
+    let level = |k: u32| (20 + 40 * (k % 6)) as u8;
+    Arc::new(Frame::solid(w, h, [level(n), level(n / 6), level(n / 36)]))
+}
+
+fn number_of(f: &Frame) -> u32 {
+    let at = (f.h / 2 * f.w + f.w / 2) * 4;
+    let level = |v: u8| ((v as f32 - 20.0) / 40.0).round().clamp(0.0, 5.0) as u32;
+    level(f.data[at]) + 6 * level(f.data[at + 1]) + 36 * level(f.data[at + 2])
+}
+
+/// Plays a marked moment to its end and returns the tick shown by each
+/// picture, in order.
+fn watch(player: &InputRt, r: &ReplayState, index: usize) -> Result<Vec<u32>, String> {
+    let play = r.clip_of(index).ok_or("moment de ralenti absent")?;
+    let (before, mut seq) = (done(player), player.seq());
+    let mut seen = Vec::new();
+    *player.replay.lock().unwrap() = Some(play);
+    player.playing.store(true, Ordering::Relaxed);
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let finished = done(player) != before;
+        if player.seq() != seq {
+            seq = player.seq();
+            if let Some(f) = player.latest() {
+                seen.push(number_of(&f));
+            }
+        }
+        if finished {
+            return Ok(seen);
+        }
+        if Instant::now() > end {
+            return Err("le ralenti ne finit pas".into());
+        }
+        sleep(Duration::from_millis(3));
+    }
+}
+
+/// Pictures lost while recording must not move a replay: a moment plays from
+/// the picture on screen at its in mark to the one on screen at its out mark,
+/// and a loss holds the picture before it for as long as the show did.
+fn replay_marks(dir: &str) -> Result<(), String> {
+    let (w, h, fps) = (320, 180, 30);
+    let path = format!("{dir}/ralenti-pertes.ts");
+    let target = Target::Growing(path.clone());
+    let (label, codec, audio) = ("Ralenti".to_string(), "libx264".to_string(), AudioPick::MASTER);
+    let encoder =
+        Encoder::start(Spec { label, target, codec, w, h, fps, kbps: 4000, audio_kbps: 128, audio })?;
+    let mut r = ReplayState::default();
+    r.speed = 0.5;
+    r.begin(vec![Camera { input: 0, name: "Pertes".into(), path, encoder }]);
+    let player = crate::sources::start(&Input::new(1, "Ralenti", Kind::Replay), w, h, fps);
+    let steps = (|| {
+        let cam = &r.cams[0].encoder;
+        let beat = Duration::from_secs_f64(1.0 / fps as f64);
+        let silence = vec![0i16; 2 * 48_000 / fps as usize];
+        // ffmpeg keeps nothing sent before it is ready.
+        let ready = Instant::now() + Duration::from_secs(15);
+        while cam.pictures().lock().unwrap().first().is_none() {
+            if Instant::now() > ready {
+                return Err("le ralenti n'enregistre rien".to_string());
+            }
+            cam.push_video(numbered(0, w, h), Instant::now());
+            cam.push_audio(silence.clone());
+            sleep(beat);
+        }
+        // Ticks 30 to 49 lose their pictures, tick 50 comes 0.3 s late and
+        // repeats its picture for the ticks it missed, as the mixer does.
+        let mut taken = vec![Instant::now(); 141];
+        let mut next = Instant::now();
+        for n in 1..=140u32 {
+            next += if n == 50 { beat + Duration::from_millis(300) } else { beat };
+            sleep(next.saturating_duration_since(Instant::now()));
+            let tick = Instant::now();
+            taken[n as usize] = tick;
+            let copies = match n {
+                30..50 => 0,
+                50 => 10,
+                _ => 1,
+            };
+            for _ in 0..copies {
+                cam.push_video(numbered(n, w, h), tick);
+            }
+            cam.push_audio(silence.clone());
+        }
+        let between = |n: usize| taken[n] + (taken[n + 1] - taken[n]) / 2;
+        r.mark(between(70), between(100));
+        r.mark(between(20), between(60));
+        until(5.0, "lecteur de ralenti prêt", || player.seq() >= 1)?;
+
+        let quiet = watch(&player, &r, 0)?;
+        if quiet.first() != Some(&70) || quiet.last() != Some(&100) {
+            return Err(format!(
+                "ralenti marqué de 70 à 100, montre {:?} à {:?}",
+                quiet.first(),
+                quiet.last()
+            ));
+        }
+        let lossy = watch(&player, &r, 1)?;
+        if lossy.first() != Some(&20) || lossy.last() != Some(&60) {
+            return Err(format!(
+                "ralenti marqué de 20 à 60, montre {:?} à {:?}",
+                lossy.first(),
+                lossy.last()
+            ));
+        }
+        // 20 lost ticks and 0.3 s late, at half speed: about 58 pictures.
+        let held = lossy.iter().filter(|n| **n == 29).count();
+        if held < 30 {
+            return Err(format!("les images perdues ne durent que {held} images au ralenti"));
+        }
+        Ok(())
+    })();
+    player.shutdown();
+    for c in std::mem::take(&mut r.cams) {
+        c.encoder.finish(Duration::from_secs(5));
+    }
+    steps
+}
+
 pub fn check(dir: &str) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let long = clip(dir, "long", 4)?;
@@ -254,10 +378,12 @@ pub fn check(dir: &str) -> Result<String, String> {
         desk.audio(dir)?;
         desk.countdown()?;
         desk.overlay()?;
-        desk.web_pages()
+        desk.web_pages()?;
+        replay_marks(dir)
     })();
     desk.engine.shutdown();
     steps.map(|()| {
-        "marques, reprise, boucle, liste, son, compte à rebours, incrustation, pages web".to_string()
+        "marques, reprise, boucle, liste, son, compte à rebours, incrustation, pages web, ralenti malgré les pertes"
+            .to_string()
     })
 }
