@@ -28,6 +28,42 @@ pub struct Stats {
     pub struggling: AtomicBool,
     pub cpu_self: AtomicU32,
     pub cpu_total: AtomicU32,
+    pub tick_times: TickTimes,
+}
+
+pub const TICK_STEP_US: u64 = 250;
+pub const TICK_BUCKETS: usize = 512;
+
+/// How long each tick of the video loop took, in 250 µs steps up to 128 ms.
+/// One counter per step costs an addition a tick, and two readings give the
+/// percentiles of any stretch of a long show.
+pub struct TickTimes {
+    buckets: [AtomicU64; TICK_BUCKETS],
+    max_us: AtomicU64,
+}
+
+impl Default for TickTimes {
+    fn default() -> Self {
+        Self { buckets: std::array::from_fn(|_| AtomicU64::new(0)), max_us: AtomicU64::new(0) }
+    }
+}
+
+impl TickTimes {
+    pub fn record(&self, took: Duration) {
+        let us = took.as_micros() as u64;
+        let step = ((us / TICK_STEP_US) as usize).min(TICK_BUCKETS - 1);
+        self.buckets[step].fetch_add(1, Ordering::Relaxed);
+        self.max_us.fetch_max(us, Ordering::Relaxed);
+    }
+
+    pub fn counts(&self) -> Vec<u64> {
+        self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect()
+    }
+
+    /// The longest tick since the previous call.
+    pub fn take_max_us(&self) -> u64 {
+        self.max_us.swap(0, Ordering::Relaxed)
+    }
 }
 
 /// A window showing something other than the plain output.
