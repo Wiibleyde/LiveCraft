@@ -47,9 +47,10 @@ The HTTP and TCP interfaces use the published function names, so existing contro
 
 ## Features
 
-**Inputs.** Video files, image sequences, photo folders, lists, images, audio files, cameras and
-microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP, TS), web pages, solid
-colours, test cards, clocks, and titles with presets, tickers, countdowns and a simple designer.
+**Inputs.** Video files, image sequences, photo folders, lists, images, audio files, DVDs (a drive, a
+`VIDEO_TS` folder or an `.iso`, with titles and chapters), cameras and microphones, screen capture,
+system audio, network streams (SRT, RTMP, RTSP, TS), web pages, solid colours, test cards, clocks, and
+titles with presets, tickers, countdowns and a simple designer.
 
 **Switching.** Cut, fade, zoom, wipes, slides, the cube family, merge and stingers, with four
 transition slots, a T-bar, fade to black and Quick Play.
@@ -98,7 +99,9 @@ livecraft --screenshot out.png            # start, save a picture of the window,
 
 - **Windows only.** The code uses Windows APIs for capture, screens and secrets.
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
-- **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs, no virtual sets.
+- **No NDI or OMT.** Also no video calls, no PowerPoint inputs, no virtual sets.
+- **DVDs need FFmpeg's `dvdvideo` demuxer**, as in the gyan.dev full builds. Copy-protected discs only
+  open if that FFmpeg can load libdvdcss.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
 
 The full list is in the [roadmap](ROADMAP.md).
