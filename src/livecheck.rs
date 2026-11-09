@@ -111,12 +111,21 @@ fn check(dir: &str, sabotage: Sabotage) -> Result<String, String> {
         format!("srt://127.0.0.1:{}?streamid=publish:livecheck-srt&pkt_size=1316", server.srt);
     let engine = Engine::start(project);
     let outcome = on_air(&engine, &server, &camera, &mic, dir, sabotage);
+    // How the desk kept up explains a stream short of pictures.
+    let dropped: u64 =
+        engine.streamers.lock().unwrap().iter().map(|e| e.dropped.load(Ordering::Relaxed)).sum::<u64>()
+            + engine.srt.lock().unwrap().iter().map(|(_, e)| e.dropped.load(Ordering::Relaxed)).sum::<u64>();
+    let pace = format!(
+        "cadence {}/s, rendu {} µs, images perdues {dropped}",
+        engine.stats.ticks_per_sec.load(Ordering::Relaxed),
+        engine.stats.mix_us.load(Ordering::Relaxed)
+    );
     engine.shutdown();
-    let pulls = outcome?;
     let mut lines = Vec::new();
-    for (name, pull) in pulls {
-        lines.push(format!("{name} {}", pull.map_err(|e| format!("{name} : {e}"))?));
+    for (name, pull) in outcome.map_err(|e| format!("{e} ({pace})"))? {
+        lines.push(format!("{name} {}", pull.map_err(|e| format!("{name} : {e} ({pace})"))?));
     }
+    lines.push(pace);
     Ok(lines.join(" | "))
 }
 
@@ -319,7 +328,7 @@ fn read_pattern(gray: &[u8], w: usize, h: usize) -> Option<u32> {
 fn judge_pictures(frames: &[u8], w: usize, h: usize) -> Result<String, String> {
     let counts: Vec<Option<u32>> = frames.chunks_exact(w * h).map(|f| read_pattern(f, w, h)).collect();
     let total = counts.len();
-    let wanted = (PULL_SECONDS as f32 * CAM_FPS * 0.6) as usize;
+    let wanted = PULL_SECONDS as usize * MIN_CHANGES_PER_SECOND;
     if total < wanted {
         return Err(format!("{total} images reçues en {PULL_SECONDS} s, au moins {wanted} attendues"));
     }
@@ -750,7 +759,8 @@ mod tests {
 
     #[test]
     fn too_few_pictures_fail() {
-        assert!(judge_pictures(&frames(0..20), PULL_W, PULL_H).is_err());
+        let e = judge_pictures(&frames(0..12), PULL_W, PULL_H).unwrap_err();
+        assert!(e.starts_with("12 images reçues"), "{e}");
     }
 
     fn sine(hz: f32, level: f32, seconds: f32) -> Vec<f32> {
