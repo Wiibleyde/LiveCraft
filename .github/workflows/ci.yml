@@ -25,7 +25,7 @@ jobs:
         # sealing secrets goes through the Secret Service as on a desktop.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config fonts-dejavu-core dbus gnome-keyring
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config fonts-dejavu-core dbus gnome-keyring libsecret-tools
       - name: Install Rust
         run: |
           rustup update stable
@@ -44,4 +44,8 @@ jobs:
         run: cargo test
       - name: Test, with an unlocked keyring
         if: runner.os == 'Linux'
-        run: dbus-run-session -- sh -c 'printf ci | gnome-keyring-daemon --unlock --components=secrets > /dev/null && cargo test'
+        # The last command fails if the sealing key went anywhere but the keyring.
+        run: >-
+          dbus-run-session -- sh -c 'printf ci | gnome-keyring-daemon --unlock --components=secrets > /dev/null
+          && cargo test
+          && secret-tool search application livecraft purpose session-key 2> /dev/null | grep -q "^label = LiveCraft"'
