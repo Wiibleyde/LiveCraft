@@ -288,6 +288,20 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
     end(h);
 }
 
+/// An input added from the menu used to have its settings closed again at
+/// once, as the window read the project from before the click.
+#[test]
+fn a_web_page_added_from_the_menu_opens_its_settings() {
+    let mut h = desk(small_project());
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Page web");
+    let added = project(&h).inputs.iter().find(|i| matches!(i.kind, Kind::Browser { .. })).map(|i| i.id);
+    assert!(added.is_some());
+    assert_eq!(h.state().editing, added);
+    assert!(h.query_by_label("Adresse de la page").is_some(), "its address can be typed at once");
+    end(h);
+}
+
 #[test]
 fn every_settings_tab_and_tool_window_opens() {
     let mut h = desk(small_project());

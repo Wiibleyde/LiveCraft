@@ -20,7 +20,11 @@ impl App {
     pub(super) fn input_settings_window(&mut self, ctx: &egui::Context, project: &Project) {
         let Some(id) = self.editing else { return };
         let Some(before) = project.inputs.iter().find(|i| i.id == id).cloned() else {
-            self.editing = None;
+            // Added from a menu during this frame, after `project` was read:
+            // its settings show from the next one.
+            if !self.with(|s| s.input(id).is_some()) {
+                self.editing = None;
+            }
             return;
         };
         let mut input = before.clone();
