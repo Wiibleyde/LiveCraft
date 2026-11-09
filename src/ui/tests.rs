@@ -443,6 +443,42 @@ fn a_moving_setting_restarts_its_source_once_it_settles() {
 }
 
 #[test]
+fn turning_off_the_card_moves_running_streams_to_software_only() {
+    // A listening stream waits for a sender, so its decoder stays as started.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let url = format!("tcp://127.0.0.1:{port}?listen=1");
+    let mut p = small_project();
+    p.inputs.push(Input::new(40, "Flux", Kind::Network { url, buffer_ms: 0 }));
+    let mut h = desk(p);
+    let engine = h.state().engine.clone();
+    let on_card = |e: &Engine| e.rt(40).unwrap().hardware.load(Ordering::Relaxed);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !on_card(&engine) {
+        assert!(Instant::now() < deadline, "a stream starts on the card");
+        wait(&mut h, 20);
+    }
+    let clock = engine.rt(14).unwrap();
+    h.state_mut().settings_open = true;
+    h.state_mut().settings_tab = 1;
+    h.run_steps(3);
+
+    click(&mut h, "Décodage par la carte graphique");
+    assert!(!project(&h).hardware_decoding, "saved with the project");
+    wait(&mut h, 300);
+    assert!(!on_card(&engine), "the running stream must restart in software");
+    assert!(Arc::ptr_eq(&clock, &engine.rt(14).unwrap()), "a clock has nothing to decode and must not blink");
+
+    click(&mut h, "Décodage par la carte graphique");
+    assert!(project(&h).hardware_decoding);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !on_card(&engine) {
+        assert!(Instant::now() < deadline, "back on the card");
+        wait(&mut h, 20);
+    }
+    end(h);
+}
+
+#[test]
 fn loading_a_project_leaves_nothing_of_the_last_one() {
     let mut h = desk(small_project());
     {

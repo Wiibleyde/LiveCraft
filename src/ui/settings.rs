@@ -85,6 +85,9 @@ impl App {
                 d.scripts = p.scripts;
                 d.data_sources = p.data_sources;
             });
+            if p.hardware_decoding != project.hardware_decoding {
+                self.engine.set_hardware_decoding(p.hardware_decoding);
+            }
         }
     }
 
@@ -336,6 +339,11 @@ fn tab_options(ui: &mut egui::Ui, p: &mut Project) {
     });
     ui.separator();
     ui.checkbox(&mut p.show_clocks, "Horloges de production");
+    ui.separator();
+    ui.checkbox(&mut p.hardware_decoding, "Décodage par la carte graphique").on_hover_text(
+        "Pour les vidéos plus lourdes que du 1080p à 60 i/s et les flux réseau. \
+         En cas d'échec, le décodage repasse tout seul sur le processeur.",
+    );
 }
 
 fn tab_shortcuts(ui: &mut egui::Ui, p: &mut Project) {
