@@ -28,10 +28,6 @@ pub enum Target {
     Growing(String),
 }
 
-/// ffmpeg's AAC encoder starts the sound 1024 samples early, and a file's time
-/// starts with its earliest stream, so the first picture sits this far in.
-pub const PICTURE_LEAD_S: f64 = 1024.0 / 48000.0;
-
 pub struct Spec {
     pub label: String,
     pub target: Target,

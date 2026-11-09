@@ -74,7 +74,7 @@ pub struct ReplayPlay {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplayClip {
     pub file: String,
-    /// Where reading starts and stops, in seconds of the file.
+    /// Where reading starts and stops, in seconds from the file's first picture.
     pub from_s: f64,
     pub to_s: f64,
     /// When each picture read was taken, in seconds from the start of the

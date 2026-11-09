@@ -9,7 +9,7 @@
 
 use crate::engine::Engine;
 use crate::model::{AudioPick, Input, Kind};
-use crate::output::{Encoder, PICTURE_LEAD_S, Spec, Target};
+use crate::output::{Encoder, Spec, Target};
 use crate::sources::{ReplayClip, ReplayPlay};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -102,9 +102,9 @@ impl FrameLog {
         self.breaks.get(k).map_or(n, |next| n.min(next.0 - 1))
     }
 
-    /// Where picture `n` starts in the file, in seconds.
+    /// Where picture `n` is in the file, in seconds from its first picture.
     fn position_s(&self, n: u64) -> f64 {
-        n as f64 * self.period.as_secs_f64() + PICTURE_LEAD_S
+        n as f64 * self.period.as_secs_f64()
     }
 }
 
@@ -379,10 +379,10 @@ mod tests {
         r
     }
 
-    /// The pictures ffmpeg reads for a clip: picture n of a file sits at n
-    /// frames past the lead, and reading keeps those inside the bounds.
+    /// The pictures read for a clip: picture n of a file is n frames after
+    /// its first, and reading keeps those inside the bounds.
     fn pictures_read(clip: &ReplayClip) -> (u64, u64) {
-        let picture = |s: f64| ((s - PICTURE_LEAD_S) * FPS as f64).ceil() as u64;
+        let picture = |s: f64| (s * FPS as f64).ceil() as u64;
         (picture(clip.from_s), picture(clip.to_s) - 1)
     }
 
