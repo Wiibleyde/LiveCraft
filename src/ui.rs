@@ -20,7 +20,6 @@ use crate::functions::Args;
 use crate::model::*;
 use crate::output;
 use crate::secret;
-use crate::sources;
 use crate::widgets::*;
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, pos2, vec2};
 use serde::{Deserialize, Serialize};
@@ -49,20 +48,17 @@ struct Saved {
     remote_password: String,
 }
 
-fn user_dir(sub: &str) -> PathBuf {
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(sub).join("LiveCraft")
+fn user_dir(base: PathBuf) -> PathBuf {
+    base.join("LiveCraft")
 }
 
 fn saved_path() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("LiveCraft").join("session.json")
+    crate::platform::config_dir().join("LiveCraft").join("session.json")
 }
 
 /// Where the session lived when the program was called Regie.
 fn older_saved_path() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("Regie").join("session.json")
+    crate::platform::config_dir().join("Regie").join("session.json")
 }
 
 /// A new name must not cost anyone their desk: the old session is read until
@@ -101,7 +97,7 @@ impl Saved {
     fn fresh(project: Project) -> Self {
         Self {
             project,
-            record_dir: user_dir("Videos").to_string_lossy().into_owned(),
+            record_dir: user_dir(crate::platform::videos_dir()).to_string_lossy().into_owned(),
             last_file: None,
             remote_lan: false,
             remote_password: String::new(),
@@ -262,7 +258,7 @@ impl App {
         let encoders = Arc::new(Mutex::new(vec!["libx264".to_string()]));
         let (d, e) = (devices.clone(), encoders.clone());
         std::thread::spawn(move || {
-            *d.lock().unwrap() = sources::list_devices();
+            *d.lock().unwrap() = crate::platform::list_devices();
             *e.lock().unwrap() = output::list_encoders();
         });
 
@@ -322,7 +318,7 @@ impl App {
             windows_on: [false; ROUTES],
             external_route: Route::Output,
             want_fullscreen: [true, true, false],
-            screens: tools::list_screens(),
+            screens: crate::platform::list_screens(),
             confirm_new: false,
             confirm_open: None,
             pending_restart: None,
@@ -390,9 +386,9 @@ impl App {
             return;
         }
         self.devices_at = Instant::now();
-        self.screens = tools::list_screens();
+        self.screens = crate::platform::list_screens();
         let devices = self.devices.clone();
-        std::thread::spawn(move || *devices.lock().unwrap() = sources::list_devices());
+        std::thread::spawn(move || *devices.lock().unwrap() = crate::platform::list_devices());
     }
 
     fn sync_textures(&mut self, ctx: &egui::Context) {

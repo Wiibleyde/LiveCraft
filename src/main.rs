@@ -16,6 +16,7 @@ mod model;
 mod model_tests;
 mod output;
 mod outputs;
+mod platform;
 mod playback;
 mod playtest;
 mod replay;

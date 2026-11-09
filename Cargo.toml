@@ -21,7 +21,21 @@ serde_json = "1.0.154"
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 ttf-parser = "0.25.1"
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+getrandom = "0.3.4"
+libc = "0.2.191"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "5.2.0", features = ["rt-async-io-crypto-rust"] }
+x11rb = { version = "0.13.2", features = ["randr"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7.0", default-features = false }
 
 # Pixel loops are far too slow unoptimised, even while developing.
 [profile.dev]

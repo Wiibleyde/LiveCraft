@@ -5,7 +5,8 @@
 
 use crate::frame::Frame;
 use crate::model::AudioPick;
-use crate::sources::{end_process_tree, ffmpeg};
+use crate::platform::end_process_tree;
+use crate::sources::ffmpeg;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};

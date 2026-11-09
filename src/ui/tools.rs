@@ -7,29 +7,6 @@ use crate::extras::{Ptz, ptz_send};
 use crate::replay;
 use crate::titles::{Stroke as Mark, StrokeShape};
 
-/// Display rectangles, primary first: left, top, width, height.
-pub(super) fn list_screens() -> Vec<(i32, i32, i32, i32)> {
-    use windows_sys::Win32::Foundation::{LPARAM, RECT};
-    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
-    unsafe extern "system" fn add(_: HMONITOR, _: HDC, r: *mut RECT, data: LPARAM) -> i32 {
-        // SAFETY: Windows hands back the list pointer given below, and a valid rectangle.
-        unsafe {
-            let list = &mut *(data as *mut Vec<(i32, i32, i32, i32)>);
-            let r = &*r;
-            list.push((r.left, r.top, r.right - r.left, r.bottom - r.top));
-        }
-        1
-    }
-    let mut list: Vec<(i32, i32, i32, i32)> = Vec::new();
-    // SAFETY: the callback only runs during this call, while `list` is alive.
-    unsafe {
-        EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(add), &mut list as *mut _ as LPARAM);
-    }
-    // The primary display sits at the origin; the rest keep reading order.
-    list.sort_by_key(|&(x, y, _, _)| ((x, y) != (0, 0), y, x));
-    list
-}
-
 impl App {
     pub(super) fn clocks_window(&mut self, ctx: &egui::Context, project: &Project) {
         if !self.clocks_open {

@@ -14,17 +14,6 @@ fn default_font() -> &'static FontArc {
     })
 }
 
-fn font_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(w) = std::env::var("WINDIR") {
-        dirs.push(PathBuf::from(w).join("Fonts"));
-    }
-    if let Ok(l) = std::env::var("LOCALAPPDATA") {
-        dirs.push(PathBuf::from(l).join("Microsoft").join("Windows").join("Fonts"));
-    }
-    dirs
-}
-
 struct Installed {
     families: Vec<String>,
     bold: bool,
@@ -57,17 +46,24 @@ fn installed() -> &'static [Installed] {
     static LIST: OnceLock<Vec<Installed>> = OnceLock::new();
     LIST.get_or_init(|| {
         let mut list = Vec::new();
-        for dir in font_dirs() {
-            let Ok(entries) = std::fs::read_dir(dir) else { continue };
-            for path in entries.flatten().map(|e| e.path()) {
-                let ext = path.extension().map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
-                if matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
-                    read_font_file(&path, &mut list);
-                }
-            }
+        for dir in crate::platform::font_dirs() {
+            read_font_dir(&dir, 0, &mut list);
         }
         list
     })
+}
+
+/// Linux sorts fonts into folders by maker, several levels deep.
+fn read_font_dir(dir: &std::path::Path, depth: u8, list: &mut Vec<Installed>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for path in entries.flatten().map(|e| e.path()) {
+        let ext = path.extension().map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
+        if matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
+            read_font_file(&path, list);
+        } else if depth < 4 && path.is_dir() {
+            read_font_dir(&path, depth + 1, list);
+        }
+    }
 }
 
 /// The right weight of a family, never an italic if an upright one exists.
@@ -179,10 +175,17 @@ mod tests {
 
     #[test]
     fn fonts_are_found_by_their_real_name() {
-        // Every Windows has these; the file names do not spell the family.
-        let plain = find_font("Segoe UI", false).expect("Segoe UI");
-        let bold = find_font("segoe ui", true).expect("Segoe UI gras");
-        assert_ne!(plain.0, bold.0, "bold is its own file");
+        // Every system has its own; the file names do not spell the family.
+        let family = if cfg!(windows) {
+            "Segoe UI"
+        } else if cfg!(target_os = "macos") {
+            "Helvetica"
+        } else {
+            "DejaVu Sans"
+        };
+        let plain = find_font(family, false).expect(family);
+        let bold = find_font(&family.to_uppercase(), true).expect("gras");
+        assert_ne!(plain, bold, "bold is its own face");
         assert!(find_font("Police Qui N Existe Pas", false).is_none());
     }
 

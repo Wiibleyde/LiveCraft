@@ -1,30 +1,11 @@
-//! Stream keys and passwords in the session file, sealed with the Windows
-//! account: another account, or a copy of the file, cannot read them.
-
-use windows_sys::Win32::Foundation::LocalFree;
-use windows_sys::Win32::Security::Cryptography::{
-    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
-};
+//! Stream keys and passwords in the session file, sealed with the account:
+//! another account, or a copy of the file, cannot read them. How depends on
+//! the system, see `platform`.
 
 const MARK: &str = "sealed:";
 
 pub fn is_sealed(text: &str) -> bool {
     text.starts_with(MARK)
-}
-
-fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
-    CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 }
-}
-
-/// Copies out what Windows allocated, then gives it back.
-fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
-    // SAFETY: on success Windows filled `out` with a buffer of that length,
-    // which is read once here and released with the matching call.
-    unsafe {
-        let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
-        LocalFree(out.pbData as *mut _);
-        bytes
-    }
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -49,25 +30,10 @@ pub fn seal(text: &str) -> String {
     if text.is_empty() || is_sealed(text) {
         return text.to_string();
     }
-    let input = blob(text.as_bytes());
-    let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
-    // SAFETY: `input` points at `text`, alive for the call; the optional
-    // arguments are allowed to be null.
-    let done = unsafe {
-        CryptProtectData(
-            &input,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut out,
-        )
-    };
-    if done == 0 {
-        return text.to_string();
+    match crate::platform::seal(text.as_bytes()) {
+        Some(sealed) => format!("{MARK}{}", base64(&sealed)),
+        None => text.to_string(),
     }
-    format!("{MARK}{}", base64(&take(out)))
 }
 
 /// Text that was never sealed comes back as it is. Text sealed by another
@@ -75,25 +41,8 @@ pub fn seal(text: &str) -> String {
 pub fn open(text: &str) -> String {
     let Some(coded) = text.strip_prefix(MARK) else { return text.to_string() };
     let bytes = crate::api::base64_decode(coded);
-    let input = blob(&bytes);
-    let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
-    // SAFETY: `input` points at `bytes`, alive for the call; the optional
-    // arguments are allowed to be null.
-    let done = unsafe {
-        CryptUnprotectData(
-            &input,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut out,
-        )
-    };
-    if done == 0 {
-        return String::new();
-    }
-    String::from_utf8_lossy(&take(out)).into_owned()
+    crate::platform::open_sealed(&bytes)
+        .map_or_else(String::new, |plain| String::from_utf8_lossy(&plain).into_owned())
 }
 
 #[cfg(test)]

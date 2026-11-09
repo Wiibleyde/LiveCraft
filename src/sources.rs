@@ -191,7 +191,7 @@ impl InputRt {
     pub(crate) fn kill_children(&self) {
         for mut c in self.children.lock().unwrap().drain(..) {
             thread::spawn(move || {
-                end_process_tree(&mut c);
+                crate::platform::end_process_tree(&mut c);
                 let _ = c.wait();
             });
         }
@@ -205,57 +205,10 @@ pub struct Resume {
     pub item: u64,
 }
 
-/// A child can have children of its own: ffmpeg is often started through a
-/// launcher, and a browser is dozens of processes. Stopping only the first
-/// would leave the real work running.
-pub fn end_process_tree(child: &mut Child) {
-    let mut kill = Command::new("taskkill");
-    kill.args(["/T", "/F", "/PID", &child.id().to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        kill.creation_flags(0x0800_0000);
-    }
-    let _ = kill.status();
-    let _ = child.kill();
-}
-
-/// Everything started from now on ends with this program, however it stops,
-/// so nothing is left running in the background after a crash.
-pub fn tie_children_to_this_process() {
-    use windows_sys::Win32::System::JobObjects::*;
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    // SAFETY: the job handle is checked, the information block is sized for the
-    // call, and the handle stays open on purpose until this process ends.
-    ONCE.call_once(|| unsafe {
-        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job.is_null() {
-            return;
-        }
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            &info as *const _ as *const _,
-            std::mem::size_of_val(&info) as u32,
-        );
-        AssignProcessToJobObject(job, GetCurrentProcess());
-    });
-}
-
 pub fn ffmpeg() -> Command {
     let mut c = Command::new("ffmpeg");
     c.args(["-hide_banner", "-nostats"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+    crate::platform::prepare_child(&mut c);
     c
 }
 
@@ -347,17 +300,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             let enabled: Vec<ListItem> = items.into_iter().filter(|i| i.enabled).collect();
             playback::run_list(&rt, enabled, auto_next, looped, shuffle, w, h, fps);
         }
-        Kind::Camera { device, .. } => {
-            let args = vec![
-                "-f".into(),
-                "dshow".into(),
-                "-rtbufsize".into(),
-                "128M".into(),
-                "-i".into(),
-                format!("video={device}"),
-            ];
-            run_capture(&rt, args, w, h, fps);
-        }
+        Kind::Camera { device, .. } => run_capture(&rt, crate::platform::camera_input(&device), w, h, fps),
         Kind::Network { url, buffer_ms } => {
             let mut args: Vec<String> = Vec::new();
             if url.starts_with("rtsp://") {
@@ -369,18 +312,13 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             args.extend(["-i".into(), url]);
             run_capture(&rt, args, w, h, fps);
         }
-        Kind::Screen => {
-            let args = vec![
-                "-f".into(),
-                "gdigrab".into(),
-                "-framerate".into(),
-                fps.to_string(),
-                "-i".into(),
-                "desktop".into(),
-            ];
-            run_capture(&rt, args, w, h, fps);
+        Kind::Screen => match crate::platform::screen_input(fps) {
+            Ok(args) => run_capture(&rt, args, w, h, fps),
+            Err(why) => rt.set_status(why),
+        },
+        Kind::Microphone { device } => {
+            run_audio_capture(&rt, || crate::platform::microphone_input(&device), "Micro perdu")
         }
-        Kind::Microphone { device } => run_microphone(&rt, &device),
         Kind::Replay => playback::run_replay(&rt, w, h, fps),
         Kind::Browser { url, alpha } => crate::browser::run_browser(&rt, &url, alpha, w, h, fps),
         Kind::Telestrator { .. } => run_telestrator(&rt, w, h),
@@ -408,8 +346,12 @@ fn run_tone(rt: &InputRt) {
     }
 }
 
-/// Everything the computer plays, taken from the default output device.
+/// Everything the computer plays: from the default output's monitor where
+/// the system offers one, else from the default output device.
 fn run_system_audio(rt: &Arc<InputRt>) {
+    if let Some(args) = crate::platform::system_audio_input() {
+        return run_audio_capture(rt, || args.clone(), "Audio système perdu");
+    }
     let opened = cpal::default_host().default_output_device().and_then(|device| {
         let config: cpal::StreamConfig = device.default_output_config().ok()?.into();
         let channels = config.channels as usize;
@@ -753,11 +695,12 @@ fn run_capture(rt: &Arc<InputRt>, input_args: Vec<String>, w: usize, h: usize, f
     }
 }
 
-fn run_microphone(rt: &Arc<InputRt>, device: &str) {
+/// Sound from a device through ffmpeg, started again when it is lost. The
+/// arguments are asked for at each start, as the device may have moved.
+fn run_audio_capture(rt: &Arc<InputRt>, input: impl Fn() -> Vec<String>, lost: &str) {
     while !rt.stopped() {
         let spawned = ffmpeg()
-            .args(["-f", "dshow", "-audio_buffer_size", "40", "-i"])
-            .arg(format!("audio={device}"))
+            .args(input())
             .args(audio_out_args())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -778,7 +721,7 @@ fn run_microphone(rt: &Arc<InputRt>, device: &str) {
         if rt.stopped() {
             return;
         }
-        rt.set_status(format!("Micro perdu, nouvel essai… {}", log.lock().unwrap()));
+        rt.set_status(format!("{lost}, nouvel essai… {}", log.lock().unwrap()));
         thread::sleep(Duration::from_secs(2));
     }
 }
@@ -821,36 +764,6 @@ pub(crate) fn pump_audio(rt: &InputRt, mut out: impl Read, session_stop: Option<
     }
 }
 
-/// Capture devices ffmpeg can open: (cameras, microphones).
-pub fn list_devices() -> (Vec<String>, Vec<String>) {
-    let Ok(out) = ffmpeg()
-        .args(["-list_devices", "true", "-f", "dshow", "-i", "dummy"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-    else {
-        return (Vec::new(), Vec::new());
-    };
-    parse_devices(&String::from_utf8_lossy(&out.stderr))
-}
-
-fn parse_devices(log: &str) -> (Vec<String>, Vec<String>) {
-    let (mut video, mut audio) = (Vec::new(), Vec::new());
-    for line in log.lines() {
-        let mut parts = line.split('"');
-        let (Some(_), Some(name), Some(tail)) = (parts.next(), parts.next(), parts.next()) else {
-            continue;
-        };
-        if tail.contains("(video)") {
-            video.push(name.to_string());
-        } else if tail.contains("(audio)") {
-            audio.push(name.to_string());
-        }
-    }
-    (video, audio)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,16 +772,6 @@ mod tests {
     fn reads_file_length_from_log() {
         assert_eq!(parse_duration("  Duration: 00:01:02.50, start: 0.000000, bitrate: 1 kb/s"), Some(62_500));
         assert_eq!(parse_duration("Stream #0:0: Video"), None);
-    }
-
-    #[test]
-    fn reads_device_list() {
-        let log = "[dshow @ 01] \"HD Webcam\" (video)\n\
-                   [dshow @ 01]   Alternative name \"@device_pnp_x\"\n\
-                   [dshow @ 01] \"Micro (USB)\" (audio)\n";
-        let (v, a) = parse_devices(log);
-        assert_eq!(v, ["HD Webcam"]);
-        assert_eq!(a, ["Micro (USB)"]);
     }
 
     #[test]

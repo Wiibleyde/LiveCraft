@@ -1,8 +1,9 @@
-//! Web page input: Edge or Chrome runs without a window, and streams what it
+//! Web page input: Chrome, Chromium or Edge runs without a window, and streams what it
 //! draws over its debugging connection. Only this computer can reach it.
 
 use crate::api::base64_decode;
 use crate::frame::Frame;
+use crate::platform::ProcessTree;
 use crate::sources::InputRt;
 use crate::titles;
 use serde_json::{Value, json};
@@ -15,63 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tungstenite::{Message, WebSocket};
-
-/// A browser runs as dozens of processes. A Windows job holds them together,
-/// so closing the job ends them all, even if this program crashes.
-struct ProcessTree(windows_sys::Win32::Foundation::HANDLE);
-
-impl ProcessTree {
-    fn hold(child: &std::process::Child) -> Option<Self> {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::System::JobObjects::*;
-        // SAFETY: the job handle is checked, the information block is sized for
-        // the call, and the child's handle is valid while child is borrowed.
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                return None;
-            }
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const _,
-                std::mem::size_of_val(&info) as u32,
-            );
-            AssignProcessToJobObject(job, child.as_raw_handle() as _);
-            Some(Self(job))
-        }
-    }
-}
-
-// SAFETY: a job handle is not tied to a thread and is only closed once, on drop.
-unsafe impl Send for ProcessTree {}
-
-impl Drop for ProcessTree {
-    fn drop(&mut self) {
-        // SAFETY: this handle came from CreateJobObjectW and is closed once.
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.0);
-        }
-    }
-}
-
-fn find_browser() -> Option<PathBuf> {
-    let roots = ["ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"];
-    let tails = ["Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe"];
-    for tail in tails {
-        for root in roots {
-            if let Ok(base) = std::env::var(root) {
-                let p = PathBuf::from(base).join(tail);
-                if p.exists() {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    None
-}
 
 fn free_port() -> Option<u16> {
     TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok().map(|a| a.port())
@@ -135,7 +79,7 @@ struct Host {
     port: u16,
     users: usize,
     profile: PathBuf,
-    _tree: Option<ProcessTree>,
+    tree: Option<ProcessTree>,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);
@@ -156,14 +100,10 @@ fn launch(exe: &PathBuf) -> Option<Host> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::platform::prepare_child(&mut cmd);
     let child = cmd.spawn().ok()?;
     let tree = ProcessTree::hold(&child);
-    Some(Host { child, port, users: 0, profile, _tree: tree })
+    Some(Host { child, port, users: 0, profile, tree })
 }
 
 /// Joins the running browser, starting it if needed. Returns its port.
@@ -189,8 +129,14 @@ fn leave_host(port: u16) {
     if host.users == 0
         && let Some(mut host) = slot.take()
     {
-        crate::sources::end_process_tree(&mut host.child);
+        crate::platform::end_process_tree(&mut host.child);
         clear_profile_later(host.profile.clone());
+        // The tree lets go before the browser is reaped, so the number it
+        // holds can never belong to another program by then.
+        drop(host.tree.take());
+        thread::spawn(move || {
+            let _ = host.child.wait();
+        });
     }
 }
 
@@ -216,8 +162,8 @@ fn frame_from(data: &str, w: usize, h: usize) -> Option<Frame> {
 }
 
 pub fn run_browser(rt: &Arc<InputRt>, url: &str, alpha: bool, w: usize, h: usize, fps: u32) {
-    let Some(exe) = find_browser() else {
-        rt.set_status("Edge ou Chrome est nécessaire pour les pages web");
+    let Some(exe) = crate::platform::find_browser() else {
+        rt.set_status("Chrome, Chromium ou Edge est nécessaire pour les pages web");
         return;
     };
     clear_old_profiles();

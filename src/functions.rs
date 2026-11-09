@@ -519,8 +519,7 @@ impl Engine {
 }
 
 fn default_record_dir() -> String {
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&home).join("Videos").join("LiveCraft").to_string_lossy().into_owned()
+    crate::platform::videos_dir().join("LiveCraft").to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
