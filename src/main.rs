@@ -32,6 +32,10 @@ mod widgets;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    if let Some(code) = hand_over_to_avx2_build() {
+        std::process::exit(code);
+    }
     let args: Vec<String> = std::env::args().collect();
     let value_of = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     if let Some(dir) = value_of("--selftest") {
@@ -60,6 +64,36 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| Ok(Box::new(ui::App::new(cc, screenshot, open, project)))),
     )
+}
+
+/// Releases ship two builds of the same program, as wider instructions make
+/// the pixel loops much faster (numbers in docs/releasing.md) but crash
+/// processors without them. This one runs anywhere; next to it,
+/// `livecraft-avx2.exe` is built for x86-64-v3 and takes over when the
+/// processor has every feature that level assumes.
+#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+fn hand_over_to_avx2_build() -> Option<i32> {
+    use std::arch::is_x86_feature_detected as has;
+    let able = has!("avx")
+        && has!("avx2")
+        && has!("bmi1")
+        && has!("bmi2")
+        && has!("f16c")
+        && has!("fma")
+        && has!("lzcnt")
+        && has!("movbe")
+        && has!("popcnt")
+        && has!("sse4.1")
+        && has!("sse4.2")
+        && has!("ssse3")
+        && has!("xsave");
+    let faster = std::env::current_exe().ok()?.with_file_name("livecraft-avx2.exe");
+    if !able || !faster.exists() {
+        return None;
+    }
+    // If it cannot start, this build still can.
+    let status = std::process::Command::new(faster).args(std::env::args_os().skip(1)).status().ok()?;
+    Some(status.code().unwrap_or(1))
 }
 
 /// Prints what opening a .vmix keeps and leaves, without starting anything.
