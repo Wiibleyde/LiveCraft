@@ -73,6 +73,14 @@ pub enum Kind {
         fps: f32,
         looped: bool,
     },
+    /// A DVD-Video title: a disc drive, a folder holding VIDEO_TS, or an .iso.
+    Dvd {
+        #[serde(default)]
+        path: String,
+        /// Counted from 1, as on the disc.
+        #[serde(default)]
+        title: u32,
+    },
     Camera {
         device: String,
         ptz_host: String,
@@ -143,6 +151,7 @@ impl Kind {
             Kind::List { .. } => "Liste",
             Kind::Photos { .. } => "Photos",
             Kind::ImageSequence { .. } => "Séquence d'images",
+            Kind::Dvd { .. } => "DVD",
             Kind::Camera { .. } => "Caméra",
             Kind::Network { .. } => "Flux réseau",
             Kind::Browser { .. } => "Page web",
@@ -170,6 +179,7 @@ impl Kind {
             Kind::List { .. } => "VideoList",
             Kind::Photos { .. } => "Photos",
             Kind::ImageSequence { .. } => "ImageSequence",
+            Kind::Dvd { .. } => "DVD",
             Kind::Camera { .. } => "Capture",
             Kind::Network { .. } => "Stream",
             Kind::Browser { .. } => "Browser",
@@ -187,6 +197,7 @@ impl Kind {
             Kind::Video { .. }
                 | Kind::AudioFile { .. }
                 | Kind::List { .. }
+                | Kind::Dvd { .. }
                 | Kind::Network { .. }
                 | Kind::Microphone { .. }
                 | Kind::SystemAudio
@@ -202,7 +213,11 @@ impl Kind {
     pub fn has_timeline(&self) -> bool {
         matches!(
             self,
-            Kind::Video { .. } | Kind::AudioFile { .. } | Kind::List { .. } | Kind::ImageSequence { .. }
+            Kind::Video { .. }
+                | Kind::AudioFile { .. }
+                | Kind::List { .. }
+                | Kind::ImageSequence { .. }
+                | Kind::Dvd { .. }
         )
     }
 
@@ -214,6 +229,8 @@ impl Kind {
             | (Kind::AudioFile { path: a, .. }, Kind::AudioFile { path: b, .. })
             | (Kind::ImageSequence { first: a, .. }, Kind::ImageSequence { first: b, .. }) => a == b,
             (Kind::List { items: a, .. }, Kind::List { items: b, .. }) => a == b,
+            // A position only means something within the same title.
+            (Kind::Dvd { path: a, title: x }, Kind::Dvd { path: b, title: y }) => a == b && x == y,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }

@@ -444,6 +444,7 @@ impl Engine {
             "Restart" => rt.seek_ms.store(0, Ordering::Relaxed),
             "SetPosition" => rt.seek_ms.store(a.number()? as i64, Ordering::Relaxed),
             "SelectIndex" => rt.select.store(a.number()? as i64 - 1, Ordering::Relaxed),
+            // The items of a list or photos input, or the chapters of a DVD.
             "NextItem" | "PreviousItem" => {
                 let step = if name == "NextItem" { 1 } else { -1 };
                 let count = rt.items.load(Ordering::Relaxed).max(1) as i64;

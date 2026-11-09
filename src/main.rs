@@ -5,6 +5,7 @@ mod audio;
 mod browser;
 mod desk;
 mod dsp;
+mod dvd;
 mod engine;
 mod extras;
 mod frame;

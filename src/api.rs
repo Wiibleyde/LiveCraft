@@ -156,12 +156,17 @@ impl Engine {
             let state = if rt.as_ref().is_some_and(|r| r.is_playing()) { "Running" } else { "Paused" };
             let pos = rt.as_ref().map_or(0, |r| r.pos_ms.load(Ordering::Relaxed));
             let dur = rt.as_ref().map_or(0, |r| r.dur_ms.load(Ordering::Relaxed));
+            // Counted from 1 where the input has items: a list's file, a DVD's chapter.
+            let selected = rt.as_ref().map_or(0, |r| {
+                let has_items = r.items.load(Ordering::Relaxed) > 0;
+                if has_items { r.item.load(Ordering::Relaxed) + 1 } else { 0 }
+            });
             let looped = matches!(i.kind, Kind::Video { looped: true, .. });
             let title = esc(&i.name);
             let cap = |b: bool| if b { "True" } else { "False" };
             x.push_str(&format!(
                 "<input key=\"{}\" number=\"{}\" type=\"{}\" title=\"{title}\" state=\"{state}\" \
-                 position=\"{pos}\" duration=\"{dur}\" muted=\"{}\" loop=\"{}\" selectedIndex=\"0\">{title}",
+                 position=\"{pos}\" duration=\"{dur}\" muted=\"{}\" loop=\"{}\" selectedIndex=\"{selected}\">{title}",
                 i.key_id(),
                 n + 1,
                 i.kind.api_type(),
