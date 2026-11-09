@@ -7,6 +7,7 @@ use crate::model::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 #[derive(Default, Clone, Debug)]
 pub struct Args {
@@ -139,6 +140,7 @@ pub const NAMES: &[&str] = &[
     "StopSRTOutput",
     "StopStreaming",
     "Undo",
+    "VirtualSet",
 ];
 
 fn strip_prefix_any_case<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
@@ -258,6 +260,7 @@ impl Engine {
                 self.close_input(id);
             }
             "LayerOn" | "LayerOff" | "LayerOnOff" => return self.layer_function(name, a),
+            "VirtualSet" => return self.virtual_set_function(a),
             "Audio" | "AudioOn" | "AudioOff" => {
                 self.with_input(a, |i| {
                     i.audio.muted = match name {
@@ -515,6 +518,24 @@ impl Engine {
                 };
             }
         })
+    }
+
+    /// Moves a virtual set's camera to a preset, by number from 1 or by name.
+    /// A Duration replaces the set's own move time; 0 cuts straight there.
+    fn virtual_set_function(&self, a: &Args) -> Result<(), String> {
+        let id = self.target(a)?;
+        let wanted = a.value.as_deref().unwrap_or("").trim();
+        let mut s = self.state.lock().unwrap();
+        let Some(Kind::VirtualSet { cameras, .. }) = s.input(id).map(|i| &i.kind) else {
+            return Err("Cette entrée n'est pas un plateau virtuel".into());
+        };
+        let n = match wanted.parse::<usize>() {
+            Ok(n) => n.checked_sub(1),
+            Err(_) => cameras.iter().position(|c| c.name.eq_ignore_ascii_case(wanted)),
+        };
+        let n = n.filter(|n| *n < cameras.len()).ok_or_else(|| format!("Caméra introuvable : {wanted}"))?;
+        s.set_camera(id, n, a.duration, Instant::now());
+        Ok(())
     }
 }
 

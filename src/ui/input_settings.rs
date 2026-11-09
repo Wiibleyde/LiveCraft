@@ -78,7 +78,7 @@ impl App {
         }
         if input != before {
             let source_changed = input.kind != before.kind;
-            let live = !matches!(input.kind, Kind::Scene | Kind::Mix { .. });
+            let live = !matches!(input.kind, Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. });
             let keep = input.kind.same_source(&before.kind);
             self.with(|s| {
                 if let Some(slot) = s.input_mut(id) {
@@ -143,6 +143,10 @@ impl App {
     }
 
     fn source_editor(&mut self, ui: &mut egui::Ui, input: &mut Input, project: &Project) {
+        if matches!(input.kind, Kind::VirtualSet { .. }) {
+            self.set_editor(ui, input, project);
+            return;
+        }
         let rt = self.engine.rt(input.id);
         let (cams, mics) = self.devices.lock().unwrap().clone();
         let id = input.id;

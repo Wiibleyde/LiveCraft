@@ -297,6 +297,18 @@ impl App {
                 self.call("Loop", &Args::new().input(&(self.input_number(project, id))));
             }
         }
+        if let Kind::VirtualSet { cameras, camera, .. } = &input.kind {
+            for (n, cam) in cameras.iter().enumerate().take(6) {
+                let on = (*camera == n).then_some(GREEN);
+                let r = named(
+                    tiny(&mut top, &format!("C{}", n + 1), on),
+                    format!("Caméra {} {}", n + 1, input.name),
+                );
+                if r.on_hover_text(&cam.name).clicked() {
+                    self.with(|s| s.set_camera(id, n, None, Instant::now()));
+                }
+            }
+        }
         if let (true, Some(rt)) = (input.kind.has_timeline(), &rt) {
             let playing = rt.is_playing();
             let icon = if playing { Icon::Pause } else { Icon::Play };
@@ -405,6 +417,14 @@ impl App {
                 if ui.button("Modifier le titre…").clicked() {
                     self.designer_for = Some(id);
                     ui.close();
+                }
+            }
+            Kind::VirtualSet { cameras, .. } => {
+                for (n, cam) in cameras.iter().enumerate() {
+                    if ui.button(format!("Caméra {} : {}", n + 1, cam.name)).clicked() {
+                        self.with(|s| s.set_camera(id, n, None, Instant::now()));
+                        ui.close();
+                    }
                 }
             }
             Kind::Title { presets, style, .. } => {
@@ -666,6 +686,12 @@ impl App {
             if ui.button("Télestrateur").clicked() {
                 let id = self.add_input("Télestrateur", Kind::Telestrator { background: None });
                 self.telestrator_for = Some(id);
+                ui.close();
+            }
+            if ui.button("Plateau virtuel").clicked() {
+                let id = self.add_input("Plateau virtuel", crate::sets::new_set(SetLook::Studio));
+                self.editing = Some(id);
+                self.edit_tab = 0;
                 ui.close();
             }
             ui.separator();
