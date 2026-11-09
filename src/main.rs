@@ -21,6 +21,7 @@ mod playtest;
 mod replay;
 mod secret;
 mod selftest;
+mod soak;
 mod sources;
 mod text;
 mod titles;
@@ -36,6 +37,12 @@ fn main() -> eframe::Result {
     let value_of = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     if let Some(dir) = value_of("--selftest") {
         std::process::exit(selftest::run(&dir));
+    }
+    if let Some(dir) = value_of("--soak") {
+        // The length is optional and follows the folder.
+        let at = args.iter().position(|a| a == "--soak").map_or(0, |i| i + 2);
+        let length = args.get(at).filter(|a| !a.starts_with("--"));
+        std::process::exit(soak::run(&dir, length.map(String::as_str)));
     }
     if let Some(file) = value_of("--import-report") {
         std::process::exit(import_report(&file));

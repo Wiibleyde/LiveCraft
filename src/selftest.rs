@@ -37,7 +37,7 @@ fn probe(path: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).replace(['\r', '\n'], " "))
 }
 
-fn http_get(path: &str) -> Result<String, String> {
+pub(crate) fn http_get(path: &str) -> Result<String, String> {
     let mut s = TcpStream::connect(("127.0.0.1", 8088)).map_err(|e| e.to_string())?;
     write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:8088\r\n\r\n").map_err(|e| e.to_string())?;
     let mut text = String::new();

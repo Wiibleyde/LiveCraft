@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-fn make(args: &[&str], out: &str) -> Result<String, String> {
+pub(crate) fn make(args: &[&str], out: &str) -> Result<String, String> {
     let done = ffmpeg()
         .arg("-y")
         .args(args)
@@ -48,7 +48,7 @@ fn clip(dir: &str, name: &str, seconds: u32) -> Result<String, String> {
     make(&args, &format!("{dir}/{name}.mp4"))
 }
 
-fn until(seconds: f32, what: &str, mut done: impl FnMut() -> bool) -> Result<(), String> {
+pub(crate) fn until(seconds: f32, what: &str, mut done: impl FnMut() -> bool) -> Result<(), String> {
     let end = Instant::now() + Duration::from_secs_f32(seconds);
     while !done() {
         if Instant::now() > end {
