@@ -24,6 +24,7 @@ so a slow window cannot hold up the show.
 | `mixer.rs` | The video loop: what to compose, and reusing what has not changed |
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
 | `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
+| `decode.rs` | Which files and streams the graphics card decodes |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
@@ -40,6 +41,10 @@ so a slow window cannot hold up the show.
 - Sources know whether anyone is watching. A web page off air sends about two pictures a second.
 - Big buffers are reused, because fresh memory costs more than the work done on it.
 - A LUT is reduced to fit the processor's fast memory and applied without branches.
+- Files heavier than 1080p60 and network streams are decoded by the graphics card (D3D11). Smaller
+  files stay in software, where they start and seek half a second sooner. A card that fails to open,
+  ends a file early or goes quiet on a stream hands over to software, which carries on from the same
+  place.
 
 ## Rules worth keeping
 
