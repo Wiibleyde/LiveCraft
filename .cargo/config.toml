@@ -1,3 +1,4 @@
-# Built and run on this machine: pixel loops gain a lot from wider instructions.
-[build]
+# Pixel loops gain a lot from wider instructions. Only x86-64 processors know
+# this level; ARM ones, such as Apple's, keep their own defaults.
+[target.'cfg(target_arch = "x86_64")']
 rustflags = ["-C", "target-cpu=x86-64-v3"]
