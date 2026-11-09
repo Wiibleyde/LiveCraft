@@ -73,6 +73,8 @@ impl App {
                 d.fullscreen_route = p.fullscreen_route;
                 d.fullscreen_monitor = p.fullscreen_monitor;
                 d.srt = p.srt;
+                d.ndi_out = p.ndi_out;
+                d.omt_out = p.omt_out;
                 d.records = p.records;
                 d.streams = p.streams;
                 d.master_device = p.master_device;
@@ -90,7 +92,8 @@ impl App {
 
     fn tab_format(&mut self, ui: &mut egui::Ui, p: &Project) {
         let e = &self.engine;
-        let busy = e.is_recording() || e.is_streaming() || e.is_multi() || e.is_srt() || e.is_replay();
+        let busy =
+            e.is_recording() || e.is_streaming() || e.is_multi() || e.is_srt() || e.is_net() || e.is_replay();
         ui.label(RichText::new("Format de sortie").strong());
         ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -167,6 +170,40 @@ impl App {
                 let name = if running { "StopSRTOutput" } else { "StartSRTOutput" };
                 self.call(name, &Args::new());
             }
+        }
+        ui.separator();
+        ui.label(RichText::new("Sorties NDI et OMT : le programme avec le son Général").strong());
+        egui::Grid::new("net_out").show(ui, |ui| {
+            for (label, cfg) in [("NDI", &mut p.ndi_out), ("OMT", &mut p.omt_out)] {
+                ui.checkbox(&mut cfg.enabled, label);
+                ui.label("Nom");
+                ui.add_sized([220.0, 20.0], egui::TextEdit::singleline(&mut cfg.name).id_salt(label));
+                ui.end_row();
+            }
+        });
+        let running: Vec<String> = self
+            .engine
+            .net
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|o| format!("{} « {} » : {} connexion(s)", o.net.label(), o.name, o.connections()))
+            .collect();
+        for line in &running {
+            ui.label(RichText::new(line).small().color(DIM));
+        }
+        let on = !running.is_empty();
+        if ui.button(if on { "Arrêter NDI / OMT" } else { "Démarrer NDI / OMT" }).clicked() {
+            if on && self.with(|s| s.padlock) {
+                self.say("Verrouillé : ouvrez le cadenas pour arrêter");
+            } else if on {
+                self.engine.stop_net();
+            } else if let Err(e) = self.engine.start_net() {
+                self.say(e);
+            }
+        }
+        if on {
+            ui.label(RichText::new("Un nouveau nom s'applique au prochain démarrage").small().color(DIM));
         }
     }
 
@@ -404,5 +441,13 @@ fn tab_about(ui: &mut egui::Ui) {
         RichText::new("Les vidéos, caméras et sorties passent par ffmpeg, à installer séparément.")
             .small()
             .color(DIM),
+    );
+    ui.label(
+        RichText::new(
+            "NDI® est une marque déposée de Vizrt NDI AB (ndi.video). Le runtime NDI et la bibliothèque \
+             OMT (Open Media Transport) s'installent séparément.",
+        )
+        .small()
+        .color(DIM),
     );
 }

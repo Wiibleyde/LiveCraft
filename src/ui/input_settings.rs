@@ -331,6 +331,8 @@ impl App {
                 ui.text_edit_singleline(url);
                 ui.add(egui::Slider::new(buffer_ms, 0..=5000).text("tampon (ms)"));
             }
+            Kind::Ndi { source } => self.net_source_editor(ui, Net::Ndi, source),
+            Kind::Omt { source } => self.net_source_editor(ui, Net::Omt, source),
             Kind::Browser { url, alpha } => {
                 ui.label("Adresse de la page");
                 ui.text_edit_singleline(url);
@@ -377,6 +379,28 @@ impl App {
                 ui.label(RichText::new(other.label()).color(DIM));
             }
         }
+    }
+
+    /// A source picked from those seen on the network, or typed in full for
+    /// one that is not on yet.
+    fn net_source_editor(&mut self, ui: &mut egui::Ui, net: Net, source: &mut String) {
+        self.look_for_net_sources();
+        let found = self.net_found(net);
+        let list = found.as_ref().and_then(|f| f.as_ref().ok()).cloned().unwrap_or_default();
+        device_combo(ui, "Source", source, &list);
+        ui.horizontal(|ui| {
+            ui.label("Nom exact");
+            ui.add(egui::TextEdit::singleline(source).desired_width(320.0));
+        });
+        let note = match found {
+            None => "Recherche des sources…".to_string(),
+            Some(Err(missing)) => missing,
+            Some(Ok(list)) if list.is_empty() => {
+                format!("Aucune source {} trouvée pour l'instant", net.label())
+            }
+            Some(Ok(_)) => return,
+        };
+        ui.label(RichText::new(note).small().color(DIM));
     }
 
     fn tab_key(&mut self, ui: &mut egui::Ui, input: &mut Input, project: &Project) {

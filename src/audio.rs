@@ -296,6 +296,9 @@ impl Engine {
         for (_, enc) in self.srt.lock().unwrap().iter() {
             enc.push_audio(pcm(enc.pick));
         }
+        for out in self.net.lock().unwrap().iter() {
+            out.push_audio(&buses[0]);
+        }
         for cam in self.replay.lock().unwrap().cams.iter() {
             cam.encoder.push_audio(pcm(cam.encoder.pick));
         }
@@ -347,7 +350,15 @@ fn play_routes(
 
 /// Files and lists wait for Play, but a live device always runs.
 fn is_always_on(kind: &Kind) -> bool {
-    matches!(kind, Kind::Microphone { .. } | Kind::SystemAudio | Kind::Tone | Kind::Network { .. })
+    matches!(
+        kind,
+        Kind::Microphone { .. }
+            | Kind::SystemAudio
+            | Kind::Tone
+            | Kind::Network { .. }
+            | Kind::Ndi { .. }
+            | Kind::Omt { .. }
+    )
 }
 
 /// Balance from -1 (left) to 1 (right): the centre leaves both sides at full

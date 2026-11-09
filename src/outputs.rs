@@ -4,6 +4,7 @@
 
 use crate::engine::Engine;
 use crate::model::*;
+use crate::netvideo::{Net, NetOut};
 use crate::output::{Encoder, Spec, Target};
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -245,6 +246,44 @@ impl Engine {
         finish_later(list.into_iter().map(|(_, e)| e).collect(), Duration::from_secs(3));
     }
 
+    pub fn is_net(&self) -> bool {
+        !self.net.lock().unwrap().is_empty()
+    }
+
+    /// Offers the program on the network as each enabled NDI or OMT source.
+    pub fn start_net(&self) -> Result<usize, String> {
+        if self.is_net() {
+            return Ok(0);
+        }
+        let (_, _, fps) = self.format();
+        let wanted: Vec<(Net, NetOutCfg)> = {
+            let p = &self.state.lock().unwrap().project;
+            [(Net::Ndi, p.ndi_out.clone()), (Net::Omt, p.omt_out.clone())]
+                .into_iter()
+                .filter(|(_, c)| c.enabled)
+                .collect()
+        };
+        if wanted.is_empty() {
+            return Err("Cochez d'abord NDI ou OMT dans les réglages des sorties".into());
+        }
+        let mut started = Vec::new();
+        for (net, cfg) in wanted {
+            let name = cfg.name.trim();
+            let name = if name.is_empty() { "LiveCraft" } else { name };
+            // On failure, those already started stop as `started` is dropped.
+            started.push(NetOut::start(net, name, fps)?);
+        }
+        let n = started.len();
+        *self.net.lock().unwrap() = started;
+        Ok(n)
+    }
+
+    pub fn stop_net(&self) {
+        let list = std::mem::take(&mut *self.net.lock().unwrap());
+        // Each waits for its last picture to leave; the window does not.
+        thread::spawn(move || drop(list));
+    }
+
     /// An input closing ends whatever was recording it on its own.
     pub(crate) fn stop_outputs_of(&self, id: u64) {
         let mut multi = self.multi.lock().unwrap();
@@ -268,6 +307,7 @@ impl Engine {
         list.extend(std::mem::take(&mut *self.streamers.lock().unwrap()));
         list.extend(std::mem::take(&mut *self.multi.lock().unwrap()).into_iter().map(|(_, e)| e));
         list.extend(std::mem::take(&mut *self.srt.lock().unwrap()).into_iter().map(|(_, e)| e));
+        drop(std::mem::take(&mut *self.net.lock().unwrap()));
         for job in finish_all(list, Duration::from_secs(15)) {
             let _ = job.join();
         }
