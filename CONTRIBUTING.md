@@ -46,6 +46,14 @@ cargo run -- --selftest target/selftest
 `--selftest` needs FFmpeg. It generates its own media, then really plays, records, streams and
 replays, so run it for anything touching sources, outputs or timing.
 
+`--soak <folder> <length>` (for example `45m`) runs a whole show for that long: looping videos, a list,
+music, a web page, titles, transitions, recording, a local stream, replays and remote control calls.
+Every five seconds it writes memory, handles, child processes, frame timing and what each encoder was
+fed to `soak.csv`, and it fails with a report in `soak.json` on a memory or handle climb, sustained late
+frames, dropped pictures or sound, or files that do not last as long as the show. It uses the same
+fixed ports as `--selftest`. The [Long run](.github/workflows/soak.yml) workflow runs it weekly on
+Windows and can be started by hand; the report is kept as an artifact.
+
 If you change the interface, add a test in `src/ui/tests.rs`: they drive the real window and engine
 with real clicks. If you fix a bug, add the test that would have caught it.
 

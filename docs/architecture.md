@@ -32,6 +32,7 @@ so a slow window cannot hold up the show.
 | `secret.rs` | Sealing secrets in the session file |
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
 | `selftest.rs`, `playtest.rs` | `--selftest`: real end-to-end checks |
+| `soak.rs` | `--soak`: a whole show left running, with memory, timing and outputs watched |
 
 ## Doing less
 

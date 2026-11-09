@@ -85,6 +85,7 @@ Other ways to start it:
 livecraft --project show.vmix             # open a project
 livecraft --import-report show.vmix       # say what a project keeps, without opening it
 livecraft --selftest some-folder          # real end-to-end run: plays, records, streams, replays
+livecraft --soak some-folder 45m          # a whole show for 45 minutes, memory and timing watched
 livecraft --screenshot out.png            # start, save a picture of the window, quit
 ```
 
