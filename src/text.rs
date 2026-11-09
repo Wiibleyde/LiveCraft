@@ -29,7 +29,8 @@ fn read_font_file(path: &std::path::Path, list: &mut Vec<Installed>) {
         let names = face.names().into_iter().filter(|n| {
             n.name_id == ttf_parser::name_id::FAMILY || n.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY
         });
-        let families = names.filter_map(|n| n.to_string()).map(|n| n.to_lowercase()).collect();
+        let families =
+            names.filter_map(|n| n.to_string().or_else(|| mac_roman(&n))).map(|n| n.to_lowercase()).collect();
         list.push(Installed {
             families,
             bold: face.is_bold(),
@@ -38,6 +39,13 @@ fn read_font_file(path: &std::path::Path, list: &mut Vec<Installed>) {
             index,
         });
     }
+}
+
+/// Apple's own fonts may name themselves only in Mac Roman, which agrees
+/// with ASCII for the names people type.
+fn mac_roman(name: &ttf_parser::name::Name) -> Option<String> {
+    let roman = name.platform_id == ttf_parser::PlatformId::Macintosh && name.encoding_id == 0;
+    (roman && name.name.is_ascii()).then(|| String::from_utf8_lossy(name.name).into_owned())
 }
 
 /// What is installed, by the names inside the fonts: a file name says little
@@ -183,8 +191,12 @@ mod tests {
         } else {
             "DejaVu Sans"
         };
-        let plain = find_font(family, false).expect(family);
-        let bold = find_font(&family.to_uppercase(), true).expect("gras");
+        let missing = || {
+            let some: Vec<_> = installed().iter().flat_map(|f| f.families.first()).take(20).collect();
+            panic!("{family} absente parmi {} polices, dont {some:?}", installed().len())
+        };
+        let plain = find_font(family, false).unwrap_or_else(missing);
+        let bold = find_font(&family.to_uppercase(), true).unwrap_or_else(missing);
         assert_ne!(plain, bold, "bold is its own face");
         assert!(find_font("Police Qui N Existe Pas", false).is_none());
     }
