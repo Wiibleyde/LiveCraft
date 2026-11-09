@@ -19,7 +19,9 @@ const TABS: [&str; 10] = [
 impl App {
     pub(super) fn input_settings_window(&mut self, ctx: &egui::Context, project: &Project) {
         let Some(id) = self.editing else { return };
-        let Some(before) = project.inputs.iter().find(|i| i.id == id).cloned() else {
+        // An input added from a menu this frame is not in the frame's copy yet.
+        let live = || self.with(|s| s.input(id).cloned());
+        let Some(before) = project.inputs.iter().find(|i| i.id == id).cloned().or_else(live) else {
             self.editing = None;
             return;
         };
