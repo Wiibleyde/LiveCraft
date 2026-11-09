@@ -319,6 +319,41 @@ impl App {
                 path_row(ui, folder);
                 ui.add(egui::Slider::new(seconds, 0.0..=60.0).text("secondes par photo (0 : à la main)"));
             }
+            Kind::PowerPoint { path } => {
+                path_row(ui, path);
+                if ui.button("Changer de présentation…").clicked()
+                    && let Some(p) = rfd::FileDialog::new()
+                        .add_filter("Présentation", &crate::slides::EXTENSIONS)
+                        .pick_file()
+                {
+                    *path = p.to_string_lossy().into_owned();
+                }
+                if let Some(rt) = &rt {
+                    let number = self.input_number(project, id);
+                    ui.horizontal(|ui| {
+                        if ui.button("Diapositive précédente").clicked() {
+                            self.call("PreviousPicture", &Args::new().input(&number));
+                        }
+                        if ui.button("Diapositive suivante").clicked() {
+                            self.call("NextPicture", &Args::new().input(&number));
+                        }
+                        let count = rt.items.load(Ordering::Relaxed);
+                        if count > 0 {
+                            let at = rt.item.load(Ordering::Relaxed) + 1;
+                            ui.label(format!("Diapositive {at} sur {count}"));
+                        }
+                    });
+                    // The card has room for the start of it only.
+                    if let Some(msg) = rt.status() {
+                        ui.label(RichText::new(msg).color(ORANGE));
+                    }
+                }
+                ui.label(
+                    RichText::new("Diapositives converties par PowerPoint, sinon par LibreOffice")
+                        .small()
+                        .color(DIM),
+                );
+            }
             Kind::ImageSequence { first, fps, looped } => {
                 path_row(ui, first);
                 ui.add(egui::Slider::new(fps, 1.0..=120.0).text("images par seconde"));

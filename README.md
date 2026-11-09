@@ -47,9 +47,10 @@ The HTTP and TCP interfaces use the published function names, so existing contro
 
 ## Features
 
-**Inputs.** Video files, image sequences, photo folders, lists, images, audio files, cameras and
-microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP, TS), web pages, solid
-colours, test cards, clocks, and titles with presets, tickers, countdowns and a simple designer.
+**Inputs.** Video files, image sequences, photo folders, lists, images, audio files, PowerPoint
+presentations, cameras and microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP,
+TS), web pages, solid colours, test cards, clocks, and titles with presets, tickers, countdowns and a
+simple designer.
 
 **Switching.** Cut, fade, zoom, wipes, slides, the cube family, merge and stingers, with four
 transition slots, a T-bar, fade to black and Quick Play.
@@ -73,7 +74,8 @@ scripts, VISCA PTZ control, a telestrator, and a web controller for phones and t
 ## Get started
 
 You need [Rust](https://rustup.rs) (edition 2024), and [FFmpeg](https://ffmpeg.org) on your `PATH`. Web
-inputs also need Edge or Chrome. Builds target CPUs with AVX2, see `.cargo/config.toml`.
+inputs also need Edge or Chrome, and presentations need Microsoft PowerPoint or
+[LibreOffice](https://www.libreoffice.org) installed. Builds target CPUs with AVX2, see `.cargo/config.toml`.
 
 ```sh
 cargo run --release
@@ -98,7 +100,7 @@ livecraft --screenshot out.png            # start, save a picture of the window,
 
 - **Windows only.** The code uses Windows APIs for capture, screens and secrets.
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
-- **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs, no virtual sets.
+- **No NDI or OMT.** Also no video calls, no DVD inputs, no virtual sets.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
 
 The full list is in the [roadmap](ROADMAP.md).

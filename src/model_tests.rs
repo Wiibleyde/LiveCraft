@@ -54,4 +54,7 @@ fn a_new_setting_is_not_a_new_source() {
     assert!(video("a", 1.0).same_source(&video("a", 2.0)));
     assert!(!video("a", 1.0).same_source(&video("b", 1.0)));
     assert!(!Kind::Bars.same_source(&Kind::Clock));
+    // Another presentation starts at its first slide, not where the last one was.
+    let deck = |path: &str| Kind::PowerPoint { path: path.into() };
+    assert!(!deck("a.pptx").same_source(&deck("b.pptx")));
 }

@@ -199,6 +199,8 @@ pub enum Icon {
     Stats,
     Speaker(bool),
     Follow,
+    /// Back or on by one: slides.
+    Step(bool),
 }
 
 pub fn icon_button(ui: &mut egui::Ui, icon: Icon, on: Option<Color32>) -> egui::Response {
@@ -276,6 +278,16 @@ pub fn draw_icon(ui: &egui::Ui, c: Pos2, icon: Icon, col: Color32) {
             p.add(egui::Shape::convex_polygon(up, Color32::from_rgb(70, 190, 80), Stroke::NONE));
             let dn = vec![c + vec2(0.0, 0.0), c + vec2(6.0, 0.0), c + vec2(3.0, 4.5)];
             p.add(egui::Shape::convex_polygon(dn, ORANGE, Stroke::NONE));
+        }
+        Icon::Step(forward) => {
+            let s = if forward { 1.0 } else { -1.0 };
+            let mut t = vec![c + vec2(-2.5 * s, -4.5), c + vec2(3.0 * s, 0.0), c + vec2(-2.5 * s, 4.5)];
+            // Mirrored, the points must still run the same way round.
+            if !forward {
+                t.reverse();
+            }
+            p.add(egui::Shape::convex_polygon(t, col, Stroke::NONE));
+            p.rect_filled(Rect::from_center_size(c + vec2(4.2 * s, 0.0), vec2(1.8, 9.0)), 0.0, col);
         }
     }
 }

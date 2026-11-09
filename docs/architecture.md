@@ -24,6 +24,7 @@ so a slow window cannot hold up the show.
 | `mixer.rs` | The video loop: what to compose, and reusing what has not changed |
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
 | `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
+| `slides.rs` | Presentations, turned into one picture per slide by PowerPoint or LibreOffice |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
