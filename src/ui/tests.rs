@@ -462,6 +462,20 @@ fn loading_a_project_leaves_nothing_of_the_last_one() {
     end(h);
 }
 
+/// A scene added from the menu used to flash its settings and close them at
+/// once, as that frame's copy of the project did not have it yet.
+#[test]
+fn an_input_added_from_the_menu_keeps_its_settings_open() {
+    let mut h = desk(small_project());
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Scène (couches)");
+    let added = project(&h).inputs.last().map(|i| i.id);
+    assert!(added.is_some_and(|id| id > 16), "a scene was added");
+    h.run_steps(3);
+    assert_eq!(h.state().editing, added);
+    end(h);
+}
+
 /// Every function by name, on the real engine. What needs an output or writes
 /// files is left to the end-to-end run.
 #[test]

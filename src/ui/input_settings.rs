@@ -20,7 +20,11 @@ impl App {
     pub(super) fn input_settings_window(&mut self, ctx: &egui::Context, project: &Project) {
         let Some(id) = self.editing else { return };
         let Some(before) = project.inputs.iter().find(|i| i.id == id).cloned() else {
-            self.editing = None;
+            // An input added from a menu earlier in this frame is not in this
+            // frame's copy of the project yet; only a closed one ends editing.
+            if self.with(|s| s.input(id).is_none()) {
+                self.editing = None;
+            }
             return;
         };
         let mut input = before.clone();
