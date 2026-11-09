@@ -226,8 +226,13 @@ impl App {
         // shows a project already open. A normal first start is an empty desk.
         let mut imported = None;
         let mut import_report = None;
-        let opened = project_file.as_deref().and_then(|f| crate::vmix_import::load(f).ok());
-        let saved = if let Some((p, r)) = opened {
+        let file = project_file.as_deref();
+        let own =
+            file.filter(|f| !f.to_lowercase().ends_with(".vmix")).and_then(|f| bars::read_project(f).ok());
+        let opened = file.filter(|_| own.is_none()).and_then(|f| crate::vmix_import::load(f).ok());
+        let saved = if let Some(p) = own {
+            Saved::fresh(p)
+        } else if let Some((p, r)) = opened {
             imported = Some(r.name.clone());
             import_report = Some(r);
             Saved::fresh(p)
