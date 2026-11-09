@@ -8,11 +8,13 @@ readme = "README.md"
 
 [dependencies]
 ab_glyph = { version = "0.2.32", features = ["variable-fonts"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 cpal = "0.18.2"
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "accesskit", "wayland", "x11"] }
 epaint_default_fonts = "0.37.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+pollster = "1.0.1"
 rayon = "1.12.0"
 rfd = "0.17.2"
 roxmltree = "0.21.2"
@@ -21,6 +23,7 @@ serde_json = "1.0.154"
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 ttf-parser = "0.25.1"
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "vulkan", "metal", "wgsl"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 # Pixel loops are far too slow unoptimised, even while developing.

@@ -315,6 +315,51 @@ fn every_settings_tab_and_tool_window_opens() {
     end(h);
 }
 
+/// The settings say what composes the picture, and unticking the card really
+/// moves the work to the processor without the output stopping.
+#[test]
+fn the_settings_show_and_switch_what_composes_the_picture() {
+    let mut h = desk(small_project());
+    h.state_mut().settings_open = true;
+    h.state_mut().settings_tab = 0;
+    let engine = h.state().engine.clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while *engine.compositor.lock().unwrap() == Compositor::Starting {
+        assert!(Instant::now() < deadline, "the mixer never chose");
+        wait(&mut h, 20);
+    }
+    h.run_steps(2);
+    assert!(
+        h.query_by_label_contains("Sur la carte graphique").is_some()
+            || h.query_by_label_contains("Sur le processeur").is_some()
+    );
+
+    click(&mut h, "Composer sur la carte graphique");
+    assert!(!engine.use_gpu.load(Ordering::Relaxed));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while *engine.compositor.lock().unwrap() != Compositor::Cpu("choisi dans les réglages".into()) {
+        assert!(Instant::now() < deadline, "still composing on the card");
+        wait(&mut h, 20);
+    }
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Sur le processeur : choisi dans les réglages").is_some());
+    let seq = engine.program_seq.load(Ordering::Acquire);
+    click(&mut h, "Coupe");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while engine.program_seq.load(Ordering::Acquire) == seq {
+        assert!(Instant::now() < deadline, "no output after the switch");
+        wait(&mut h, 20);
+    }
+
+    click(&mut h, "Composer sur la carte graphique");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while *engine.compositor.lock().unwrap() == Compositor::Cpu("choisi dans les réglages".into()) {
+        assert!(Instant::now() < deadline, "ticking it again changes nothing");
+        wait(&mut h, 20);
+    }
+    end(h);
+}
+
 #[test]
 fn a_settings_change_does_not_undo_what_the_desk_just_did() {
     let mut h = desk(small_project());

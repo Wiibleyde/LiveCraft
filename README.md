@@ -97,7 +97,8 @@ livecraft --screenshot out.png            # start, save a picture of the window,
 ### What is missing today
 
 - **Windows only.** The code uses Windows APIs for capture, screens and secrets.
-- **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
+- **Without a graphics card, the picture is composed on the CPU.** It holds 1080p on a desktop processor;
+  4K needs a DirectX 12 or Vulkan card, which LiveCraft uses by itself when there is one.
 - **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs, no virtual sets.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
 
@@ -110,15 +111,16 @@ Contributions of every size are welcome, in English or in French. You do not nee
 - 🎥 **Try it with real gear** and tell us what happens. This is the most useful thing right now.
 - 🐛 **Open an issue** with your Windows version, your hardware and what you expected.
 - 🌍 **Translate the interface**, once strings are out of the code.
-- 🦀 **Take something from the [roadmap](ROADMAP.md).** A compositor on the GPU is the biggest one.
+- 🦀 **Take something from the [roadmap](ROADMAP.md).**
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md). AI coding agents should read [AGENTS.md](AGENTS.md) too.
 
 ## Under the hood
 
-Rust with [egui](https://github.com/emilk/egui) for the window, [rayon](https://github.com/rayon-rs/rayon)
-for compositing and [cpal](https://github.com/RustAudio/cpal) for sound. FFmpeg runs as a separate
-process for each source and output. See [docs/architecture.md](docs/architecture.md).
+Rust with [egui](https://github.com/emilk/egui) for the window, [wgpu](https://github.com/gfx-rs/wgpu) for
+compositing on the graphics card, [rayon](https://github.com/rayon-rs/rayon) for compositing on the CPU and
+[cpal](https://github.com/RustAudio/cpal) for sound. FFmpeg runs as a separate process for each source and
+output. See [docs/architecture.md](docs/architecture.md).
 
 ## Security
 

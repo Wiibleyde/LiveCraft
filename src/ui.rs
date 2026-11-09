@@ -15,7 +15,7 @@ mod tools;
 mod windows;
 
 use crate::api::ApiConfig;
-use crate::engine::{Engine, ROUTES, State};
+use crate::engine::{Compositor, Engine, ROUTES, State};
 use crate::functions::Args;
 use crate::model::*;
 use crate::output;

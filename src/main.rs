@@ -3,6 +3,7 @@
 mod api;
 mod audio;
 mod browser;
+mod canvas;
 mod desk;
 mod dsp;
 mod engine;
@@ -10,6 +11,7 @@ mod extras;
 mod frame;
 mod functions;
 mod fx;
+mod gpu;
 mod mixer;
 mod model;
 #[cfg(test)]
