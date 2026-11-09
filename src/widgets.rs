@@ -107,10 +107,10 @@ pub fn draw_monitor(
     let hit = |ui: &egui::Ui, r: Rect, s: &str, tip: &str| {
         ui.interact(r, ui.scope_id().with((salt, s.to_string())), Sense::click()).on_hover_text(tip).clicked()
     };
-    clicks.gear = hit(ui, spot(0.0), "gear", "Réglages de l'entrée");
+    clicks.gear = hit(ui, spot(0.0), "gear", t!("widgets.input_settings"));
     draw_gear(ui, spot(0.0).center(), 6.0, Color32::WHITE);
     if extras {
-        clicks.safe = hit(ui, spot(1.0), "safe", "Zones de sécurité");
+        clicks.safe = hit(ui, spot(1.0), "safe", t!("widgets.safe_areas"));
         let r = spot(1.0).shrink(3.0);
         ui.painter().rect_stroke(r, 1.0, Stroke::new(1.3, Color32::WHITE), egui::StrokeKind::Inside);
         ui.painter().rect_stroke(
@@ -119,7 +119,7 @@ pub fn draw_monitor(
             Stroke::new(1.0, Color32::WHITE),
             egui::StrokeKind::Inside,
         );
-        clicks.scopes = hit(ui, spot(2.0), "scopes", "Forme d'onde et vectorscope");
+        clicks.scopes = hit(ui, spot(2.0), "scopes", t!("widgets.scopes"));
         let r = spot(2.0).shrink(3.0);
         for (n, c) in [Color32::RED, Color32::GREEN, Color32::from_rgb(70, 110, 255)].iter().enumerate() {
             let w = r.width() / 3.0;
@@ -348,27 +348,27 @@ pub fn draw_meter(ui: &egui::Ui, rect: Rect, peak: f32, muted: bool) {
 
 pub fn placement_editor(ui: &mut egui::Ui, p: &mut Placement) {
     ui.horizontal(|ui| {
-        if ui.button("Plein cadre").clicked() {
+        if ui.button(t!("widgets.full_frame")).clicked() {
             *p = Placement::FULL;
         }
-        if ui.button("Bas droit").clicked() {
+        if ui.button(t!("widgets.bottom_right")).clicked() {
             *p = Placement { x: 0.66, y: 0.64, scale: 0.3 };
         }
-        if ui.button("Haut droit").clicked() {
+        if ui.button(t!("widgets.top_right")).clicked() {
             *p = Placement { x: 0.66, y: 0.05, scale: 0.3 };
         }
     });
-    ui.add(egui::Slider::new(&mut p.scale, 0.05..=1.0).text("Taille"));
-    ui.add(egui::Slider::new(&mut p.x, -0.5..=1.0).text("Horizontal"));
-    ui.add(egui::Slider::new(&mut p.y, -0.5..=1.0).text("Vertical"));
+    ui.add(egui::Slider::new(&mut p.scale, 0.05..=1.0).text(t!("widgets.size")));
+    ui.add(egui::Slider::new(&mut p.x, -0.5..=1.0).text(t!("widgets.horizontal")));
+    ui.add(egui::Slider::new(&mut p.y, -0.5..=1.0).text(t!("widgets.vertical")));
 }
 
 pub fn border_editor(ui: &mut egui::Ui, b: &mut Border) {
     ui.horizontal(|ui| {
-        ui.label("Bordure");
+        ui.label(t!("widgets.border"));
         ui.color_edit_button_srgb(&mut b.color);
         ui.add(egui::DragValue::new(&mut b.thickness).range(0.0..=40.0).suffix(" px"));
-        ui.label("Arrondi");
+        ui.label(t!("widgets.rounding"));
         ui.add(egui::DragValue::new(&mut b.radius).range(0.0..=200.0).suffix(" px"));
     });
 }
@@ -428,7 +428,7 @@ pub fn video_controls(ui: &mut egui::Ui, rt: &sources::InputRt, width: f32) {
     let playing = rt.is_playing();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        if icon_button(ui, Icon::Restart, None).on_hover_text("Revenir au début").clicked() {
+        if icon_button(ui, Icon::Restart, None).on_hover_text(t!("widgets.back_to_start")).clicked() {
             rt.seek_ms.store(0, Ordering::Relaxed);
         }
         let icon = if playing { Icon::Pause } else { Icon::Play };
@@ -455,11 +455,12 @@ pub fn clock(ms: u64) -> String {
 pub fn device_combo(ui: &mut egui::Ui, label: &str, device: &mut String, list: &[String]) {
     ui.horizontal(|ui| {
         ui.label(label);
-        let shown = if device.is_empty() { "Aucune" } else { device.as_str() };
-        egui::ComboBox::from_id_salt(label).selected_text(shown).show_ui(ui, |ui| {
-            ui.selectable_value(device, String::new(), "Aucune");
+        let shown = if device.is_empty() { t!("widgets.none") } else { crate::audio::device_label(device) };
+        // Positional, not the label: the label changes with the interface language.
+        egui::ComboBox::from_id_salt(ui.unique_id()).selected_text(shown).show_ui(ui, |ui| {
+            ui.selectable_value(device, String::new(), t!("widgets.none"));
             for d in list {
-                ui.selectable_value(device, d.clone(), d);
+                ui.selectable_value(device, d.clone(), crate::audio::device_label(d));
             }
         });
     });
@@ -468,9 +469,9 @@ pub fn device_combo(ui: &mut egui::Ui, label: &str, device: &mut String, list: &
 pub fn input_combo(ui: &mut egui::Ui, salt: &str, value: &mut Option<u64>, project: &Project, skip: u64) {
     let shown = value
         .and_then(|id| project.inputs.iter().find(|i| i.id == id))
-        .map_or("Aucune".to_string(), |i| i.name.clone());
+        .map_or(t!("widgets.none").to_string(), |i| i.name.clone());
     egui::ComboBox::from_id_salt(salt).selected_text(shown).show_ui(ui, |ui| {
-        ui.selectable_value(value, None, "Aucune");
+        ui.selectable_value(value, None, t!("widgets.none"));
         let list = project.inputs.iter().filter(|i: &&Input| i.id != skip && i.kind.has_picture());
         for i in list {
             ui.selectable_value(value, Some(i.id), &i.name);
@@ -480,12 +481,12 @@ pub fn input_combo(ui: &mut egui::Ui, salt: &str, value: &mut Option<u64>, proje
 
 pub fn codec_label(name: &str) -> String {
     match name {
-        "libx264" => "H.264 processeur".into(),
-        "libx265" => "HEVC processeur".into(),
-        "libsvtav1" => "AV1 processeur".into(),
-        "h264_nvenc" => "H.264 carte NVIDIA".into(),
-        "hevc_nvenc" => "HEVC carte NVIDIA".into(),
-        "av1_nvenc" => "AV1 carte NVIDIA".into(),
+        "libx264" => t!("widgets.codec_h264_cpu").into(),
+        "libx265" => t!("widgets.codec_hevc_cpu").into(),
+        "libsvtav1" => t!("widgets.codec_av1_cpu").into(),
+        "h264_nvenc" => t!("widgets.codec_h264_nvidia").into(),
+        "hevc_nvenc" => t!("widgets.codec_hevc_nvidia").into(),
+        "av1_nvenc" => t!("widgets.codec_av1_nvidia").into(),
         "h264_qsv" => "H.264 Intel".into(),
         "hevc_qsv" => "HEVC Intel".into(),
         "h264_amf" => "H.264 AMD".into(),
