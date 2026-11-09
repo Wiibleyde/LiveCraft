@@ -26,6 +26,7 @@ so a slow window cannot hold up the show.
 | `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
+| `netvideo.rs`, `ndi.rs`, `omt.rs` | NDI and OMT in and out; runtimes loaded on first use, never shipped |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
 | `functions.rs`, `api.rs` | Named functions, and HTTP and TCP remote control |
 | `vmix_import.rs` | Reading `.vmix` projects |
