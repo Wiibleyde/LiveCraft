@@ -347,13 +347,14 @@ pub fn check(dir: &str) -> Result<String, String> {
         desk.looping(&short)?;
         desk.list(&short)?;
         desk.audio(dir)?;
+        let dvd = desk.dvd(dir)?;
         desk.countdown()?;
         desk.overlay()?;
         desk.web_pages()?;
-        desk.dvd(dir)
+        Ok(dvd)
     })();
     desk.engine.shutdown();
     steps.map(|dvd| {
-        format!("marques, reprise, boucle, liste, son, compte à rebours, incrustation, pages web, {dvd}")
+        format!("marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, pages web")
     })
 }
