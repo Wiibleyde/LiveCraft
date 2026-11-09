@@ -427,18 +427,20 @@ pub fn run_replay(rt: &Arc<InputRt>, w: usize, h: usize, fps: u32) {
         };
         rt.playing.store(true, Ordering::Relaxed);
         rt.pos_ms.store(0, Ordering::Relaxed);
-        rt.dur_ms.store(((play.end_s - play.start_s).max(0.0) * 1000.0) as u64, Ordering::Relaxed);
+        rt.dur_ms.store((play.span_s.max(0.0) * 1000.0) as u64, Ordering::Relaxed);
         play_clip(rt, &play, w, h, fps);
         rt.completions.fetch_add(1, Ordering::Relaxed);
         rt.playing.store(false, Ordering::Relaxed);
     }
 }
 
-fn clip_decoder(file: &str, play: &ReplayPlay, w: usize, h: usize, fps: u32) -> Option<std::process::Child> {
-    let vf = format!("setpts=PTS/{},{}", play.speed.max(0.01), fit_filter(w, h, fps));
+/// Decodes every picture of the clip as it is in the file: the player times
+/// them itself, from when each was taken.
+fn clip_decoder(clip: &ReplayClip, w: usize, h: usize) -> Option<std::process::Child> {
     ffmpeg()
-        .args(["-ss", &format!("{:.3}", play.start_s), "-to", &format!("{:.3}", play.end_s)])
-        .args(["-i", file, "-an", "-vf", &vf, "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+        .args(["-ss", &format!("{:.6}", clip.from_s), "-to", &format!("{:.6}", clip.to_s)])
+        .args(["-i", &clip.file, "-an", "-vf", &fit_scale(w, h), "-fps_mode", "passthrough"])
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -446,23 +448,36 @@ fn clip_decoder(file: &str, play: &ReplayPlay, w: usize, h: usize, fps: u32) -> 
         .ok()
 }
 
+struct Tile {
+    out: std::process::ChildStdout,
+    picture: Frame,
+    read: usize,
+    ended: bool,
+}
+
 fn play_clip(rt: &Arc<InputRt>, play: &ReplayPlay, w: usize, h: usize, fps: u32) {
-    let quad = play.files.len() > 1;
+    let quad = play.clips.len() > 1;
     let (cw, ch) = if quad { (w / 2, h / 2) } else { (w, h) };
-    let mut outs = Vec::new();
-    for file in play.files.iter().take(4) {
-        let Some(mut child) = clip_decoder(file, play, cw, ch, fps) else {
+    let mut tiles = Vec::new();
+    for clip in play.clips.iter().take(4) {
+        let Some(mut child) = clip_decoder(clip, cw, ch) else {
             rt.set_status(FFMPEG_MISSING);
             return;
         };
-        outs.push(child.stdout.take().unwrap());
+        tiles.push(Tile {
+            out: child.stdout.take().unwrap(),
+            picture: Frame::new(cw, ch),
+            read: 0,
+            ended: false,
+        });
         rt.adopt(child);
     }
     let period = Duration::from_secs_f64(1.0 / fps as f64);
-    let mut tiles = vec![Frame::new(cw, ch); outs.len()];
+    // Slow motion walks through the moment slower than the show's clock.
+    let step = play.speed.max(0.01) as f64 / fps as f64;
     let mut next = Instant::now();
-    let mut frames = 0u64;
-    'clip: while !rt.stopped() {
+    let mut ticks = 0u64;
+    while !rt.stopped() {
         if rt.replay.lock().unwrap().is_some() {
             break;
         }
@@ -471,24 +486,37 @@ fn play_clip(rt: &Arc<InputRt>, play: &ReplayPlay, w: usize, h: usize, fps: u32)
             next = Instant::now();
             continue;
         }
-        for (out, tile) in outs.iter_mut().zip(&mut tiles) {
-            if out.read_exact(&mut tile.data).is_err() {
-                break 'clip;
+        let clock = ticks as f64 * step;
+        if clock >= play.span_s {
+            break;
+        }
+        // Each camera shows the picture it had at this moment: pictures lost
+        // while recording hold the one before for as long as they lasted, and
+        // copies made to fill a late tick are passed over.
+        for (tile, clip) in tiles.iter_mut().zip(&play.clips) {
+            while !tile.ended && clip.due(tile.read, fps).is_some_and(|t| t <= clock + 1e-6) {
+                if tile.out.read_exact(&mut tile.picture.data).is_ok() {
+                    tile.read += 1;
+                } else {
+                    tile.ended = true;
+                }
             }
+        }
+        if tiles.iter().all(|t| t.ended && t.read == 0) {
+            break;
         }
         let mut picture = Frame::solid(w, h, [0, 0, 0]);
         for (n, tile) in tiles.iter().enumerate() {
             if quad {
                 let (x, y) = ((n % 2 * cw) as f32, (n / 2 * ch) as f32);
-                picture.blit_region(tile, [0.0; 4], x, y, cw as f32, ch as f32, 255, 0.0);
+                picture.blit_region(&tile.picture, [0.0; 4], x, y, cw as f32, ch as f32, 255, 0.0);
             } else {
-                picture.copy_from(tile);
+                picture.copy_from(&tile.picture);
             }
         }
         rt.publish(picture);
-        frames += 1;
-        let done = frames as f64 / fps as f64 * play.speed as f64 * 1000.0;
-        rt.pos_ms.store(done as u64, Ordering::Relaxed);
+        ticks += 1;
+        rt.pos_ms.store((ticks as f64 * step * 1000.0) as u64, Ordering::Relaxed);
         next += period;
         let now = Instant::now();
         if next > now {

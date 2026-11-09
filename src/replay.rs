@@ -1,14 +1,21 @@
 //! Instant replay: each chosen input records to its own growing file while the
 //! show runs; marked moments play back from those files at any speed, on one
 //! camera or four at a time.
+//!
+//! Marks are moments of the show, not positions in a file: a file loses
+//! pictures when its encoder falls behind or the mixer runs late, and from then
+//! on lags the clock. Each file's [`FrameLog`] says when its pictures were
+//! taken, which turns a moment back into the right picture on every camera.
 
 use crate::engine::Engine;
 use crate::model::{AudioPick, Input, Kind};
-use crate::output::{Encoder, Spec, Target};
-use crate::sources::ReplayPlay;
+use crate::output::{Encoder, PICTURE_LEAD_S, Spec, Target};
+use crate::sources::{ReplayClip, ReplayPlay};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,7 +29,10 @@ pub struct Camera {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
 pub struct Event {
+    /// Seconds of the session, counted from the first picture of its first
+    /// camera, which is also where that camera's file begins.
     pub start_s: f64,
     pub end_s: f64,
     pub camera: usize,
@@ -31,11 +41,75 @@ pub struct Event {
     pub speed: f32,
     /// The recordings it was marked on: a later session records to new files,
     /// and this moment must keep pointing at the old ones.
-    #[serde(default)]
     pub files: Vec<String>,
     /// The tags as typed, so a comma can be typed before the next tag.
     #[serde(skip)]
     pub tag_text: Option<String>,
+}
+
+/// When each picture of a recording was taken. Pictures normally follow at
+/// the frame rate, so only breaks in that beat are kept: a steady hour is one
+/// entry, and each lost or late picture adds one.
+#[derive(Clone, Debug)]
+pub struct FrameLog {
+    period: Duration,
+    count: u64,
+    /// From picture `.0`, taken at `.1`, pictures follow one per period.
+    breaks: Vec<(u64, Instant)>,
+}
+
+fn apart(a: Instant, b: Instant) -> Duration {
+    a.max(b) - a.min(b)
+}
+
+impl FrameLog {
+    pub fn new(fps: u32) -> Self {
+        // Rounded as the mixer rounds its beat, so a steady hour stays on it.
+        Self { period: Duration::from_secs_f64(1.0 / fps.max(1) as f64), count: 0, breaks: Vec::new() }
+    }
+
+    /// Notes the next picture written to the file.
+    pub fn push(&mut self, taken: Instant) {
+        let n = self.count;
+        self.count += 1;
+        // A quarter period absorbs the scheduler's jitter, and still leaves
+        // every picture found inside its own slot.
+        if self.taken(n).is_none_or(|beat| apart(beat, taken) > self.period / 4) {
+            self.breaks.push((n, taken));
+        }
+    }
+
+    /// Where the file begins on the show's clock.
+    pub fn first(&self) -> Option<Instant> {
+        self.breaks.first().map(|b| b.1)
+    }
+
+    /// When picture `n` was taken. Pictures still on their way to the file are
+    /// expected on the beat.
+    pub fn taken(&self, n: u64) -> Option<Instant> {
+        let k = self.breaks.partition_point(|b| b.0 <= n).checked_sub(1)?;
+        let (first, at) = self.breaks[k];
+        Some(at + self.period * (n - first) as u32)
+    }
+
+    /// The picture on screen at `at`: the last one taken by then.
+    pub fn picture_at(&self, at: Instant) -> u64 {
+        let k = self.breaks.partition_point(|b| b.1 <= at);
+        let Some(&(first, start)) = k.checked_sub(1).and_then(|k| self.breaks.get(k)) else { return 0 };
+        let beats = (at - start).as_nanos() / self.period.as_nanos().max(1);
+        let n = first + beats as u64;
+        // A run of pictures ends where the next break begins.
+        self.breaks.get(k).map_or(n, |next| n.min(next.0 - 1))
+    }
+
+    /// Where picture `n` starts in the file, in seconds.
+    fn position_s(&self, n: u64) -> f64 {
+        n as f64 * self.period.as_secs_f64() + PICTURE_LEAD_S
+    }
+}
+
+fn duration(s: f64) -> Duration {
+    Duration::try_from_secs_f64(s.max(0.0)).unwrap_or_default()
 }
 
 #[derive(Default)]
@@ -43,31 +117,101 @@ pub struct ReplayState {
     pub cams: Vec<Camera>,
     pub started: Option<Instant>,
     pub events: Vec<Event>,
-    pub mark_in: Option<f64>,
+    pub mark_in: Option<Instant>,
     pub selected: Option<usize>,
     pub speed: f32,
     pub quad: bool,
     pub input: Option<u64>,
     pub folder: Option<PathBuf>,
+    /// Picture logs by file, kept after a session ends for the events on it.
+    logs: HashMap<String, Arc<Mutex<FrameLog>>>,
 }
 
 impl ReplayState {
-    /// Marks are positions in the files, which begin once the encoder is up,
-    /// a moment after the button was pressed.
-    fn now_s(&self) -> f64 {
-        let began = self.cams.first().and_then(|c| c.encoder.began());
-        began.map_or(0.0, |t| t.elapsed().as_secs_f64())
+    /// Takes over a new session's cameras.
+    pub(crate) fn begin(&mut self, cams: Vec<Camera>) {
+        for c in &cams {
+            self.logs.insert(c.path.clone(), c.encoder.pictures());
+        }
+        self.cams = cams;
+        self.started = Some(Instant::now());
+        // A mark left open was taken while other files were recording.
+        self.mark_in = None;
+    }
+
+    /// Where a session begins: the first picture of its first camera.
+    fn origin(&self, first_file: Option<&String>) -> Option<Instant> {
+        self.logs.get(first_file?)?.lock().unwrap().first()
     }
 
     pub fn recorded_s(&self) -> f64 {
-        self.now_s()
+        self.origin(self.cams.first().map(|c| &c.path)).map_or(0.0, |o| o.elapsed().as_secs_f64())
     }
 
-    fn mark(&mut self, start_s: f64, end_s: f64) {
+    /// Keeps the moment from `start` to `end` on the cameras recording now.
+    pub(crate) fn mark(&mut self, start: Instant, end: Instant) {
         let files = self.cams.iter().map(|c| c.path.clone()).collect();
-        let speed = self.speed;
+        self.mark_on(files, start, end);
+    }
+
+    fn mark_on(&mut self, files: Vec<String>, start: Instant, end: Instant) {
+        let origin = self.origin(files.first());
+        let secs = |at: Instant| origin.map_or(0.0, |o| at.saturating_duration_since(o).as_secs_f64());
+        let (start_s, end_s, speed) = (secs(start), secs(end), self.speed);
         self.events.push(Event { start_s, end_s, speed, files, ..Event::default() });
         self.selected = Some(self.events.len() - 1);
+    }
+
+    /// What playing an event shows: its camera, or four at once.
+    pub(crate) fn clip_of(&self, index: usize) -> Option<ReplayPlay> {
+        let e = self.events.get(index)?;
+        let all: Vec<String> = if e.files.is_empty() {
+            self.cams.iter().map(|c| c.path.clone()).collect()
+        } else {
+            e.files.clone()
+        };
+        let files: Vec<&String> =
+            if self.quad { all.iter().take(4).collect() } else { vec![all.get(e.camera).or(all.first())?] };
+        let speed = if e.speed > 0.0 { e.speed } else { self.speed.max(0.05) };
+        let origin = self.origin(all.first());
+        // Every camera is timed from the first one's opening picture, so the
+        // angles stay together whatever each of them lost.
+        let mut zero = None;
+        let mut clips = Vec::new();
+        for file in files {
+            let (Some(origin), Some(log)) = (origin, self.logs.get(file)) else {
+                // Without a log, marks are positions in the files, as they
+                // were before logs.
+                clips.push(ReplayClip {
+                    file: file.clone(),
+                    from_s: e.start_s,
+                    to_s: e.end_s,
+                    times: Vec::new(),
+                });
+                continue;
+            };
+            let log = log.lock().unwrap();
+            let first = log.picture_at(origin + duration(e.start_s));
+            let last = log.picture_at(origin + duration(e.end_s)).max(first);
+            let zero = *zero.get_or_insert_with(|| log.taken(first).unwrap_or(origin));
+            // Half a picture either side: the cut falls between two pictures,
+            // whatever rounding the file's clock does.
+            let half = log.period.as_secs_f64() / 2.0;
+            let since = |n| log.taken(n).map_or(0.0, |t| t.saturating_duration_since(zero).as_secs_f64());
+            clips.push(ReplayClip {
+                file: file.clone(),
+                from_s: (log.position_s(first) - half).max(0.0),
+                to_s: log.position_s(last) + half,
+                times: (first..=last).map(since).collect(),
+            });
+        }
+        let span_s = match (zero, origin) {
+            (Some(zero), Some(origin)) => {
+                (origin + duration(e.end_s)).saturating_duration_since(zero).as_secs_f64()
+            }
+            _ => e.end_s - e.start_s,
+        };
+        Some(ReplayPlay { clips, span_s, speed })
     }
 }
 
@@ -135,13 +279,9 @@ impl Engine {
             id
         });
         let mut r = self.replay.lock().unwrap();
-        r.cams = cams;
-        r.started = Some(Instant::now());
+        r.begin(cams);
         r.input = Some(id);
         r.folder = Some(folder);
-        // A mark left open belongs to the session before: its time means
-        // nothing against this one's clock.
-        r.mark_in = None;
         if r.speed <= 0.0 {
             r.speed = 0.5;
         }
@@ -160,15 +300,14 @@ impl Engine {
     pub fn replay_mark_in(&self) {
         let mut r = self.replay.lock().unwrap();
         if r.started.is_some() {
-            r.mark_in = Some(r.now_s());
+            r.mark_in = Some(Instant::now());
         }
     }
 
     pub fn replay_mark_out(&self) {
         let mut r = self.replay.lock().unwrap();
         if let Some(start) = r.mark_in.take() {
-            let end = r.now_s();
-            r.mark(start, end);
+            r.mark(start, Instant::now());
         }
     }
 
@@ -178,27 +317,16 @@ impl Engine {
         if r.started.is_none() {
             return;
         }
-        let end = r.now_s();
-        r.mark((end - seconds).max(0.0), end);
+        let end = Instant::now();
+        // Before the session began counts as its start.
+        r.mark(end.checked_sub(duration(seconds)).unwrap_or(end), end);
     }
 
     /// Plays an event on the Replay input, on its camera or four at once.
     pub fn replay_play(&self, index: usize) -> Option<u64> {
         let (play, input) = {
             let r = self.replay.lock().unwrap();
-            let e = r.events.get(index)?;
-            let all: Vec<String> = if e.files.is_empty() {
-                r.cams.iter().map(|c| c.path.clone()).collect()
-            } else {
-                e.files.clone()
-            };
-            let files: Vec<String> = if r.quad {
-                all.iter().take(4).cloned().collect()
-            } else {
-                vec![all.get(e.camera).or(all.first())?.clone()]
-            };
-            let speed = if e.speed > 0.0 { e.speed } else { r.speed.max(0.05) };
-            (ReplayPlay { files, start_s: e.start_s, end_s: e.end_s, speed }, r.input?)
+            (r.clip_of(index)?, r.input?)
         };
         let rt = self.rt(input)?;
         rt.playing.store(true, Ordering::Relaxed);
@@ -210,6 +338,120 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FPS: u32 = 30;
+
+    fn beat() -> Duration {
+        Duration::from_secs_f64(1.0 / FPS as f64)
+    }
+
+    /// The mixer's ticks in a session that stalls for 0.4 s at tick 75.
+    fn tick(t0: Instant, n: u32) -> Instant {
+        let stall = if n >= 75 { Duration::from_millis(400) } else { Duration::ZERO };
+        t0 + beat() * n + stall
+    }
+
+    /// A camera that loses ticks 45 to 74, then at the late tick 75 adds 12
+    /// copies for the ticks it missed, as the mixer does, then records
+    /// steadily: tick 100 is the file's picture 82.
+    fn lossy(t0: Instant) -> FrameLog {
+        let mut log = FrameLog::new(FPS);
+        for n in (0..45).chain(75..150) {
+            let copies = if n == 75 { 13 } else { 1 };
+            for _ in 0..copies {
+                log.push(tick(t0, n));
+            }
+        }
+        log
+    }
+
+    fn steady(t0: Instant) -> FrameLog {
+        let mut log = FrameLog::new(FPS);
+        (0..150).for_each(|n| log.push(tick(t0, n)));
+        log
+    }
+
+    fn session(cams: Vec<(&str, FrameLog)>) -> ReplayState {
+        let mut r = ReplayState { speed: 1.0, ..ReplayState::default() };
+        for (file, log) in cams {
+            r.logs.insert(file.into(), Arc::new(Mutex::new(log)));
+        }
+        r
+    }
+
+    /// The pictures ffmpeg reads for a clip: picture n of a file sits at n
+    /// frames past the lead, and reading keeps those inside the bounds.
+    fn pictures_read(clip: &ReplayClip) -> (u64, u64) {
+        let picture = |s: f64| ((s - PICTURE_LEAD_S) * FPS as f64).ceil() as u64;
+        (picture(clip.from_s), picture(clip.to_s) - 1)
+    }
+
+    #[test]
+    fn marks_find_their_pictures_after_lost_ones() {
+        let t0 = Instant::now();
+        let mut r = session(vec![("cam1.ts", lossy(t0))]);
+        let half = beat() / 2;
+        r.mark_on(vec!["cam1.ts".into()], tick(t0, 100) + half, tick(t0, 140) + half);
+        let play = r.clip_of(0).unwrap();
+        assert_eq!(pictures_read(&play.clips[0]), (82, 122), "the pictures on screen at the marks");
+        assert!((play.span_s - 40.5 / FPS as f64).abs() < 1e-6, "lasts as long as marked: {}", play.span_s);
+    }
+
+    #[test]
+    fn lost_pictures_keep_their_time_in_a_replay() {
+        let t0 = Instant::now();
+        let mut r = session(vec![("cam1.ts", lossy(t0))]);
+        let half = beat() / 2;
+        r.mark_on(vec!["cam1.ts".into()], tick(t0, 30) + half, tick(t0, 90) + half);
+        let play = r.clip_of(0).unwrap();
+        let clip = &play.clips[0];
+        assert_eq!(pictures_read(clip), (30, 72));
+        // What the player shows at a moment: the last picture due by then.
+        let shown = |s: f64| clip.times.iter().filter(|t| **t <= s + 1e-6).count() - 1;
+        assert_eq!(shown(1.0), 14, "a second in, the picture before the loss still holds, as on the show");
+        assert_eq!(shown(1.9), 27, "the late tick shows once, its copies passed over");
+        assert_eq!(shown(1.9 + 1.0 / FPS as f64), 28);
+        assert!((play.span_s - (60.5 / FPS as f64 + 0.4)).abs() < 1e-6, "{}", play.span_s);
+    }
+
+    #[test]
+    fn four_angles_stay_together_when_one_lost_pictures() {
+        let t0 = Instant::now();
+        let mut r = session(vec![("cam1.ts", steady(t0)), ("cam2.ts", lossy(t0))]);
+        r.quad = true;
+        let half = beat() / 2;
+        r.mark_on(vec!["cam1.ts".into(), "cam2.ts".into()], tick(t0, 100) + half, tick(t0, 140) + half);
+        let play = r.clip_of(0).unwrap();
+        assert_eq!(pictures_read(&play.clips[0]), (100, 140));
+        assert_eq!(pictures_read(&play.clips[1]), (82, 122));
+        assert_eq!(play.clips[0].times, play.clips[1].times, "each picture shows at the same moment");
+    }
+
+    #[test]
+    fn moments_marked_without_a_log_play_from_their_positions() {
+        let old = r#"{"start_s":2.0,"end_s":5.0,"camera":0,"text":"But","tags":[],"speed":0.5}"#;
+        let mut e: Event = serde_json::from_str(old).unwrap();
+        e.files = vec!["ancien.ts".into()];
+        let r = ReplayState { events: vec![e], ..ReplayState::default() };
+        let play = r.clip_of(0).unwrap();
+        let clip = &play.clips[0];
+        assert_eq!((clip.from_s, clip.to_s, play.span_s, play.speed), (2.0, 5.0, 3.0, 0.5));
+        assert_eq!(clip.due(30, FPS), Some(1.0), "pictures follow at the frame rate");
+    }
+
+    #[test]
+    fn a_steady_hour_costs_one_entry() {
+        let t0 = Instant::now();
+        let mut log = FrameLog::new(FPS);
+        let hour = 3600 * FPS;
+        for n in 0..hour {
+            // A scheduler wakes a little late, never on the dot.
+            log.push(t0 + beat() * n + Duration::from_millis((n % 7) as u64));
+        }
+        assert_eq!(log.breaks.len(), 1);
+        let last = (hour - 1) as u64;
+        assert_eq!(log.picture_at(log.taken(last).unwrap() + beat() / 2), last, "no drift over an hour");
+    }
 
     #[test]
     fn events_are_found_by_note_or_tag() {

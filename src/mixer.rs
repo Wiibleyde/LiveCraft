@@ -475,7 +475,7 @@ impl Engine {
             self.update_preview(&mut m, &c);
             let refresh_all = tick_n.is_multiple_of((fps / 6).max(1));
             self.update_routes(&mut m, &c, refresh_all);
-            self.feed_outputs(&mut m, &c);
+            self.feed_outputs(&mut m, &c, now);
             if refresh_all {
                 self.update_thumbs(&mut m, &c);
             }
@@ -503,9 +503,10 @@ impl Engine {
                 self.stats.late_ticks.fetch_add(1, Ordering::Relaxed);
                 // Fell behind. The picture skips ticks, but a recording must
                 // stay as long as its sound, so it repeats the frame it missed.
+                // The copies keep the moment of the tick whose picture they show.
                 let missed = (now - next).as_secs_f64() / period.as_secs_f64();
                 for _ in 0..(missed as u32).min(fps) {
-                    self.feed_outputs(&mut m, &c);
+                    self.feed_outputs(&mut m, &c, last);
                 }
                 next = now;
             }
@@ -765,18 +766,19 @@ impl Engine {
         }
     }
 
-    fn feed_outputs(&self, m: &mut Mixer, c: &Ctx) {
+    /// `taken` is the tick's moment: replays find pictures by it.
+    fn feed_outputs(&self, m: &mut Mixer, c: &Ctx, taken: Instant) {
         let out = self.program.lock().unwrap().clone();
         for enc in self.recorders.lock().unwrap().iter() {
-            enc.push_video(out.clone());
+            enc.push_video(out.clone(), taken);
         }
         for enc in self.streamers.lock().unwrap().iter() {
-            enc.push_video(out.clone());
+            enc.push_video(out.clone(), taken);
         }
         drop(out);
         for (id, enc) in self.multi.lock().unwrap().iter() {
             if let Some(f) = m.picture(*id, c, 0) {
-                enc.push_video(f);
+                enc.push_video(f, taken);
             }
         }
         let srt: Vec<Route> = self.srt.lock().unwrap().iter().map(|(r, _)| *r).collect();
@@ -784,7 +786,7 @@ impl Engine {
             if let Some(f) = self.route_frame(route, m, c)
                 && let Some((_, enc)) = self.srt.lock().unwrap().get(n)
             {
-                enc.push_video(f);
+                enc.push_video(f, taken);
             }
         }
         let cams: Vec<u64> = self.replay.lock().unwrap().cams.iter().map(|c| c.input).collect();
@@ -792,7 +794,7 @@ impl Engine {
             if let Some(f) = m.picture(id, c, 0)
                 && let Some(cam) = self.replay.lock().unwrap().cams.get(n)
             {
-                cam.encoder.push_video(f);
+                cam.encoder.push_video(f, taken);
             }
         }
     }
