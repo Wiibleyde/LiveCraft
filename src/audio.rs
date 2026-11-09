@@ -1,6 +1,7 @@
 //! The sound thread: treats each input, sums the Master and A to G buses,
 //! feeds headphones and output devices, and hands sound to recordings.
 
+use crate::clock::{self, Drift, Pace, Take};
 use crate::dsp::Chain;
 use crate::engine::Engine;
 use crate::model::{AudioCfg, AudioPick, Kind};
@@ -20,6 +21,10 @@ pub const DEFAULT_DEVICE: &str = "Sortie par défaut";
 
 /// How long a device that failed is left alone before trying it again.
 const RETRY: Duration = Duration::from_secs(2);
+
+/// Up to this far behind, blocks run back to back so that none is missing;
+/// further, the time is given up as silence in recordings.
+const CATCH_UP: u64 = clock::NS / 2;
 
 struct DeviceOut {
     ring: Arc<Ring>,
@@ -115,6 +120,10 @@ struct Strip {
     audible: bool,
     solo: bool,
     always_on: bool,
+    /// Its sound comes at a device's or a sender's pace, not ours.
+    live: bool,
+    /// A sender, which can also run ahead and wait for room.
+    sender: bool,
 }
 
 struct Mix {
@@ -142,6 +151,8 @@ impl Engine {
                 audible: !i.audio.muted && (!i.audio.follow || air.contains(&i.id)),
                 solo: s.solo.contains(&i.id),
                 always_on: is_always_on(&i.kind),
+                live: is_live(&i.kind),
+                sender: matches!(i.kind, Kind::Network { .. }),
             })
             .collect();
         let fade = if p.ftb_audio { 1.0 - s.ftb_level } else { 1.0 };
@@ -190,16 +201,20 @@ impl Engine {
         let mut devices: HashMap<String, Slot> = HashMap::new();
         let mut chains: HashMap<u64, Chain> = HashMap::new();
         let mut gains: HashMap<u64, f32> = HashMap::new();
+        let mut drifts: HashMap<u64, Drift> = HashMap::new();
+        let mut raw = vec![0f32; BLOCK + 2];
         let mut tmp = vec![0f32; BLOCK];
         let mut buses = vec![vec![0f32; BLOCK]; 8];
         let mut solo = vec![0f32; BLOCK];
-        let mut next = Instant::now();
+        let mut pace = Pace::new(clock::now(), (AUDIO_RATE / FRAMES) as u32);
+        let mut skipped = 0;
         while !self.quit.load(Ordering::Relaxed) {
             let mix = self.read_mix();
             buses.iter_mut().for_each(|b| b.fill(0.0));
             solo.fill(0.0);
             chains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             gains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
+            drifts.retain(|id, _| mix.strips.iter().any(|s| s.id == *id && s.live));
             for strip in &mix.strips {
                 let Some(rt) = self.rt(strip.id) else { continue };
                 let Some(ring) = &rt.audio else { continue };
@@ -207,7 +222,28 @@ impl Engine {
                     rt.peak.store(0, Ordering::Relaxed);
                     continue;
                 }
-                ring.pull(&mut tmp);
+                // Time the loop gave up went by for every input too: a file's
+                // sound stays with its picture, a live input drops what aged.
+                let take = match strip.live.then(|| drifts.entry(strip.id).or_default()) {
+                    Some(drift) => {
+                        if skipped > 0 {
+                            drift.resync();
+                        }
+                        let held = strip.sender && ring.room() < 2 * BLOCK;
+                        drift.take(ring.queued(), FRAMES, held)
+                    }
+                    None => {
+                        ring.discard(skipped as usize * FRAMES);
+                        Take { discard: 0, frames: FRAMES }
+                    }
+                };
+                ring.discard(take.discard);
+                if take.frames == FRAMES {
+                    ring.pull(&mut tmp);
+                } else {
+                    ring.pull(&mut raw[..take.frames * 2]);
+                    fit(&raw[..take.frames * 2], &mut tmp);
+                }
                 let chain = chains.entry(strip.id).or_default();
                 chain.process(&mut tmp, &strip.cfg);
                 let fader = strip.cfg.volume * strip.cfg.volume;
@@ -260,17 +296,11 @@ impl Engine {
 
             let default = default_name.lock().unwrap().clone();
             play_routes(&mix, &buses, &solo, &mut devices, &default);
-            self.feed_encoders(&buses);
+            self.feed_encoders(&buses, pace.stamp());
 
-            next += Duration::from_millis(20);
-            let now = Instant::now();
-            if next > now {
-                thread::sleep(next - now);
-            } else if now - next > Duration::from_millis(500) {
-                next = now;
-            }
-            // Slightly late runs the next block at once: recordings need
-            // every block to stay in step with the picture.
+            let step = pace.advance(clock::now(), CATCH_UP);
+            skipped = step.skipped;
+            thread::sleep(step.wait);
         }
     }
 
@@ -282,22 +312,23 @@ impl Engine {
         *self.audio_devices.lock().unwrap() = names;
     }
 
-    fn feed_encoders(&self, buses: &[Vec<f32>]) {
+    /// `at` is the time on the shared clock of the block's first frame.
+    fn feed_encoders(&self, buses: &[Vec<f32>], at: u64) {
         let pcm = |pick: AudioPick| interleave(buses, pick);
         for enc in self.recorders.lock().unwrap().iter() {
-            enc.push_audio(pcm(enc.pick));
+            enc.push_audio(pcm(enc.pick), at);
         }
         for enc in self.streamers.lock().unwrap().iter() {
-            enc.push_audio(pcm(enc.pick));
+            enc.push_audio(pcm(enc.pick), at);
         }
         for (_, enc) in self.multi.lock().unwrap().iter() {
-            enc.push_audio(pcm(enc.pick));
+            enc.push_audio(pcm(enc.pick), at);
         }
         for (_, enc) in self.srt.lock().unwrap().iter() {
-            enc.push_audio(pcm(enc.pick));
+            enc.push_audio(pcm(enc.pick), at);
         }
         for cam in self.replay.lock().unwrap().cams.iter() {
-            cam.encoder.push_audio(pcm(cam.encoder.pick));
+            cam.encoder.push_audio(pcm(cam.encoder.pick), at);
         }
     }
 }
@@ -350,11 +381,39 @@ fn is_always_on(kind: &Kind) -> bool {
     matches!(kind, Kind::Microphone { .. } | Kind::SystemAudio | Kind::Tone | Kind::Network { .. })
 }
 
+/// Sound timed by a device or a sender rather than by our clock, which a
+/// file or the test tone is: it can run fast or slow and must be kept in step.
+fn is_live(kind: &Kind) -> bool {
+    matches!(kind, Kind::Microphone { .. } | Kind::SystemAudio | Kind::Network { .. })
+}
+
 /// Balance from -1 (left) to 1 (right): the centre leaves both sides at full
 /// level, and moving away only turns the other side down.
 fn balance(b: f32) -> (f32, f32) {
     let b = b.clamp(-1.0, 1.0);
     ((1.0 - b).min(1.0), (1.0 + b).min(1.0))
+}
+
+/// Spreads stereo `src` over `out` by linear interpolation. Taking one frame
+/// more or less than a block then plays a thousandth faster or slower for
+/// 20 ms instead of jumping, and the block's first and last frames stay put
+/// so blocks still join without a step.
+fn fit(src: &[f32], out: &mut [f32]) {
+    let (n, m) = (src.len() / 2, out.len() / 2);
+    if n == 0 {
+        out.fill(0.0);
+        return;
+    }
+    let scale = (n - 1) as f32 / (m - 1).max(1) as f32;
+    for (j, pair) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        let x = j as f32 * scale;
+        let i = (x as usize).min(n - 1);
+        let k = (i + 1).min(n - 1);
+        let t = x - i as f32;
+        for c in 0..2 {
+            pair[c] = src[i * 2 + c] + (src[k * 2 + c] - src[i * 2 + c]) * t;
+        }
+    }
 }
 
 /// Puts the picked buses side by side as a multi-track block of 16-bit sound.
@@ -407,6 +466,23 @@ mod tests {
         let names: Vec<String> = AudioPick::all().into_iter().map(|(n, _)| n).collect();
         for want in ["AB", "CD", "DE", "ABCD", "DEFG"] {
             assert!(names.iter().any(|n| n == want));
+        }
+    }
+
+    /// Keeping a live input in step must not click: a block made from one
+    /// frame more or one less is as smooth as the wave, into the next block too.
+    #[test]
+    fn a_block_one_frame_long_or_short_stays_smooth() {
+        let w = 1000.0 * std::f32::consts::TAU / AUDIO_RATE as f32;
+        let wave: Vec<f32> = (0..FRAMES + 2).flat_map(|n| [(n as f32 * w).sin(); 2]).collect();
+        for frames in [FRAMES - 1, FRAMES + 1] {
+            let mut out = vec![0f32; BLOCK];
+            fit(&wave[..frames * 2], &mut out);
+            assert_eq!((out[0], out[BLOCK - 1]), (wave[0], wave[frames * 2 - 1]));
+            out.extend_from_slice(&wave[frames * 2..frames * 2 + 2]);
+            let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+            let steepest = left.windows(2).map(|p| (p[1] - p[0]).abs()).fold(0f32, f32::max);
+            assert!(steepest <= w * 1.01, "{frames} frames: a step of {steepest}");
         }
     }
 }

@@ -37,6 +37,34 @@ fn probe(path: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).replace(['\r', '\n'], " "))
 }
 
+/// Where the picture and the sound of a file end, from their packets. Both
+/// start together, so a recording whose sound and picture drifted apart ends
+/// one before the other.
+fn ends(path: &str) -> Result<(f64, f64), String> {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "packet=codec_type,pts_time,duration_time", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let (mut picture, mut sound) = (0f64, 0f64);
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut field = line.split(',');
+        let kind = field.next();
+        let mut number = || field.next().and_then(|v| v.parse::<f64>().ok());
+        let Some(pts) = number() else { continue };
+        let end = pts + number().unwrap_or(0.0);
+        match kind {
+            Some("video") => picture = picture.max(end),
+            Some("audio") => sound = sound.max(end),
+            _ => {}
+        }
+    }
+    if picture == 0.0 || sound == 0.0 {
+        return Err(format!("{path} : image ou son absent"));
+    }
+    Ok((picture, sound))
+}
+
 fn http_get(path: &str) -> Result<String, String> {
     let mut s = TcpStream::connect(("127.0.0.1", 8088)).map_err(|e| e.to_string())?;
     write!(s, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:8088\r\n\r\n").map_err(|e| e.to_string())?;
@@ -168,9 +196,11 @@ fn check(dir: &str) -> Result<String, String> {
     }
 
     let peak = rt.peak();
-    let dropped: u64 =
-        engine.recorders.lock().unwrap().iter().map(|r| r.dropped.load(Ordering::Relaxed)).sum();
+    let (dropped, repeated) = engine.recorders.lock().unwrap().iter().fold((0, 0), |(d, r), e| {
+        (d + e.dropped.load(Ordering::Relaxed), r + e.repeated.load(Ordering::Relaxed))
+    });
     let fps = engine.stats.ticks_per_sec.load(Ordering::Relaxed);
+    let frame_s = 1.0 / engine.state.lock().unwrap().project.fps.max(1) as f64;
     let mix_us = engine.stats.mix_us.load(Ordering::Relaxed);
     if let Some(e) = engine.output_error.lock().unwrap().clone() {
         return Err(e);
@@ -182,7 +212,8 @@ fn check(dir: &str) -> Result<String, String> {
         return Err("aucun son de la vidéo".into());
     }
     let one = probe(&first)?;
-    let second = probe(&first.replace("-1.mp4", "-2.mkv"))?;
+    let second_path = first.replace("-1.mp4", "-2.mkv");
+    let second = probe(&second_path)?;
     let streamed = probe(&received)?;
     if !one.contains("video") || !one.contains("audio") {
         return Err(format!("enregistrement incomplet : {one}"));
@@ -200,8 +231,19 @@ fn check(dir: &str) -> Result<String, String> {
     if !multi {
         return Err("multi-enregistrement sans fichier".into());
     }
+    // Late ticks and full queues happen in a run this busy: whatever they
+    // cost, sound and picture must still end together.
+    let mut apart = Vec::new();
+    for file in [&first, &second_path] {
+        let (picture, sound) = ends(file)?;
+        if (picture - sound).abs() > frame_s {
+            return Err(format!("{file} : image jusqu'à {picture:.3} s, son jusqu'à {sound:.3} s"));
+        }
+        apart.push(format!("{:.0} ms", (sound - picture) * 1000.0));
+    }
     Ok(format!(
         "enregistreurs {one}/ {second}| diffusion {streamed}| cadence {fps}/s, rendu {mix_us} µs, \
-         images perdues {dropped}, crête son {peak:.2}"
+         images perdues {dropped}, répétées {repeated}, écart son-image {}, crête son {peak:.2}",
+        apart.join(" / ")
     ))
 }

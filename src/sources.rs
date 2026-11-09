@@ -35,6 +35,18 @@ impl Ring {
         self.cap.saturating_sub(self.q.lock().unwrap().len())
     }
 
+    /// Stereo frames waiting to be pulled.
+    pub fn queued(&self) -> usize {
+        self.q.lock().unwrap().len() / 2
+    }
+
+    /// Throws away up to `frames` of the oldest stereo frames.
+    pub fn discard(&self, frames: usize) {
+        let mut q = self.q.lock().unwrap();
+        let n = (frames * 2).min(q.len());
+        q.drain(..n);
+    }
+
     /// Adds samples, dropping the oldest if the reader fell behind.
     pub fn push(&self, s: &[f32]) {
         let mut q = self.q.lock().unwrap();
