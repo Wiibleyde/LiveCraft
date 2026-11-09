@@ -10,9 +10,22 @@ permissions:
 
 jobs:
   check:
-    runs-on: windows-latest
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Install system packages
+        if: runner.os == 'Linux'
+        # ALSA headers for sound; DejaVu for the font test; a keyring so that
+        # sealing secrets goes through the Secret Service as on a desktop.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config fonts-dejavu-core dbus gnome-keyring
       - name: Install Rust
         run: |
           rustup update stable
@@ -23,7 +36,12 @@ jobs:
           path: |
             ~/.cargo/registry
             target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - name: Test
+        if: runner.os != 'Linux'
+        run: cargo test
+      - name: Test, with an unlocked keyring
+        if: runner.os == 'Linux'
+        run: dbus-run-session -- sh -c 'printf ci | gnome-keyring-daemon --unlock --components=secrets > /dev/null && cargo test'
