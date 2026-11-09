@@ -3,6 +3,7 @@
 mod api;
 mod audio;
 mod browser;
+mod decode;
 mod desk;
 mod dsp;
 mod engine;

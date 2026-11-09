@@ -2,6 +2,7 @@
 //! lists and replay clips. A file is decoded by ffmpeg and read at the output
 //! rate, so a paused file simply stops being read and costs no decoding.
 
+use crate::decode::{self, Hardware};
 use crate::frame::Frame;
 use crate::model::ListItem;
 use crate::sources::*;
@@ -108,6 +109,8 @@ enum End {
     Stopped,
     Seek(u64),
     Jump,
+    /// The graphics card failed; software carries on from the position reached.
+    CardFailed,
 }
 
 fn start_audio(
@@ -139,8 +142,30 @@ fn wait_for_pump(pump: Option<thread::JoinHandle<()>>) {
     }
 }
 
+/// Whether the graphics card decodes a file: allowed by the desk, known to pay
+/// off for this file, and not already failed on it.
+struct CardChoice<'a> {
+    allowed: Option<Hardware>,
+    path: &'a str,
+    failed: bool,
+}
+
+impl CardChoice<'_> {
+    fn now(&self) -> Option<Hardware> {
+        self.allowed.filter(|_| !self.failed && decode::verdict(self.path) == Some(true))
+    }
+}
+
 /// Plays from `start_ms` until the file ends or something interrupts it.
-fn play_once(rt: &Arc<InputRt>, spec: &Spec, start_ms: u64, w: usize, h: usize, fps: u32) -> End {
+fn play_once(
+    rt: &Arc<InputRt>,
+    spec: &Spec,
+    start_ms: u64,
+    w: usize,
+    h: usize,
+    fps: u32,
+    choice: &CardChoice,
+) -> End {
     let size = w * h * 4;
     let frame_ms = 1000.0 / fps as f64;
     let vf = if (spec.rate - 1.0).abs() < 0.001 {
@@ -148,7 +173,15 @@ fn play_once(rt: &Arc<InputRt>, spec: &Spec, start_ms: u64, w: usize, h: usize, 
     } else {
         format!("setpts=PTS/{},{}", spec.rate, fit_filter(w, h, fps))
     };
-    let spawned = ffmpeg()
+    let card = choice.now();
+    let mut cmd = ffmpeg();
+    if let Some(card) = card {
+        // A decoding error then ends ffmpeg, so a card failing mid-file hands
+        // over to software instead of leaving a frozen or broken picture.
+        cmd.args(card).arg("-xerror");
+    }
+    rt.hardware.store(card.is_some(), Ordering::Relaxed);
+    let spawned = cmd
         .args(spec.time_args(start_ms))
         .args(&spec.input_args)
         .args(["-an", "-vf", &vf, "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
@@ -165,6 +198,7 @@ fn play_once(rt: &Arc<InputRt>, spec: &Spec, start_ms: u64, w: usize, h: usize, 
     };
     let log = watch_log(rt, &mut child);
     let mut out = child.stdout.take().unwrap();
+    let pid = child.id();
     rt.adopt(child);
 
     let audio_stop = Arc::new(AtomicBool::new(false));
@@ -186,12 +220,20 @@ fn play_once(rt: &Arc<InputRt>, spec: &Spec, start_ms: u64, w: usize, h: usize, 
         }
         // The first frame shows even when paused, so the card isn't black.
         if !rt.is_playing() && first_done {
+            // A file cued before the card was known to pay off moves to it
+            // before anyone sees it play.
+            if card.is_none() && choice.now().is_some() {
+                break End::Seek(rt.pos_ms.load(Ordering::Relaxed));
+            }
             thread::sleep(Duration::from_millis(15));
             anchor = Instant::now();
             shown = 0;
             continue;
         }
         if out.read_exact(&mut buf.data[..size]).is_err() {
+            if card.is_some() && !rt.stopped() && (!first_done || rt.ended_badly(pid)) {
+                break End::CardFailed;
+            }
             break if first_done { End::Finished } else { End::Failed };
         }
         first_done = true;
@@ -245,14 +287,22 @@ fn wait_after_end(rt: &InputRt, from: u64) -> Option<u64> {
     None
 }
 
-pub fn run_file(rt: &Arc<InputRt>, spec: Spec, w: usize, h: usize, fps: u32) {
+pub fn run_file(rt: &Arc<InputRt>, spec: Spec, w: usize, h: usize, fps: u32, card: Option<Hardware>) {
+    let path = spec.input_args.last().cloned().unwrap_or_default();
+    let mut choice = CardChoice { allowed: card, path: &path, failed: false };
     // A replacement source carries on from where the old one stood.
     let mut start = spec.clamp(rt.pos_ms.load(Ordering::Relaxed));
     rt.pos_ms.store(start, Ordering::Relaxed);
     loop {
         rt.seek_ms.store(-1, Ordering::Relaxed);
-        match play_once(rt, &spec, start, w, h, fps) {
+        match play_once(rt, &spec, start, w, h, fps, &choice) {
             End::Stopped | End::Failed => return,
+            // Once failed on this file, the card is not asked again.
+            End::CardFailed => {
+                choice.failed = true;
+                start = spec.clamp(rt.pos_ms.load(Ordering::Relaxed));
+                rt.pos_ms.store(start, Ordering::Relaxed);
+            }
             End::Seek(at) => {
                 start = spec.clamp(at);
                 rt.pos_ms.store(start, Ordering::Relaxed);
@@ -351,6 +401,7 @@ pub fn run_list(
     w: usize,
     h: usize,
     fps: u32,
+    card: Option<Hardware>,
 ) {
     if items.is_empty() {
         rt.set_status("Liste vide");
@@ -363,14 +414,25 @@ pub fn run_list(
     let mut index = (rt.item.load(Ordering::Relaxed) as usize).min(items.len() - 1);
     let mut start = rt.pos_ms.load(Ordering::Relaxed);
     let mut failures = 0;
+    let mut card_failed = vec![false; items.len()];
+    if card.is_some() {
+        // Asked ahead, so the next item knows its answer when its turn comes.
+        decode::ask_ahead(items.iter().map(|i| i.path.clone()).collect());
+    }
     loop {
         rt.item.store(index as u64, Ordering::Relaxed);
         rt.pos_ms.store(start, Ordering::Relaxed);
-        let spec = Spec::file(items[index].path.clone(), false, 0, 0, 1.0, true);
-        let end = play_once(rt, &spec, start, w, h, fps);
+        let path = &items[index].path;
+        let choice = CardChoice { allowed: card, path, failed: card_failed[index] };
+        let spec = Spec::file(path.clone(), false, 0, 0, 1.0, true);
+        let end = play_once(rt, &spec, start, w, h, fps, &choice);
         start = 0;
         match end {
             End::Stopped => return,
+            End::CardFailed => {
+                card_failed[index] = true;
+                start = rt.pos_ms.load(Ordering::Relaxed);
+            }
             End::Seek(at) => start = at,
             End::Jump => {
                 index = rt.select.swap(-1, Ordering::Relaxed).max(0) as usize % items.len();

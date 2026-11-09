@@ -9,6 +9,7 @@ fn older_files_keep_opening() {
     let p = v.as_object_mut().unwrap();
     p.remove("overlay_last");
     p.remove("layer_templates");
+    p.remove("hardware_decoding");
     for input in p["inputs"].as_array_mut().unwrap() {
         let i = input.as_object_mut().unwrap();
         i.remove("auto_pause");
@@ -20,6 +21,7 @@ fn older_files_keep_opening() {
     }
     let back: Project = serde_json::from_value(v).unwrap();
     assert_eq!(back.inputs.len(), Project::sample().inputs.len());
+    assert!(back.hardware_decoding, "the card helps unless someone turned it off");
 }
 
 #[test]
