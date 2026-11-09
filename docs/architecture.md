@@ -14,6 +14,17 @@ Every source runs on its own thread and publishes its latest frame. The mixer th
 at the output rate and composes what is needed. The window only reads shared state and sends commands,
 so a slow window cannot hold up the show.
 
+## One clock
+
+The picture loop, the sound loop and every encoder read one clock (`clock.rs`). Each tick of a loop
+stands for a fixed time on it, and what the tick makes is stamped with that time. An encoder places
+pictures and sound by their stamps from the moment it started, not by counting what arrived: a late
+tick or a full queue costs a repeated picture, a lost block a moment of silence, and the two never
+drift apart. Sound from a microphone or a network sender runs on that device's clock, not ours: the
+sound loop keeps what each holds waiting near 10 ms, taking a frame more or less per block, so a fast
+device does not fall further and further behind the picture. When a recording stops, the shorter of
+sound and picture is padded to the other, so both end together.
+
 ## Files
 
 | File | Holds |
@@ -24,6 +35,7 @@ so a slow window cannot hold up the show.
 | `mixer.rs` | The video loop: what to compose, and reusing what has not changed |
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
 | `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
+| `clock.rs` | The shared clock: pacing the loops, placing pictures and sound in encoders |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
