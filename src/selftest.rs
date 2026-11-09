@@ -12,7 +12,7 @@ use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub fn run(dir: &str) -> i32 {
     match crate::playtest::check(dir).and_then(|media| Ok(format!("{media}\nOK: {}", check(dir)?))) {
@@ -105,13 +105,23 @@ fn check(dir: &str) -> Result<String, String> {
     let id = engine.new_id();
     let video = Kind::Video { path: clip.clone(), looped: true, mark_in: 0, mark_out: 0, rate: 1.0 };
     engine.add_input(Input::new(id, "Test", video));
-    sleep(Duration::from_millis(800));
     let rt = engine.rt(id).ok_or("source absente")?;
+    // ffmpeg takes longer to start on a busy machine; once the first picture
+    // is up, a paused video must not show a second one.
+    let asked = Instant::now();
+    while rt.seq() == 0 && rt.status().is_none() && asked.elapsed() < Duration::from_secs(10) {
+        sleep(Duration::from_millis(20));
+    }
+    let first_ms = asked.elapsed().as_millis();
+    sleep(Duration::from_millis(500));
     if let Some(e) = rt.status() {
         return Err(e);
     }
     if rt.seq() != 1 {
-        return Err(format!("une vidéo en pause doit montrer une image, pas {}", rt.seq()));
+        return Err(format!(
+            "une vidéo en pause doit montrer une image, pas {} (après {first_ms} ms)",
+            rt.seq()
+        ));
     }
 
     // A web page draws through the windowless browser.
@@ -251,7 +261,6 @@ fn check(dir: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
     /// A long recording at 1080p while a network source's sender runs 0.05 %
     /// fast, as a device clock can. Takes as long as it records:
