@@ -1,0 +1,49 @@
+name: Long run
+
+# A whole show for most of an hour, watching memory, timing and outputs.
+# Too long for every pull request: weekly, or by hand with a chosen length.
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      length:
+        description: "Show length (e.g. 45m, 90s, 1h)"
+        default: "45m"
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - name: Install FFmpeg
+        run: choco install ffmpeg --no-progress -y
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+      - run: cargo build
+      - name: Run the show
+        shell: bash
+        run: |
+          mkdir -p target/soak
+          cargo run -- --soak target/soak "${{ inputs.length || '45m' }}" 2>&1 | tee target/soak/console.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-report
+          path: |
+            target/soak/soak.csv
+            target/soak/soak.json
+            target/soak/console.txt
+          if-no-files-found: warn
