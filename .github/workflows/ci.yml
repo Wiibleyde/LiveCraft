@@ -27,3 +27,76 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # A virtual camera and a virtual cable feed LiveCraft's real camera and
+  # microphone inputs; program goes to a local MediaMTX over RTMP and SRT, and
+  # both streams are read back. See "Live check" in the README.
+  livecheck:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: livecheck-${{ hashFiles('Cargo.lock') }}
+      - name: Install FFmpeg
+        run: |
+          $url = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip'
+          Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP/ffmpeg.zip"
+          Expand-Archive "$env:RUNNER_TEMP/ffmpeg.zip" -DestinationPath "$env:RUNNER_TEMP/ffmpeg"
+          (Get-ChildItem "$env:RUNNER_TEMP/ffmpeg" -Recurse -Filter ffmpeg.exe).DirectoryName | Out-File -Append $env:GITHUB_PATH
+      - name: Install the VB-CABLE virtual microphone
+        timeout-minutes: 5
+        run: |
+          # Server images keep the sound service off and have no sound device.
+          Set-Service audiosrv -StartupType Automatic
+          Start-Service audiosrv
+          $dir = "$env:RUNNER_TEMP/vbcable"
+          Invoke-WebRequest https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip -OutFile "$dir.zip"
+          Expand-Archive "$dir.zip" -DestinationPath $dir
+          # Trusting the driver's publisher lets it install without a prompt.
+          $cert = (Get-AuthenticodeSignature "$dir/vbaudio_cable64_win10.cat").SignerCertificate
+          $cert | Export-Certificate -FilePath "$dir.cer" | Out-Null
+          Import-Certificate -FilePath "$dir.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+          Start-Process "$dir/VBCABLE_Setup_x64.exe" -ArgumentList '-i', '-h' -Wait
+          # Desktop programs are refused any microphone until this is allowed.
+          foreach ($root in 'HKLM:', 'HKCU:') {
+            $key = "$root\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+            New-Item -Force "$key\NonPackaged" | Out-Null
+            Set-ItemProperty $key Value Allow
+            Set-ItemProperty "$key\NonPackaged" Value Allow
+          }
+          $devices = ffmpeg -hide_banner -list_devices true -f dshow -i dummy 2>&1 | Out-String
+          if (-not $devices.Contains('CABLE Output')) { throw "VB-CABLE did not install:`n$devices" }
+          exit 0
+      - name: Fetch MediaMTX and build Softcam
+        run: ./scripts/livecheck-tools.ps1 | Out-File -Append $env:GITHUB_ENV
+      - run: cargo build
+      - name: Live check
+        run: ./target/debug/livecraft.exe --livecheck target/livecheck
+      - name: A broken link must fail the check
+        run: |
+          # Plain ASCII parts of each expected message, whatever the console encoding.
+          $expected = @{ freeze = 'image fig'; silence = 'pas de son'; drop = 'flux illisible' }
+          foreach ($what in $expected.Keys) {
+            $out = ./target/debug/livecraft.exe --livecheck "target/livecheck-$what" --break $what | Out-String
+            Write-Host "--break $what -> $out"
+            if ($LASTEXITCODE -eq 0) { throw "--break $what passed" }
+            if (-not $out.Contains($expected[$what])) { throw "--break $what failed for another reason" }
+          }
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: livecheck-logs
+          path: target/livecheck*/mediamtx.log
