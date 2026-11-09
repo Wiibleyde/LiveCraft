@@ -247,3 +247,104 @@ fn check(dir: &str) -> Result<String, String> {
         apart.join(" / ")
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// A long recording at 1080p while a network source's sender runs 0.05 %
+    /// fast, as a device clock can. Takes as long as it records:
+    /// `cargo test --release long_recording -- --ignored --nocapture`, with
+    /// `LIVECRAFT_MINUTES` for its length, ten by default.
+    #[test]
+    #[ignore = "needs FFmpeg and takes minutes"]
+    fn a_long_recording_keeps_sound_and_picture_together() {
+        let minutes: u64 = std::env::var("LIVECRAFT_MINUTES").ok().and_then(|m| m.parse().ok()).unwrap_or(10);
+        let dir = std::env::temp_dir().join(format!("livecraft-long-{}", std::process::id()));
+        let dir = dir.to_string_lossy().into_owned();
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = format!("{dir}/clip.mp4");
+        let made = ffmpeg()
+            .args(["-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=20"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=20"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&clip)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // 48 000 samples relabelled as 47 976 a second, then brought back to
+        // 48 000: the sender delivers 24 samples a second too many.
+        let mut sender = ffmpeg()
+            .args(["-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30"])
+            .args(["-re", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000"])
+            .args(["-af", "asetrate=47976,aresample=48000"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-c:a", "aac"])
+            .args(["-f", "mpegts"])
+            .arg(format!("udp://127.0.0.1:{port}?pkt_size=1316"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let mut project = Project::sample();
+        (project.out_w, project.out_h) = (1920, 1080);
+        project.records[0].folder = dir.clone();
+        project.records[1].enabled = true;
+        project.records[1].container = "mkv".into();
+        project.records[1].folder = dir.clone();
+        let engine = Engine::start(project);
+        let id = engine.new_id();
+        engine.add_input(Input::new(
+            id,
+            "Clip",
+            Kind::Video { path: clip, looped: true, mark_in: 0, mark_out: 0, rate: 1.0 },
+        ));
+        let net = engine.new_id();
+        let url = format!("udp://127.0.0.1:{port}");
+        engine.add_input(Input::new(net, "Réseau", Kind::Network { url, buffer_ms: 0 }));
+        engine.call("CutDirect", &Args::new().input("Clip")).unwrap();
+        engine.call("Play", &Args::new().input("Clip")).unwrap();
+        sleep(Duration::from_secs(3));
+
+        let first = engine.start_recording(&dir).unwrap();
+        let t0 = Instant::now();
+        let waiting = || engine.rt(net).and_then(|r| r.audio.as_ref().map(|a| a.queued())).unwrap_or(0);
+        let mut most_waiting_late = 0;
+        while t0.elapsed() < Duration::from_secs(minutes * 60) {
+            sleep(Duration::from_secs(1));
+            if t0.elapsed() > Duration::from_secs(minutes * 60 - 60) {
+                most_waiting_late = most_waiting_late.max(waiting());
+            }
+        }
+        let late = engine.stats.late_ticks.load(Ordering::Relaxed);
+        let (sent, dropped, repeated) = engine.recorders.lock().unwrap().iter().fold((0, 0, 0), |t, e| {
+            let get = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
+            (t.0 + get(&e.sent), t.1 + get(&e.dropped), t.2 + get(&e.repeated))
+        });
+        engine.shutdown();
+        let _ = sender.kill();
+        let _ = sender.wait();
+        let frame = 1.0 / 30.0;
+        for file in [first.clone(), first.replace("-1.mp4", "-2.mkv")] {
+            let (picture, sound) = ends(&file).unwrap();
+            println!(
+                "{file}: picture ends at {picture:.4} s, sound at {sound:.4} s, apart {:.1} ms",
+                (sound - picture) * 1000.0
+            );
+            assert!((picture - sound).abs() <= frame, "{file}");
+        }
+        let waited_ms = most_waiting_late as f64 * 1000.0 / 48_000.0;
+        println!(
+            "{minutes} min: {late} late ticks; pictures sent {sent}, dropped {dropped}, repeated {repeated}; \
+             fast network sound waiting at most {waited_ms:.0} ms in the last minute"
+        );
+        assert!(waited_ms < 100.0, "the fast sender's sound piles up");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
