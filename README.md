@@ -4,7 +4,7 @@
 
 <p align="center">
   <img alt="100% Rust" src="https://img.shields.io/badge/100%25-Rust-orange">
-  <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-blue">
+  <img alt="Platforms: Windows, Linux, macOS" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-blue">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green">
   <img alt="Status: early alpha" src="https://img.shields.io/badge/status-early%20alpha-red">
   <img alt="Contributions welcome" src="https://img.shields.io/badge/contributions-welcome-brightgreen">
@@ -73,7 +73,8 @@ scripts, VISCA PTZ control, a telestrator, and a web controller for phones and t
 ## Get started
 
 You need [Rust](https://rustup.rs) (edition 2024), and [FFmpeg](https://ffmpeg.org) on your `PATH`. Web
-inputs also need Edge or Chrome. Builds target CPUs with AVX2, see `.cargo/config.toml`.
+inputs also need Chrome, Chromium or Edge. On x86-64, builds target CPUs with AVX2, see
+`.cargo/config.toml`.
 
 ```sh
 cargo run --release
@@ -88,15 +89,33 @@ livecraft --selftest some-folder          # real end-to-end run: plays, records,
 livecraft --screenshot out.png            # start, save a picture of the window, quit
 ```
 
+### Platforms
+
+LiveCraft runs on Windows, Linux and macOS. Capture goes through FFmpeg's own devices on each:
+
+| | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| Cameras | DirectShow | Video4Linux | AVFoundation |
+| Audio inputs | DirectShow | PulseAudio or PipeWire, else ALSA | AVFoundation |
+| Screen capture | every screen | the X display (`x11grab`) | the main screen |
+| System audio | output loopback | monitor of the default output | output loopback, macOS 14.6 and later |
+| Secrets | your Windows account | Secret Service keyring | Keychain |
+
+- **Linux** builds need the ALSA headers and `pkg-config` (`libasound2-dev` on Debian and Ubuntu,
+  `alsa-lib-devel` on Fedora). Your FFmpeg must include `v4l2`, `pulse` and `x11grab`, as distribution
+  builds do. Under Wayland, screen capture goes through XWayland and only sees windows of X programs.
+- **macOS** asks once for the camera, the microphone and screen recording; allow them for the terminal
+  or the app that starts LiveCraft. FFmpeg from Homebrew has everything needed.
+
 > [!IMPORTANT]
-> LiveCraft is **early alpha and not ready for a show that matters.** It has run on one Windows machine.
+> LiveCraft is **early alpha and not ready for a show that matters.** It has run on one Windows machine
+> and on Linux under WSL; on macOS it is only built and tested by CI so far.
 > Tests cover the desk, the interface and real encoding to local files and a local stream, but it has
 > **not** been tried with physical cameras, capture cards, PTZ heads or a live streaming platform.
 > The interface is in French only for now.
 
 ### What is missing today
 
-- **Windows only.** The code uses Windows APIs for capture, screens and secrets.
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
 - **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs, no virtual sets.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
@@ -108,7 +127,7 @@ The full list is in the [roadmap](ROADMAP.md).
 Contributions of every size are welcome, in English or in French. You do not need to write code:
 
 - 🎥 **Try it with real gear** and tell us what happens. This is the most useful thing right now.
-- 🐛 **Open an issue** with your Windows version, your hardware and what you expected.
+- 🐛 **Open an issue** with your system and its version, your hardware and what you expected.
 - 🌍 **Translate the interface**, once strings are out of the code.
 - 🦀 **Take something from the [roadmap](ROADMAP.md).** A compositor on the GPU is the biggest one.
 

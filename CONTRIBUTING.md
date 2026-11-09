@@ -32,7 +32,8 @@ cd livecraft
 cargo run
 ```
 
-You need Rust and FFmpeg on your `PATH`. Web inputs also need Edge or Chrome.
+You need Rust and FFmpeg on your `PATH`. Web inputs also need Chrome, Chromium or Edge. Linux builds
+also need the ALSA headers and `pkg-config`, see [Platforms](README.md#platforms).
 
 ## Before you open a pull request
 
