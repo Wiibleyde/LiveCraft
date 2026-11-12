@@ -496,29 +496,10 @@ impl Encoder {
     }
 }
 
-/// Encoders this ffmpeg offers, software ones first.
+/// Encoders this ffmpeg offers and starts, software ones first. Asks ffmpeg
+/// the first time, so not from the interface thread.
 pub fn list_encoders() -> Vec<String> {
-    let mut found = vec!["libx264".to_string()];
-    let Ok(out) = ffmpeg().args(["-encoders"]).stdin(Stdio::null()).stderr(Stdio::null()).output() else {
-        return found;
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    for name in [
-        "libx265",
-        "libsvtav1",
-        "h264_nvenc",
-        "hevc_nvenc",
-        "av1_nvenc",
-        "h264_qsv",
-        "hevc_qsv",
-        "h264_amf",
-        "hevc_amf",
-    ] {
-        if text.contains(name) {
-            found.push(name.to_string());
-        }
-    }
-    found
+    crate::ffmpeg::capabilities().encoders.clone()
 }
 
 #[cfg(test)]

@@ -244,6 +244,8 @@ pub struct App {
     update_checking: updates::Checking,
     /// The person's browser; the tests look at what it was asked instead.
     open_in_browser: fn(&str),
+    /// Whether ffmpeg is asked what it can do: a real run, or a look at the About tab.
+    asks_ffmpeg: bool,
 }
 
 impl App {
@@ -344,14 +346,23 @@ impl App {
 
         let devices = Arc::new(Mutex::new((Vec::new(), Vec::new())));
         let encoders = Arc::new(Mutex::new(vec!["libx264".to_string()]));
+        let asks_ffmpeg = remote || open == "apropos";
         let (d, e) = (devices.clone(), encoders.clone());
         std::thread::spawn(move || {
             *d.lock().unwrap() = crate::platform::list_devices();
-            *e.lock().unwrap() = output::list_encoders();
+            if asks_ffmpeg {
+                *e.lock().unwrap() = output::list_encoders();
+            }
         });
 
         // Real media needs a moment to open before a check picture means much.
-        let shot_delay = if imported.is_some() { 10 } else { 0 };
+        let shot_delay = if imported.is_some() {
+            10
+        } else if open == "apropos" {
+            12
+        } else {
+            0
+        };
         let p = &saved.project;
         let format_draft = (p.out_w, p.out_h, p.fps);
         let edit_tab = [
@@ -386,7 +397,7 @@ impl App {
             edit_tab,
             selected_layer: 0,
             picking_colour: false,
-            settings_open: matches!(open, "reglages" | "options" | "sorties" | "apropos"),
+            settings_open: open == "reglages" || open == "options" || open == "sorties" || open == "apropos",
             settings_tab: match open {
                 "options" => 1,
                 "sorties" => 2,
@@ -454,6 +465,7 @@ impl App {
             update_answer: Arc::new(Mutex::new(None)),
             update_checking: updates::Checking::Idle,
             open_in_browser: crate::platform::open_in_browser,
+            asks_ffmpeg,
         }
     }
 
