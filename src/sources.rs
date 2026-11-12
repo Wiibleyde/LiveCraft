@@ -299,7 +299,7 @@ pub struct Resume {
 }
 
 pub fn ffmpeg() -> Command {
-    let mut c = Command::new("ffmpeg");
+    let mut c = Command::new(crate::ffmpeg::program("ffmpeg"));
     c.args(["-hide_banner", "-nostats"]);
     crate::platform::prepare_child(&mut c);
     c

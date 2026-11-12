@@ -34,7 +34,7 @@ pub fn run(dir: &str) -> i32 {
 }
 
 fn probe(path: &str) -> Result<String, String> {
-    let out = Command::new("ffprobe")
+    let out = Command::new(crate::ffmpeg::program("ffprobe"))
         .args(["-v", "error", "-show_entries", "stream=codec_type,channels:format=duration"])
         .args(["-of", "csv=p=0"])
         .arg(path)
@@ -47,7 +47,7 @@ fn probe(path: &str) -> Result<String, String> {
 /// start together, so a recording whose sound and picture drifted apart ends
 /// one before the other.
 fn ends(path: &str) -> Result<(f64, f64), String> {
-    let out = Command::new("ffprobe")
+    let out = Command::new(crate::ffmpeg::program("ffprobe"))
         .args(["-v", "error", "-show_entries", "packet=codec_type,pts_time,duration_time", "-of", "csv=p=0"])
         .arg(path)
         .output()
