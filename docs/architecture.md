@@ -33,6 +33,7 @@ so a slow window cannot hold up the show.
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
 | `i18n.rs`, `locales/` | Interface text: `t!("key")` reads it from one catalog per language |
 | `selftest.rs`, `playtest.rs` | `--selftest`: real end-to-end checks |
+| `livecheck.rs` | `--livecheck`: a virtual camera and microphone streamed to a local server and read back |
 
 ## Doing less
 
