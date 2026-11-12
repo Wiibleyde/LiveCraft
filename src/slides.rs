@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-pub const NO_CONVERTER: &str = "Ni PowerPoint ni LibreOffice installé";
+fn no_converter() -> &'static str {
+    t!("slides.no_converter")
+}
 
 /// Files offered and recognised as presentations.
 pub const EXTENSIONS: [&str; 6] = ["pptx", "ppt", "pptm", "ppsx", "pps", "odp"];
@@ -195,7 +197,7 @@ pub fn convert(
         Converter::LibreOffice(soffice) => {
             let python = soffice.with_file_name("python.exe");
             if !python.is_file() {
-                return Err("LibreOffice est installé sans son Python".into());
+                return Err(t!("slides.no_python").into());
             }
             let script = cache_root().join("export-slides.py");
             std::fs::create_dir_all(cache_root()).map_err(|e| e.to_string())?;
@@ -216,7 +218,7 @@ pub fn convert(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child =
-        no_window(&mut cmd).spawn().map_err(|e| format!("{} ne démarre pas : {e}", conv.name()))?;
+        no_window(&mut cmd).spawn().map_err(|e| t!("slides.wont_start", program = conv.name(), error = e))?;
     let (tx, rx) = mpsc::channel();
     if let Some(stdout) = child.stdout.take() {
         thread::spawn(move || {
@@ -247,7 +249,7 @@ pub fn convert(
                 } else if let Some(msg) = line.strip_prefix("error ") {
                     // Menu accelerators come along in PowerPoint's messages.
                     let msg = msg.trim().trim_start_matches("Presentations.Open : ").replace('&', "");
-                    failure = Some(format!("Présentation illisible : {msg}"));
+                    failure = Some(t!("slides.unreadable", message = msg));
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -265,22 +267,22 @@ pub fn convert(
         if asked_to_stop.is_none() && heard.elapsed() > SILENCE {
             end_process_tree(&mut child);
             end_started_powerpoint(out);
-            failure = Some(format!("{} ne répond plus", conv.name()));
+            failure = Some(t!("slides.silent", program = conv.name()));
             break;
         }
     }
     let ended = child.wait().map_err(|e| e.to_string())?;
     if asked_to_stop.is_some() {
-        return Err("Conversion arrêtée".into());
+        return Err(t!("slides.stopped").into());
     }
     if let Some(msg) = failure {
         return Err(msg);
     }
     if total == 0 && ended.success() {
-        return Err("Aucune diapositive visible dans cette présentation".into());
+        return Err(t!("slides.no_visible").into());
     }
     if done == 0 || done < total || !ended.success() {
-        return Err(format!("{} s'est arrêté avant la fin", conv.name()));
+        return Err(t!("slides.ended_early", program = conv.name()));
     }
     Ok(done)
 }
@@ -331,7 +333,7 @@ pub(crate) fn run(rt: &Arc<InputRt>, path: &str, w: usize, h: usize) {
 
 fn run_with(rt: &Arc<InputRt>, path: &str, w: usize, h: usize, find: impl FnOnce() -> Option<Converter>) {
     let Some(dir) = cache_dir(Path::new(path), w, h) else {
-        rt.set_status("Présentation introuvable");
+        rt.set_status(t!("slides.not_found"));
         return;
     };
     let count = match cached(&dir) {
@@ -360,11 +362,11 @@ fn prepare(
     h: usize,
     find: impl FnOnce() -> Option<Converter>,
 ) -> Result<usize, String> {
-    let conv = find().ok_or(NO_CONVERTER)?;
-    rt.set_status("En attente d'une autre conversion…");
+    let conv = find().ok_or(no_converter())?;
+    rt.set_status(t!("slides.waiting"));
     let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
     if rt.stopped() {
-        return Err("Conversion arrêtée".into());
+        return Err(t!("slides.stopped").into());
     }
     // Another input may have just converted the same file.
     if let Some(n) = cached(dir) {
@@ -373,14 +375,14 @@ fn prepare(
     }
     prune_cache(dir);
     let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir).map_err(|e| format!("Dossier des diapositives : {e}"))?;
-    rt.set_status(format!("Ouverture par {}…", conv.name()));
+    std::fs::create_dir_all(dir).map_err(|e| t!("slides.folder", error = e))?;
+    rt.set_status(t!("slides.opening", program = conv.name()));
     // The slide the show stands on goes up as soon as it exists: a format
     // change converts again, and the screen must not fall back to slide 1.
     let wanted = rt.item.load(Ordering::Relaxed) as usize + 1;
     let mut early = false;
     let n = convert(&conv, file, dir, w, h, &|| rt.stopped(), &mut |done, total| {
-        rt.set_status(format!("Conversion des diapositives {done}/{total}"));
+        rt.set_status(t!("slides.converting", done = done, total = total));
         if !early && done >= wanted {
             early = true;
             if let Ok(f) = titles::load_image(&slide_file(dir, wanted).to_string_lossy(), w, h) {
@@ -410,7 +412,7 @@ fn show(rt: &InputRt, dir: &Path, count: usize, w: usize, h: usize) {
                     rt.publish(f);
                     rt.clear_status();
                 }
-                Err(e) => rt.set_status(format!("Diapositive illisible : {e}")),
+                Err(e) => rt.set_status(t!("slides.slide_unreadable", error = e)),
             }
         }
         thread::sleep(Duration::from_millis(20));
@@ -726,7 +728,7 @@ mod tests {
         write_test_deck(&deck, &COLOURS);
         let rt = InputRt::new(false, true);
         run_with(&rt, &deck.to_string_lossy(), 64, 36, || None);
-        assert_eq!(rt.status().as_deref(), Some(NO_CONVERTER));
+        assert_eq!(rt.status().as_deref(), Some(no_converter()));
         assert!(rt.latest().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
