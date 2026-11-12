@@ -94,28 +94,48 @@ pub struct FrameLine {
     origin: u64,
     fps: u64,
     written: u64,
+    cut: u64,
 }
 
 impl FrameLine {
     pub fn new(origin: u64, fps: u32) -> Self {
-        Self { origin, fps: fps.max(1) as u64, written: 0 }
+        Self { origin, fps: fps.max(1) as u64, written: 0, cut: 0 }
     }
 
     /// For a picture stamped `at`: how many times to repeat the picture before
     /// it to fill the periods nothing arrived for, or `None` when its period
     /// is already written and it must be left out.
+    #[cfg(test)]
     pub fn place(&mut self, at: u64) -> Option<u64> {
-        let slot = position(at, self.origin, self.fps);
+        self.place_within(at, u64::MAX)
+    }
+
+    /// As `place`, repeating at most `most` times: the rest of the gap is cut
+    /// from the line, and the sound must lose as much (`cut_ns`) to stay with it.
+    pub fn place_within(&mut self, at: u64, most: u64) -> Option<u64> {
+        let slot = position(at, self.origin + self.cut_ns(), self.fps);
         if slot < self.written as i64 {
             return None;
         }
         let gap = slot as u64 - self.written;
-        self.written = slot as u64 + 1;
-        Some(gap)
+        let cut = gap.saturating_sub(most);
+        self.cut += cut;
+        self.written = slot as u64 + 1 - cut;
+        Some(gap - cut)
     }
 
     pub fn written(&self) -> u64 {
         self.written
+    }
+
+    /// Pictures cut from the line so far.
+    pub fn cut(&self) -> u64 {
+        self.cut
+    }
+
+    /// The time cut from the line so far, on the clock.
+    pub fn cut_ns(&self) -> u64 {
+        (self.cut as u128 * NS as u128 / self.fps as u128) as u64
     }
 }
 
@@ -185,6 +205,11 @@ const GAIN_P: f64 = PULL / WINDOW as f64;
 /// Frames per block the learnt speed moves per frame off, each second: with
 /// `GAIN_P`, critically damped, so it settles without swinging.
 const GAIN_I: f64 = PULL * PULL / 4.0 / WINDOW as f64;
+/// At most a frame more or less per block: 1/960, about 1041 ppm. A device
+/// further off than that cannot be followed: a faster one is cut back at
+/// `SPARE_CUT` now and then, a slower one runs dry and gets its margin back
+/// as a moment of silence. Real devices are within a few hundred ppm.
+const MOST_ADJUST: f64 = 1.0;
 
 /// What to take from a live input's ring for one block.
 #[derive(Debug, PartialEq)]
@@ -279,8 +304,8 @@ impl Drift {
                     self.lows.remove(0);
                 }
                 let off = (self.lows.iter().min().copied().unwrap_or(low) - SPARE_TARGET) as f64;
-                self.rate = (self.rate + GAIN_I * off).clamp(-1.0, 1.0);
-                self.adjust = (self.rate + GAIN_P * off).clamp(-1.0, 1.0);
+                self.rate = (self.rate + GAIN_I * off).clamp(-MOST_ADJUST, MOST_ADJUST);
+                self.adjust = (self.rate + GAIN_P * off).clamp(-MOST_ADJUST, MOST_ADJUST);
             }
         }
         if take.silence == 0 {
@@ -512,6 +537,24 @@ mod tests {
     fn a_first_picture_after_the_start_covers_the_start() {
         let mut line = FrameLine::new(0, 30);
         assert_eq!(line.place(100 * MS), Some(3));
+    }
+
+    /// A stream 10 s stalled repeats half a second, not 250 pictures; the
+    /// rest is cut from pictures and sound alike, which stay together.
+    #[test]
+    fn a_long_gap_in_a_stream_is_cut_from_both() {
+        let mut pictures = FrameLine::new(0, 25);
+        let mut sound = SampleLine::new(0);
+        assert_eq!(pictures.place_within(0, 12), Some(0));
+        assert_eq!(sound.place(0, 960), Fit { silence: 0, skip: 0 });
+        assert_eq!(pictures.place_within(10 * NS, 12), Some(12));
+        assert_eq!(pictures.cut(), 237);
+        assert_eq!(pictures.place_within(10 * NS + 40 * MS, 12), Some(0));
+        let cut = pictures.cut_ns();
+        assert_eq!(cut, 237 * 40 * MS);
+        // The picture and the sound of 10.04 s start at the same place in the file.
+        assert_eq!(sound.place(10 * NS + 40 * MS - cut, 960), Fit { silence: 14 * 1920 - 960, skip: 0 });
+        assert_eq!((pictures.written() - 1) * 1920, sound.written() - 960);
     }
 
     #[test]

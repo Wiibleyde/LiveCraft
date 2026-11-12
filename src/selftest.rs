@@ -8,6 +8,7 @@ use crate::engine::Engine;
 use crate::functions::Args;
 use crate::model::*;
 use crate::netvideo::Net;
+use crate::output::Padding;
 use crate::sources::ffmpeg;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -68,6 +69,23 @@ fn ends(path: &str) -> Result<(f64, f64), String> {
         return Err(format!("{path} : image ou son absent"));
     }
     Ok((picture, sound))
+}
+
+/// The end padding of each recorder, to read once they are finished.
+fn paddings(engine: &Engine) -> Vec<std::sync::Arc<std::sync::Mutex<Option<Padding>>>> {
+    engine.recorders.lock().unwrap().iter().map(|e| e.padded.clone()).collect()
+}
+
+/// The longest end padding in seconds. Picture and sound follow one clock,
+/// so they end together and the files end together by construction: what
+/// had to be padded shows whether they drifted apart on the way.
+fn most_padded(pads: &[std::sync::Arc<std::sync::Mutex<Option<Padding>>>], fps: u32) -> Result<f64, String> {
+    let mut most = 0f64;
+    for pad in pads {
+        let p = (*pad.lock().unwrap()).ok_or("fin d'enregistrement non égalisée")?;
+        most = most.max(p.pictures as f64 / fps.max(1) as f64).max(p.samples as f64 / 48_000.0);
+    }
+    Ok(most)
 }
 
 fn http_get(path: &str) -> Result<String, String> {
@@ -305,13 +323,20 @@ fn check(dir: &str) -> Result<String, String> {
     let (dropped, repeated) = engine.recorders.lock().unwrap().iter().fold((0, 0), |(d, r), e| {
         (d + e.dropped.load(Ordering::Relaxed), r + e.repeated.load(Ordering::Relaxed))
     });
+    let cut: u64 = engine.streamers.lock().unwrap().iter().map(|e| e.cut.load(Ordering::Relaxed)).sum();
     let fps = engine.stats.ticks_per_sec.load(Ordering::Relaxed);
-    let frame_s = 1.0 / engine.state.lock().unwrap().project.fps.max(1) as f64;
+    let project_fps = engine.state.lock().unwrap().project.fps;
+    let frame_s = 1.0 / project_fps.max(1) as f64;
     let mix_us = engine.stats.mix_us.load(Ordering::Relaxed);
     if let Some(e) = engine.output_error.lock().unwrap().clone() {
         return Err(e);
     }
+    let pads = paddings(&engine);
     engine.shutdown();
+    let padded = most_padded(&pads, project_fps)?;
+    if padded > frame_s + 1e-9 {
+        return Err(format!("{:.0} ms ajoutées à la fin d'un enregistrement", padded * 1000.0));
+    }
     let _ = server.wait();
     sleep(Duration::from_millis(500));
     if peak <= 0.0 {
@@ -348,9 +373,11 @@ fn check(dir: &str) -> Result<String, String> {
         apart.push(format!("{:.0} ms", (sound - picture) * 1000.0));
     }
     Ok(format!(
-        "enregistreurs {one}/ {second}| diffusion {streamed}| cadence {fps}/s, rendu {mix_us} µs, \
-         images perdues {dropped}, répétées {repeated}, écart son-image {}, crête son {peak:.2}",
-        apart.join(" / ")
+        "enregistreurs {one}/ {second}| diffusion {streamed}(images coupées {cut}) | cadence {fps}/s, rendu {mix_us} µs, \
+         images perdues {dropped}, répétées {repeated}, écart son-image {}, fin égalisée de {:.0} ms, \
+         crête son {peak:.2}",
+        apart.join(" / "),
+        padded * 1000.0
     ))
 }
 
@@ -361,11 +388,13 @@ mod tests {
     /// A long recording at 1080p while a network source's sender runs 0.05 %
     /// fast, as a device clock can. Takes as long as it records:
     /// `cargo test --release long_recording -- --ignored --nocapture`, with
-    /// `LIVECRAFT_MINUTES` for its length, ten by default.
+    /// `LIVECRAFT_MINUTES` for its length, ten by default, five at least: the
+    /// last minute is judged after the input's speed has been learnt.
     #[test]
     #[ignore = "needs FFmpeg and takes minutes"]
     fn a_long_recording_keeps_sound_and_picture_together() {
         let minutes: u64 = std::env::var("LIVECRAFT_MINUTES").ok().and_then(|m| m.parse().ok()).unwrap_or(10);
+        assert!(minutes >= 5, "LIVECRAFT_MINUTES must be 5 or more, not {minutes}");
         let dir = std::env::temp_dir().join(format!("livecraft-long-{}", std::process::id()));
         let dir = dir.to_string_lossy().into_owned();
         std::fs::create_dir_all(&dir).unwrap();
@@ -446,10 +475,14 @@ mod tests {
             let get = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
             (t.0 + get(&e.sent), t.1 + get(&e.dropped), t.2 + get(&e.repeated))
         });
+        let pads = paddings(&engine);
         engine.shutdown();
         let _ = sender.kill();
         let _ = sender.wait();
         let frame = 1.0 / 30.0;
+        let padded = most_padded(&pads, 30).unwrap();
+        println!("ends evened by at most {:.1} ms", padded * 1000.0);
+        assert!(padded <= frame + 1e-9, "sound and picture drifted apart in the file");
         for file in [first.clone(), first.replace("-1.mp4", "-2.mkv")] {
             let (picture, sound) = ends(&file).unwrap();
             println!(
