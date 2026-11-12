@@ -1047,6 +1047,8 @@ pub enum ClockType {
     Recording,
     Streaming,
     TimeRemaining,
+    /// The show's elapsed time, started, paused and reset from the desk.
+    Show,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]

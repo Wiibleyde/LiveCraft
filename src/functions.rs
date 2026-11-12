@@ -95,6 +95,7 @@ pub const NAMES: &[&str] = &[
     "NextPicture",
     "NextPlayListEntry",
     "Pause",
+    "PauseShowClock",
     "PauseCountdown",
     "Play",
     "PlayPause",
@@ -105,6 +106,7 @@ pub const NAMES: &[&str] = &[
     "PreviousPicture",
     "QuickPlay",
     "RemoveInput",
+    "ResetShowClock",
     "Restart",
     "ScriptStart",
     "ScriptStopAll",
@@ -128,8 +130,10 @@ pub const NAMES: &[&str] = &[
     "SoloAllOff",
     "SoloOff",
     "SoloOn",
+    "StartShowClock",
     "StartCountdown",
     "StartMultiCorder",
+    "StartPauseShowClock",
     "StartPlayList",
     "StartRecording",
     "StartSRTOutput",
@@ -389,6 +393,10 @@ impl Engine {
                 self.start_srt()?;
             }
             "StopSRTOutput" => self.stop_srt(),
+            "StartShowClock" => self.state.lock().unwrap().clock.start(Instant::now()),
+            "PauseShowClock" => self.state.lock().unwrap().clock.pause(Instant::now()),
+            "StartPauseShowClock" => self.state.lock().unwrap().clock.toggle(Instant::now()),
+            "ResetShowClock" => self.state.lock().unwrap().clock.reset(),
             "StartPlayList" => {
                 let mut s = self.state.lock().unwrap();
                 s.playlist_on = true;

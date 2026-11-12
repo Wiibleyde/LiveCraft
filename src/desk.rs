@@ -74,8 +74,54 @@ pub struct Closed {
     pub was_program: bool,
 }
 
+/// The show clock: time since the show started, which the operator can pause.
+/// Plain data with the time passed in, so it can be tested without waiting.
+/// It lives for the session only: a clock saved with a project would show a
+/// stale time when the project is opened for the next show.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShowClock {
+    /// What had passed before the last start.
+    before: Duration,
+    /// When it last started, while it runs.
+    since: Option<Instant>,
+}
+
+impl ShowClock {
+    pub fn running(&self) -> bool {
+        self.since.is_some()
+    }
+
+    pub fn elapsed(&self, now: Instant) -> Duration {
+        self.before + self.since.map_or(Duration::ZERO, |t| now.saturating_duration_since(t))
+    }
+
+    /// Starts, or resumes after a pause. Does nothing when it already runs.
+    pub fn start(&mut self, now: Instant) {
+        self.since.get_or_insert(now);
+    }
+
+    pub fn pause(&mut self, now: Instant) {
+        self.before = self.elapsed(now);
+        self.since = None;
+    }
+
+    pub fn toggle(&mut self, now: Instant) {
+        if self.running() {
+            self.pause(now);
+        } else {
+            self.start(now);
+        }
+    }
+
+    /// Back to 00:00:00 and stopped, ready for the next show.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub struct State {
     pub project: Project,
+    pub clock: ShowClock,
     pub trans: Option<Trans>,
     /// Hand-held transition position, 0..1, while the T-bar is off its rest.
     pub tbar: f32,
@@ -107,6 +153,7 @@ impl State {
         let t = shown.map(|o| if o.is_some() { 1.0 } else { 0.0 });
         Self {
             project,
+            clock: ShowClock::default(),
             trans: None,
             tbar: 0.0,
             overlay_shown: shown,
@@ -803,6 +850,31 @@ mod tests {
 
     fn state() -> State {
         State::new(Project::sample())
+    }
+
+    #[test]
+    fn the_show_clock_counts_pauses_resumes_and_resets_exactly() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut c = ShowClock::default();
+        assert_eq!(c.elapsed(at(50)), Duration::ZERO, "a clock never started stays at zero");
+        c.start(at(10));
+        assert!(c.running());
+        assert_eq!(c.elapsed(at(70)), Duration::from_secs(60));
+        c.start(at(40));
+        assert_eq!(c.elapsed(at(70)), Duration::from_secs(60), "starting a running clock changes nothing");
+        c.pause(at(70));
+        assert!(!c.running());
+        assert_eq!(c.elapsed(at(500)), Duration::from_secs(60), "paused time does not count");
+        c.start(at(600));
+        assert_eq!(c.elapsed(at(660)), Duration::from_secs(120));
+        c.toggle(at(660));
+        assert!(!c.running());
+        c.toggle(at(700));
+        assert_eq!(c.elapsed(at(700) + Duration::from_secs(62)), Duration::from_secs(182));
+        c.reset();
+        assert!(!c.running());
+        assert_eq!(c.elapsed(at(9000)), Duration::ZERO);
     }
 
     fn clip(id: u64) -> Input {

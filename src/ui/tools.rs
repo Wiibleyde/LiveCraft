@@ -14,6 +14,8 @@ impl App {
         }
         let mut open = true;
         let mut clocks = project.clocks.clone();
+        let running = self.with(|s| s.clock.running());
+        let mut action = None;
         egui::Window::new(t!("tools.clocks_title"))
             .id(egui::Id::unique("Horloges de production"))
             .open(&mut open)
@@ -28,8 +30,14 @@ impl App {
                                 (t!("tools.kind_recording"), ClockType::Recording),
                                 (t!("tools.kind_streaming"), ClockType::Streaming),
                                 (t!("tools.kind_remaining"), ClockType::TimeRemaining),
+                                (t!("tools.kind_show"), ClockType::Show),
                             ] {
+                                let was = c.kind;
                                 ui.selectable_value(&mut c.kind, kind, name);
+                                // At minutes a running show clock would look frozen.
+                                if kind == ClockType::Show && was != kind && c.precision == 0 {
+                                    c.precision = 1;
+                                }
                             }
                         });
                         ui.horizontal(|ui| {
@@ -65,6 +73,25 @@ impl App {
                                     );
                                 });
                             }
+                            ClockType::Show => {
+                                ui.horizontal(|ui| {
+                                    let label =
+                                        if running { t!("tools.show_pause") } else { t!("tools.show_start") };
+                                    if named(ui.button(label), format!("{} {}", t!("tools.kind_show"), label))
+                                        .clicked()
+                                    {
+                                        action = Some("StartPauseShowClock");
+                                    }
+                                    if named(
+                                        ui.button(t!("tools.show_reset")),
+                                        format!("{} {}", t!("tools.kind_show"), t!("tools.show_reset")),
+                                    )
+                                    .clicked()
+                                    {
+                                        action = Some("ResetShowClock");
+                                    }
+                                });
+                            }
                             _ => {}
                         }
                         ui.separator();
@@ -72,6 +99,9 @@ impl App {
                 }
             });
         self.clocks_open = open;
+        if let Some(name) = action {
+            self.call(name, &Args::new());
+        }
         if clocks != project.clocks {
             self.with(|s| s.project.clocks = clocks);
         }
