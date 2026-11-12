@@ -6,6 +6,7 @@ use crate::engine::Engine;
 use crate::model::*;
 use crate::netvideo::{Net, NetOut};
 use crate::output::{Encoder, Spec, Target};
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,6 +24,35 @@ fn finish_later(list: Vec<Encoder>, patience: Duration) {
 /// write over the file still being closed.
 fn stamp() -> String {
     chrono::Local::now().format("livecraft-%Y%m%d-%H%M%S-%3f").to_string()
+}
+
+/// Network senders being destroyed in the background. Starting new ones waits
+/// for these, as a name stays taken until its sender is gone.
+pub(crate) struct Teardowns {
+    count: Mutex<usize>,
+    idle: std::sync::Condvar,
+}
+
+impl Teardowns {
+    fn begin(&self) {
+        *self.count.lock().unwrap() += 1;
+    }
+
+    fn end(&self) {
+        *self.count.lock().unwrap() -= 1;
+        self.idle.notify_all();
+    }
+
+    /// Returns when none is left, or after `limit`.
+    pub(crate) fn wait_idle(&self, limit: Duration) {
+        let guard = self.count.lock().unwrap();
+        drop(self.idle.wait_timeout_while(guard, limit, |n| *n > 0).unwrap());
+    }
+}
+
+pub(crate) fn net_teardowns() -> &'static Teardowns {
+    static T: Teardowns = Teardowns { count: Mutex::new(0), idle: std::sync::Condvar::new() };
+    &T
 }
 
 impl Engine {
@@ -266,6 +296,8 @@ impl Engine {
         if wanted.is_empty() {
             return Err("Cochez d'abord NDI ou OMT dans les réglages des sorties".into());
         }
+        // A sender just stopped may still hold its name; wait for it to let go.
+        net_teardowns().wait_idle(Duration::from_secs(5));
         let mut started = Vec::new();
         for (net, cfg) in wanted {
             let name = cfg.name.trim();
@@ -281,7 +313,15 @@ impl Engine {
     pub fn stop_net(&self) {
         let list = std::mem::take(&mut *self.net.lock().unwrap());
         // Each waits for its last picture to leave; the window does not.
-        thread::spawn(move || drop(list));
+        if list.is_empty() {
+            return;
+        }
+        let pending = net_teardowns();
+        pending.begin();
+        thread::spawn(move || {
+            drop(list);
+            pending.end();
+        });
     }
 
     /// An input closing ends whatever was recording it on its own.

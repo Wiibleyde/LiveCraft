@@ -73,17 +73,15 @@ impl Net {
 pub(crate) struct Library(windows_sys::Win32::Foundation::HMODULE);
 
 impl Library {
-    /// The first candidate that loads. One given by its full path also finds
-    /// the libraries it needs in its own folder.
+    /// The first existing candidate that loads. Only a full path is ever
+    /// loaded: a bare name would also be searched for in the current folder,
+    /// where anyone could have planted a library. The library's own folder is
+    /// searched for what it needs (libvmx beside libomt).
     pub(crate) fn open(candidates: &[PathBuf]) -> Option<Self> {
         use windows_sys::Win32::System::LibraryLoader::*;
-        candidates.iter().find_map(|path| {
+        candidates.iter().filter(|p| p.is_absolute() && p.is_file()).find_map(|path| {
             let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-            let flags = if path.is_absolute() {
-                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
-            } else {
-                0
-            };
+            let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
             // SAFETY: the name is a NUL-terminated wide string that outlives the call.
             let module = unsafe { LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), flags) };
             (!module.is_null()).then_some(Self(module))
@@ -108,9 +106,30 @@ impl Library {
     }
 }
 
-/// Where a copy placed beside `livecraft.exe` would be.
-pub(crate) fn beside_program(file: &str) -> Option<PathBuf> {
-    Some(std::env::current_exe().ok()?.parent()?.join(file))
+/// Where a runtime library may be, as full paths only, in order: the given
+/// folders (a variable the installer sets), the folder of the program, then
+/// each folder of the `PATH`. Relative and empty entries are left out, so the
+/// current folder is never searched.
+pub(crate) fn runtime_candidates(file: &str, env_vars: &[&str]) -> Vec<PathBuf> {
+    let dirs: Vec<std::ffi::OsString> = env_vars.iter().filter_map(std::env::var_os).collect();
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
+    candidates_from(file, dirs, exe_dir, std::env::var_os("PATH"))
+}
+
+fn candidates_from(
+    file: &str,
+    dirs: Vec<std::ffi::OsString>,
+    exe_dir: Option<PathBuf>,
+    path: Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    let from_path = path.iter().flat_map(std::env::split_paths);
+    dirs.into_iter()
+        .map(PathBuf::from)
+        .chain(exe_dir)
+        .chain(from_path)
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join(file))
+        .collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -403,6 +422,29 @@ impl Drop for NetOut {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_candidates_are_full_paths_only() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let path = format!("rel{sep}{sep}C:\\bin{sep}.{sep}C:\\tools");
+        let got = candidates_from(
+            "x.dll",
+            vec!["relatif".into(), "C:\\ndi".into(), "".into()],
+            Some(PathBuf::from("C:\\app")),
+            Some(path.into()),
+        );
+        assert!(got.iter().all(|p| p.is_absolute()), "{got:?}");
+        assert!(got.iter().all(|p| p.file_name().unwrap() == "x.dll"));
+        assert!(!got.contains(&PathBuf::from("x.dll")), "never the bare name");
+        let order: Vec<String> =
+            got.iter().map(|p| p.parent().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(order, [r"C:\ndi", r"C:\app", r"C:\bin", r"C:\tools"]);
+    }
+
+    #[test]
+    fn a_bare_name_is_never_loaded() {
+        assert!(Library::open(&[PathBuf::from("kernel32.dll")]).is_none());
+    }
+
     use super::*;
 
     fn picture(data: &[u8], w: usize, h: usize, stride: usize, order: Order, alpha: Alpha) -> Frame {

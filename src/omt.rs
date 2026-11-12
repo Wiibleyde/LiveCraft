@@ -5,7 +5,6 @@
 use crate::frame::Frame;
 use crate::netvideo::{self, Alpha, Got, Library, Order, Picture, Sound};
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -72,8 +71,7 @@ fn api() -> Result<&'static Api, String> {
 }
 
 fn load() -> Result<Api, String> {
-    let mut candidates: Vec<PathBuf> = netvideo::beside_program(DLL).into_iter().collect();
-    candidates.push(PathBuf::from(DLL));
+    let candidates = netvideo::runtime_candidates(DLL, &[]);
     let lib = Library::open(&candidates).ok_or(MISSING)?;
     // SAFETY: each type is the signature `libomt.h` declares for that name, and
     // the library stays loaded for the life of the program.

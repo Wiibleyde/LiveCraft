@@ -370,6 +370,7 @@ fn an_ndi_or_omt_input_comes_from_the_menu_and_asks_for_its_source() {
 
 #[test]
 fn network_outputs_start_and_stop_from_the_settings() {
+    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = desk(small_project());
     h.state_mut().settings_open = true;
     h.state_mut().settings_tab = 2;
@@ -385,7 +386,7 @@ fn network_outputs_start_and_stop_from_the_settings() {
     click(&mut h, "Démarrer NDI / OMT");
     match crate::netvideo::Net::Ndi.available() {
         Ok(()) => {
-            assert!(engine.is_net());
+            assert!(engine.is_net(), "{}", said(&h));
             assert_eq!(engine.net.lock().unwrap()[0].name, "LiveCraft");
             click(&mut h, "Arrêter NDI / OMT");
             assert!(!engine.is_net());
@@ -395,6 +396,41 @@ fn network_outputs_start_and_stop_from_the_settings() {
             assert!(!engine.is_net());
             assert_eq!(said(&h), missing);
         }
+    }
+    end(h);
+}
+
+/// Both tests offer the same source names, and a name is taken for the whole
+/// process: they run one after the other.
+static NET_NAMES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Stop then Start at once: the sender just stopped is still being torn down,
+/// and the new one must not fail on its name ("nom déjà pris").
+#[test]
+fn a_network_output_starts_again_right_after_it_stops() {
+    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = desk(small_project());
+    h.state_mut().settings_open = true;
+    h.state_mut().settings_tab = 2;
+    h.run_steps(3);
+    let engine = h.state().engine.clone();
+    let (ndi, omt) =
+        (crate::netvideo::Net::Ndi.available().is_ok(), crate::netvideo::Net::Omt.available().is_ok());
+    if !ndi && !omt {
+        end(h);
+        return;
+    }
+    if ndi {
+        click(&mut h, "NDI");
+    }
+    if omt {
+        click(&mut h, "OMT");
+    }
+    for round in 0..4 {
+        click(&mut h, "Démarrer NDI / OMT");
+        assert!(engine.is_net(), "tour {round} : le démarrage doit réussir juste après l'arrêt");
+        click(&mut h, "Arrêter NDI / OMT");
+        assert!(!engine.is_net());
     }
     end(h);
 }

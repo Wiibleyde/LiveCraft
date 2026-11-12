@@ -5,7 +5,6 @@
 use crate::frame::Frame;
 use crate::netvideo::{self, Alpha, Got, Library, Order, Picture, Sound};
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::{LazyLock, Mutex};
 
@@ -112,13 +111,7 @@ fn api() -> Result<&'static Api, String> {
 /// The NDI installer names its folder in these variables; a copy beside the
 /// program or on the PATH is found too.
 fn load() -> Result<Api, String> {
-    let mut candidates: Vec<PathBuf> = ["NDI_RUNTIME_DIR_V6", "NDI_RUNTIME_DIR_V5"]
-        .iter()
-        .filter_map(std::env::var_os)
-        .map(|dir| PathBuf::from(dir).join(DLL))
-        .collect();
-    candidates.extend(netvideo::beside_program(DLL));
-    candidates.push(PathBuf::from(DLL));
+    let candidates = netvideo::runtime_candidates(DLL, &["NDI_RUNTIME_DIR_V6", "NDI_RUNTIME_DIR_V5"]);
     let lib = Library::open(&candidates).ok_or(MISSING)?;
     // SAFETY: each type is the signature the SDK documents for that name, and
     // the library stays loaded for the life of the program.
@@ -217,6 +210,14 @@ impl Receiver {
     }
 }
 
+/// Row length and total size of a picture, or `None` for one that makes no
+/// sense (empty, negative or too short a stride, or a size that overflows).
+fn frame_size(w: usize, h: usize, stride: i32) -> Option<(usize, usize)> {
+    let stride = usize::try_from(stride).ok()?;
+    (w > 0 && h > 0 && stride >= w.checked_mul(4)?).then_some(())?;
+    Some((stride, stride.checked_mul(h)?))
+}
+
 impl netvideo::Receiver for Receiver {
     fn capture(&mut self, timeout_ms: u32, on: &mut dyn FnMut(Got<'_>)) {
         // SAFETY: zeroed frames are valid empty frames for the runtime to fill.
@@ -227,13 +228,13 @@ impl netvideo::Receiver for Receiver {
             unsafe { (self.api.recv_capture)(self.instance, &mut video, &mut audio, null_mut(), timeout_ms) };
         match kind {
             FRAME_VIDEO => {
-                let (w, h, stride) = (video.xres.max(0) as usize, video.yres.max(0) as usize, video.stride);
-                if !video.data.is_null() && w > 0 && h > 0 && stride as usize >= w * 4 {
+                let (w, h) = (video.xres.max(0) as usize, video.yres.max(0) as usize);
+                let size = frame_size(w, h, video.stride);
+                if let (false, Some((stride, size))) = (video.data.is_null(), size) {
                     let alpha = if video.fourcc == RGBA { Alpha::Straight } else { Alpha::Opaque };
                     if video.fourcc == RGBA || video.fourcc == RGBX {
                         // SAFETY: the runtime hands `h` rows of `stride` bytes.
-                        let data = unsafe { std::slice::from_raw_parts(video.data, stride as usize * h) };
-                        let stride = stride as usize;
+                        let data = unsafe { std::slice::from_raw_parts(video.data, size) };
                         on(Got::Picture(Picture { data, w, h, stride, order: Order::Rgba, alpha }));
                     }
                 }
@@ -339,5 +340,24 @@ impl Drop for Sender {
     fn drop(&mut self) {
         // SAFETY: the instance is live and nothing else uses it any more.
         unsafe { (self.api.send_destroy)(self.instance) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frame_size;
+
+    #[test]
+    fn a_picture_with_a_wrong_stride_is_refused() {
+        assert_eq!(frame_size(4, 2, 16), Some((16, 32)));
+        assert_eq!(frame_size(4, 2, 20), Some((20, 40)), "padded rows");
+        assert_eq!(frame_size(4, 2, -16), None, "negative stride");
+        assert_eq!(frame_size(4, 2, i32::MIN), None);
+        assert_eq!(frame_size(4, 2, 12), None, "shorter than a row");
+        assert_eq!(frame_size(0, 2, 16), None);
+        assert_eq!(frame_size(usize::MAX, 2, 16), None, "width overflow");
+        if usize::BITS == 32 {
+            assert_eq!(frame_size(4, usize::MAX, i32::MAX), None, "size overflow");
+        }
     }
 }
