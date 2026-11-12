@@ -9,6 +9,12 @@ LiveCraft stands on other people's work.
 | Ubuntu Light font, through `epaint_default_fonts` | Text in titles and the clock when no installed font is chosen | Ubuntu Font Licence 1.0 |
 | Other egui default fonts, through `eframe` | The interface | OFL 1.1 and Ubuntu Font Licence 1.0 |
 
+## In the Windows installer
+
+| Component | Used for | License |
+| --- | --- | --- |
+| [Inno Setup](https://jrsoftware.org/isinfo.php) setup and uninstaller programs, by Jordan Russell and Martijn Laan | Installing and removing LiveCraft | Inno Setup License (permissive) |
+
 ## Rust crates
 
 The direct dependencies are listed in `Cargo.toml`. All crates in `Cargo.lock`
@@ -28,6 +34,9 @@ cargo metadata --format-version 1
 | --- | --- | --- |
 | [FFmpeg](https://ffmpeg.org) | Decoding, capture, encoding, recording, streaming | Started as a separate process. Installed by the user, under its own license. |
 | Microsoft Edge or Google Chrome | Web page inputs | Started as a separate process with no window. |
+| [Softcam](https://github.com/tshino/softcam) | The virtual camera of `--livecheck` | MIT. Built from its sources by `scripts/livecheck-tools.ps1` and loaded at run time; not shipped. |
+| [MediaMTX](https://github.com/bluenviron/mediamtx) | The local streaming server of `--livecheck` | MIT. Downloaded by `scripts/livecheck-tools.ps1`; not shipped. |
+| [VB-CABLE](https://vb-audio.com/Cable/) | The virtual microphone of `--livecheck` | Donationware by VB-Audio, installed separately; not shipped. |
 
 ## Design references
 

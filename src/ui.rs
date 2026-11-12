@@ -12,6 +12,7 @@ mod switcher;
 #[cfg(test)]
 mod tests;
 mod tools;
+mod virtual_set;
 mod windows;
 
 use crate::api::ApiConfig;
@@ -53,6 +54,12 @@ struct Saved {
 
 fn user_dir(base: PathBuf) -> PathBuf {
     base.join("LiveCraft")
+}
+
+/// Copies the session file to `session.prev.json` beside it, replacing the
+/// previous copy. True when there was a session to keep.
+fn back_up_session(session: &std::path::Path) -> bool {
+    session.is_file() && std::fs::copy(session, session.with_file_name("session.prev.json")).is_ok()
 }
 
 fn saved_path() -> PathBuf {
@@ -225,14 +232,7 @@ impl App {
         apply_style(&cc.egui_ctx);
         // The check picture opens the worked example, as the reference picture
         // shows a project already open. A normal first start is an empty desk.
-        let mut imported = None;
-        let mut import_report = None;
-        let opened = project_file.as_deref().and_then(|f| crate::vmix_import::load(f).ok());
-        let saved = if let Some((p, r)) = opened {
-            imported = Some(r.name.clone());
-            import_report = Some(r);
-            Saved::fresh(p)
-        } else if shot_path.is_some() {
+        let saved = if shot_path.is_some() {
             Saved::fresh(if open == "vide" { Project::blank() } else { Project::sample() })
         } else {
             Saved::load()
@@ -242,7 +242,54 @@ impl App {
             saved.language = lang.code().into();
         }
         let remote = shot_path.is_none();
-        Self::assemble(cc, saved, shot_path, open, imported, import_report, remote)
+        Self::start(cc, saved, shot_path, open, project_file, remote)
+    }
+
+    /// A project named on the command line, as a double-clicked file is,
+    /// replaces the session's. A .vmix comes in as an unnamed copy; a saved
+    /// project comes in as itself, so that saving goes back to that file.
+    /// The session keeps its other settings either way.
+    fn start(
+        cc: &eframe::CreationContext<'_>,
+        mut saved: Saved,
+        shot_path: Option<String>,
+        open: &str,
+        project_file: Option<String>,
+        remote: bool,
+    ) -> Self {
+        let (mut imported, mut import_report, mut current_file, mut failed) = (None, None, None, None);
+        let mut backed_up = false;
+        if let Some(path) = project_file {
+            let read = if path.to_lowercase().ends_with(".vmix") {
+                crate::vmix_import::load(&path).map(|(p, r)| {
+                    imported = Some(r.name.clone());
+                    import_report = Some(r);
+                    p
+                })
+            } else {
+                bars::read_project(&path).inspect(|_| current_file = Some(path.clone()))
+            };
+            match read {
+                Ok(p) => {
+                    // The session is saved on its own as the desk changes, so what
+                    // was on the desk would be gone for good: keep one copy.
+                    if remote && back_up_session(&saved_path()) {
+                        backed_up = true;
+                    }
+                    saved.project = p;
+                    saved.last_file = Some(path);
+                }
+                Err(e) => failed = Some(t!("bars.unreadable_project", error = e)),
+            }
+        }
+        let mut app = Self::assemble(cc, saved, shot_path, open, imported, import_report, remote);
+        app.current_file = current_file;
+        if let Some(e) = failed {
+            app.say(e);
+        } else if backed_up {
+            app.say(t!("bars.session_backed_up"));
+        }
+        app
     }
 
     #[allow(clippy::too_many_arguments)]

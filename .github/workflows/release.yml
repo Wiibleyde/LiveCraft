@@ -1,0 +1,140 @@
+name: Release
+
+# A tag such as v0.2.0 builds, checks and publishes a release. Started by hand
+# from the Actions tab, it does everything but publish, and keeps the files as
+# a workflow artifact. See docs/releasing.md.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      HAS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+      # Pinned and checked: this program builds what users run.
+      INNO_TAG: is-7_1_1
+      INNO_FILE: innosetup-7.1.1-x64.exe
+      INNO_SHA256: 8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0
+      # Pinned like the above; raise it on purpose, in a commit of its own.
+      RUST_VERSION: 1.99.0
+    steps:
+      # Actions are pinned to full commit hashes: a moved tag must not be able
+      # to run code with this job's secrets and write access.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag is on main
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) { throw "$env:GITHUB_REF_NAME ($env:GITHUB_SHA) is not on main: release from main only" }
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal --component rustfmt --component clippy
+          rustup default $env:RUST_VERSION
+
+      - name: Install Inno Setup
+        run: |
+          $setup = Join-Path $env:RUNNER_TEMP $env:INNO_FILE
+          Invoke-WebRequest "https://github.com/jrsoftware/issrc/releases/download/$env:INNO_TAG/$env:INNO_FILE" -OutFile $setup
+          $hash = (Get-FileHash -Algorithm SHA256 $setup).Hash
+          if ($hash -ne $env:INNO_SHA256) { throw "Inno Setup download does not match: $hash" }
+          $dir = Join-Path $env:RUNNER_TEMP 'inno'
+          $p = Start-Process -Wait -PassThru $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/NOICONS', "/DIR=$dir"
+          if ($p.ExitCode -ne 0) { throw "Inno Setup install failed: $($p.ExitCode)" }
+          "ISCC=$dir\ISCC.exe" >> $env:GITHUB_ENV
+
+      - name: Format, lints and tests
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { throw 'cargo fmt failed' }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'cargo clippy failed' }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { throw 'cargo test failed' }
+
+      # Everything that compiles (and so every dependency's build script)
+      # runs before the signing key exists on the machine.
+      - name: Build both programs
+        run: ./packaging/windows/package.ps1 -BuildOnly
+
+      - name: Import the signing certificate
+        if: env.HAS_CERT == 'true'
+        env:
+          CERT_BASE64: ${{ secrets.WINDOWS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: ./packaging/windows/certificate.ps1
+
+      - name: Build the installer and the portable zip
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME -replace '^v', '' } else { '' }
+          ./packaging/windows/package.ps1 -Version $version -NoBuild
+
+      - name: Check the signatures
+        if: env.HAS_CERT == 'true'
+        run: |
+          Expand-Archive (Get-Item target/dist/*-portable.zip) (Join-Path $env:RUNNER_TEMP 'portable')
+          $files = @(Get-Item target/dist/*-setup.exe) + @(Get-ChildItem -Recurse (Join-Path $env:RUNNER_TEMP 'portable') -Filter *.exe)
+          foreach ($f in $files) {
+            $s = Get-AuthenticodeSignature $f.FullName
+            if ($s.Status -ne 'Valid') { throw "$($f.Name): signature $($s.Status)" }
+            if (-not $s.TimeStamperCertificate) { throw "$($f.Name): no timestamp" }
+          }
+
+      - name: Install, start and uninstall
+        run: ./packaging/windows/install-check.ps1 (Get-Item target/dist/*-setup.exe).FullName
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: livecraft-windows
+          path: target/dist/*
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $signed = $env:HAS_CERT -eq 'true'
+          $notes = @(
+            if ($signed) {
+              'The installer and `livecraft.exe` are signed with Authenticode.'
+            } else {
+              '> [!WARNING]'
+              '> **Unsigned build.** No signing certificate was configured, so Windows SmartScreen will warn before'
+              '> running these files. Check them against `SHA256SUMS.txt` before trusting them.'
+            }
+            ''
+            '**FFmpeg is not included.** LiveCraft needs it on your `PATH` or next to `livecraft.exe`, for example'
+            'with `winget install Gyan.FFmpeg`. The installer says so when it cannot find it.'
+            ''
+            '- `*-setup.exe`: installs for the current user, no administrator needed (`/ALLUSERS` for everyone).'
+            '- `*-portable.zip`: unzip and run `livecraft.exe`; nothing is written outside its folder but your session.'
+            '- `SHA256SUMS.txt`: check with `sha256sum -c SHA256SUMS.txt`, or `Get-FileHash` in PowerShell.'
+            ''
+            'Built for any x86-64 processor; see docs/releasing.md.'
+          )
+          $notesFile = Join-Path $env:RUNNER_TEMP 'notes.md'
+          $notes -join "`n" | Set-Content -Encoding utf8 $notesFile
+          $extra = if ($version -match '-') { @('--prerelease') } else { @() }
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem target/dist -File).FullName `
+            --verify-tag --title "LiveCraft $version" --notes-file $notesFile --generate-notes @extra
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
+
+      - name: Remove the signing certificate
+        if: always() && env.HAS_CERT == 'true'
+        run: ./packaging/windows/certificate.ps1 -Remove
