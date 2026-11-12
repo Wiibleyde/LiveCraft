@@ -352,7 +352,12 @@ impl Desk {
         let on_air = until(30.0, "flux sur la carte", || rt.seq() >= 10 && on_card(&rt));
         stop(sender);
         on_air?;
-        until(12.0, "passage en logiciel après le silence", || !on_card(&rt))?;
+        let at_stop = rt.seq();
+        let swapped = until(12.0, "passage en logiciel après le silence", || !on_card(&rt));
+        if swapped.is_err() {
+            eprintln!("card_stall: seq {at_stop} -> {}, status {:?}", rt.seq(), rt.status());
+        }
+        swapped?;
         let seen = rt.seq();
         let sender = udp_sender(port)?;
         let back = until(30.0, "flux repris en logiciel", || rt.seq() >= seen + 10);
