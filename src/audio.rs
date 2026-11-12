@@ -122,8 +122,9 @@ struct Strip {
     always_on: bool,
     /// Its sound comes at a device's or a sender's pace, not ours.
     live: bool,
-    /// A sender, which can also run ahead and wait for room.
-    sender: bool,
+    /// A stream fetched as fast as its sound is taken, which can run ahead
+    /// and wait for room.
+    may_wait: bool,
 }
 
 struct Mix {
@@ -152,7 +153,7 @@ impl Engine {
                 solo: s.solo.contains(&i.id),
                 always_on: is_always_on(&i.kind),
                 live: is_live(&i.kind),
-                sender: matches!(i.kind, Kind::Network { .. }),
+                may_wait: matches!(&i.kind, Kind::Network { url, .. } if may_run_ahead(url)),
             })
             .collect();
         let fade = if p.ftb_audio { 1.0 - s.ftb_level } else { 1.0 };
@@ -229,8 +230,7 @@ impl Engine {
                         if skipped > 0 {
                             drift.resync();
                         }
-                        let held = strip.sender && ring.room() < 2 * BLOCK;
-                        drift.take(ring.queued(), FRAMES, held)
+                        drift.take(ring.queued(), FRAMES, held(ring, strip.may_wait))
                     }
                     None => {
                         ring.discard(skipped as usize * FRAMES);
@@ -387,6 +387,27 @@ fn is_live(kind: &Kind) -> bool {
     matches!(kind, Kind::Microphone { .. } | Kind::SystemAudio | Kind::Network { .. })
 }
 
+/// Whether a stream is fetched as fast as its sound is taken, as HTTP and HLS
+/// are: it can run ahead and wait for room in its ring, and what waits there
+/// is still to come. A live protocol delivers at its sender's pace, so sound
+/// waiting in its ring is late, however full the ring is.
+fn may_run_ahead(url: &str) -> bool {
+    let scheme = url.split_once("://").map_or("", |(s, _)| s).to_ascii_lowercase();
+    let live =
+        ["srt", "udp", "rtp", "rist", "tcp", "rtsp", "rtsps", "rtmp", "rtmps", "rtmpt", "rtmpe", "rtmpte"];
+    !live.contains(&scheme.as_str())
+}
+
+/// The source is waiting for room in its ring, with sound still to come. Only
+/// a fetched stream can be: a live one found waiting was held up, as when the
+/// sound loop or the receiving ffmpeg stalls for a second on a busy machine.
+/// Taken as held, its ring would stay full from then on, the sender putting
+/// back only what each block takes, and its sound a second behind its picture
+/// for the rest of the show.
+fn held(ring: &Ring, may_wait: bool) -> bool {
+    may_wait && ring.room() < 2 * BLOCK
+}
+
 /// Balance from -1 (left) to 1 (right): the centre leaves both sides at full
 /// level, and moving away only turns the other side down.
 fn balance(b: f32) -> (f32, f32) {
@@ -484,5 +505,58 @@ mod tests {
             let steepest = left.windows(2).map(|p| (p[1] - p[0]).abs()).fold(0f32, f32::max);
             assert!(steepest <= w * 1.01, "{frames} frames: a step of {steepest}");
         }
+    }
+
+    #[test]
+    fn only_fetched_streams_can_run_ahead() {
+        for live in [
+            "srt://h:9000?mode=caller",
+            "udp://127.0.0.1:5000",
+            "RTMP://h/live/k",
+            "rtsp://cam/1",
+            "rtp://h:5004",
+        ] {
+            assert!(!may_run_ahead(live), "{live}");
+        }
+        for fetched in ["https://h/live/index.m3u8", "http://h/show.ts", "C:/clips/show.ts"] {
+            assert!(may_run_ahead(fetched), "{fetched}");
+        }
+    }
+
+    /// Sound left waiting in a ring a minute after the sound loop stalled for
+    /// 1.5 s, from a sender running 0.05 % fast that waits for room as the
+    /// pump does, through the loop's own `held` and `Drift`.
+    fn waiting_after_a_stall(url: &str) -> usize {
+        let ring = Ring::new(1.0);
+        let mut drift = Drift::default();
+        let chunk = [0f32; 960];
+        let mut out = [0f32; BLOCK + 2];
+        let (mut sent, mut pushed) = (0f64, 0usize);
+        for n in 0..3500 {
+            sent += FRAMES as f64 * 1.0005;
+            while sent as usize >= pushed + chunk.len() / 2 && ring.room() >= chunk.len() {
+                ring.push(&chunk);
+                pushed += chunk.len() / 2;
+            }
+            if (500..575).contains(&n) {
+                continue;
+            }
+            if n == 575 {
+                drift.resync();
+            }
+            let take = drift.take(ring.queued(), FRAMES, held(&ring, may_run_ahead(url)));
+            ring.discard(take.discard);
+            ring.pull(&mut out[..take.frames * 2]);
+        }
+        ring.queued()
+    }
+
+    /// What a fetched stream holds is still to come and stays; a live
+    /// sender's is late, and must come back to the margin and stay there.
+    #[test]
+    fn a_live_sender_whose_ring_filled_comes_back_in_step() {
+        let ms = |frames: usize| frames * 1000 / AUDIO_RATE;
+        assert!(ms(waiting_after_a_stall("udp://127.0.0.1:5000")) < 30);
+        assert!(ms(waiting_after_a_stall("https://h/show.m3u8")) > 900);
     }
 }
