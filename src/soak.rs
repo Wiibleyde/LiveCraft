@@ -12,8 +12,9 @@ use crate::playtest::{make, until};
 use crate::selftest::http_get;
 use crate::sources::{AUDIO_RATE, ffmpeg};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::hash::Hash;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -206,31 +207,52 @@ impl Machine {
         );
         let mb = |b: u64| b as f64 / 1_048_576.0;
         let me = self.sys.process(self.pid);
-        let mut by_parent: HashMap<sysinfo::Pid, Vec<sysinfo::Pid>> = HashMap::new();
-        for (pid, p) in self.sys.processes() {
-            if let Some(parent) = p.parent() {
-                by_parent.entry(parent).or_default().push(*pid);
-            }
-        }
+        let rows: Vec<_> =
+            self.sys.processes().iter().map(|(pid, p)| (*pid, p.parent(), p.start_time())).collect();
         // ffmpeg may run through a launcher and a browser is a tree of its
         // own: the whole family counts.
-        let (mut children, mut children_bytes) = (0, 0);
-        let mut todo = vec![self.pid];
-        while let Some(pid) = todo.pop() {
-            for child in by_parent.get(&pid).into_iter().flatten() {
-                children += 1;
-                children_bytes += self.sys.process(*child).map_or(0, |p| p.virtual_memory());
-                todo.push(*child);
-            }
-        }
+        let family = descendants(self.pid, &rows);
+        let children_bytes: u64 =
+            family.iter().filter_map(|pid| self.sys.process(*pid)).map(|p| p.virtual_memory()).sum();
         Usage {
             private_mb: me.map_or(0.0, |p| mb(p.virtual_memory())),
             working_set_mb: me.map_or(0.0, |p| mb(p.memory())),
             handles: handle_count(),
-            children,
+            children: family.len() as u32,
             children_mb: mb(children_bytes),
         }
     }
+}
+
+/// The processes below `root`, from `(pid, parent, start in seconds)` rows.
+///
+/// Windows only keeps the number of a process's parent, and gives that number
+/// to a new process once the parent is gone. When something that launched
+/// this program ends, one of the show's own ffmpeg can be handed its number:
+/// the launcher then reads as that ffmpeg's child, and this program as the
+/// launcher's, so the walk went round forever and a twenty-minute show died
+/// asking for 64 GB. A child cannot start before its parent (0 means the
+/// system would not say), and no process is counted twice.
+fn descendants<P: Copy + Eq + Hash>(root: P, rows: &[(P, Option<P>, u64)]) -> Vec<P> {
+    let born: HashMap<P, u64> = rows.iter().map(|r| (r.0, r.2)).collect();
+    let mut by_parent: HashMap<P, Vec<(P, u64)>> = HashMap::new();
+    for &(pid, parent, start) in rows {
+        if let Some(parent) = parent {
+            by_parent.entry(parent).or_default().push((pid, start));
+        }
+    }
+    let mut seen = HashSet::from([root]);
+    let (mut todo, mut found) = (vec![root], Vec::new());
+    while let Some(pid) = todo.pop() {
+        let parent_start = born.get(&pid).copied().unwrap_or(0);
+        for &(child, start) in by_parent.get(&pid).into_iter().flatten() {
+            if (start == 0 || start >= parent_start) && seen.insert(child) {
+                found.push(child);
+                todo.push(child);
+            }
+        }
+    }
+    found
 }
 
 #[cfg(windows)]
@@ -1193,6 +1215,30 @@ mod tests {
         assert_eq!(percentile(&counts, 0.98), 1.0);
         assert_eq!(percentile(&counts, 0.99), 50.25);
         assert_eq!(percentile(&[0; 4], 0.99), 0.0);
+    }
+
+    #[test]
+    fn a_reused_process_number_never_makes_the_family_go_round() {
+        // The host that launched the launcher (7) is gone and one of the
+        // show's ffmpeg got its number, so the launcher (3) now names that
+        // ffmpeg as its parent: 10 -> 7 -> 3 -> 10.
+        let rows = [
+            (3, Some(7), 100),   // launcher
+            (10, Some(3), 101),  // this program
+            (7, Some(10), 500),  // ffmpeg handed the gone host's number
+            (11, Some(10), 200), // browser
+            (12, Some(11), 201), // its renderer
+            (13, Some(11), 200), // started in the same second as the browser
+            (14, Some(12), 150), // older than its "parent": a stranger
+        ];
+        let mut family = descendants(10, &rows);
+        family.sort();
+        assert_eq!(family, [7, 11, 12, 13]);
+        // When the system will not tell start times, the loop still ends.
+        let unknown = [(3, Some(7), 0), (10, Some(3), 0), (7, Some(10), 0)];
+        let mut family = descendants(10, &unknown);
+        family.sort();
+        assert_eq!(family, [3, 7]);
     }
 
     #[test]
