@@ -341,6 +341,10 @@ fn srt_url(n: Node, host: &str) -> String {
 
 fn kind_of(n: Node, title: &str, r: &mut Report) -> Kind {
     let text = n.text().unwrap_or("").trim().to_string();
+    // Whatever number a presentation input carries, its file says what it is.
+    if crate::slides::is_presentation(&text) {
+        return Kind::PowerPoint { path: text };
+    }
     match n.attribute("Type").unwrap_or("") {
         "0" => Kind::Video {
             path: text,
@@ -487,7 +491,7 @@ pub fn parse(xml: &str) -> Result<(Project, Report), String> {
             .unwrap_or(t!("import.default_input_name"))
             .to_string();
         let kind = kind_of(*node, &title, &mut r);
-        if let Kind::Video { path, .. } | Kind::Image { path } = &kind
+        if let Kind::Video { path, .. } | Kind::Image { path } | Kind::PowerPoint { path } = &kind
             && !Path::new(path).exists()
         {
             r.missing_files.push(path.clone());
@@ -670,6 +674,19 @@ mod tests {
         assert_eq!(r.missing_files.len(), 1);
         assert!(parse("<vmix></vmix>").is_err());
         assert!(parse("pas du xml").is_err());
+    }
+
+    /// The type number of a presentation input is not known from any preset
+    /// seen so far; its file is enough to recognise it.
+    #[test]
+    fn presentations_come_back_as_powerpoint_inputs() {
+        let xml =
+            "<XML><Input Type=\"4242\" Title=\"Conférence\" Key=\"a\">C:\\none\\Keynote.PPTX</Input></XML>";
+        let (p, r) = parse(xml).unwrap();
+        assert!(matches!(&p.inputs[0].kind, Kind::PowerPoint { path } if path == "C:\\none\\Keynote.PPTX"));
+        assert_eq!(p.inputs[0].name, "Conférence");
+        assert!(r.placeholders.is_empty());
+        assert_eq!(r.missing_files, ["C:\\none\\Keynote.PPTX"]);
     }
 
     #[test]

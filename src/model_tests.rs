@@ -9,6 +9,8 @@ fn older_files_keep_opening() {
     let p = v.as_object_mut().unwrap();
     p.remove("overlay_last");
     p.remove("layer_templates");
+    p.remove("ndi_out");
+    p.remove("omt_out");
     for input in p["inputs"].as_array_mut().unwrap() {
         let i = input.as_object_mut().unwrap();
         i.remove("auto_pause");
@@ -20,6 +22,8 @@ fn older_files_keep_opening() {
     }
     let back: Project = serde_json::from_value(v).unwrap();
     assert_eq!(back.inputs.len(), Project::sample().inputs.len());
+    assert_eq!(back.ndi_out, NetOutCfg::default(), "les sorties réseau restent éteintes");
+    assert!(!back.omt_out.enabled);
 }
 
 #[test]
@@ -54,6 +58,9 @@ fn a_new_setting_is_not_a_new_source() {
     assert!(video("a", 1.0).same_source(&video("a", 2.0)));
     assert!(!video("a", 1.0).same_source(&video("b", 1.0)));
     assert!(!Kind::Bars.same_source(&Kind::Clock));
+    // Another presentation starts at its first slide, not where the last one was.
+    let deck = |path: &str| Kind::PowerPoint { path: path.into() };
+    assert!(!deck("a.pptx").same_source(&deck("b.pptx")));
 }
 
 /// Later versions will add to sets too: what is missing takes its default.

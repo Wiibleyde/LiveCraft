@@ -47,9 +47,10 @@ The HTTP and TCP interfaces use the published function names, so existing contro
 
 ## Features
 
-**Inputs.** Video files, image sequences, photo folders, lists, images, audio files, cameras and
-microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP, TS), web pages, solid
-colours, test cards, clocks, and titles with presets, tickers, countdowns and a simple designer.
+**Inputs.** Video files, image sequences, photo folders, lists, images, audio files, PowerPoint
+presentations, cameras and microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP,
+TS), NDI and OMT sources, web pages, solid colours, test cards, clocks, and titles with presets, tickers,
+countdowns and a simple designer.
 
 **Virtual sets.** Keyed presenters stand in a decor, behind a desk, and a virtual camera glides
 between presets from a card button, a named function or remote control. Two decors are drawn by
@@ -68,8 +69,8 @@ and alpha masks, plus scopes and safe areas.
 headphones, with several output devices.
 
 **Outputs.** Two recorders, up to five stream destinations sharing one encode, separate recordings per
-input, SRT output, fullscreen and external windows, multiview. NVENC, Quick Sync and AMF are used when
-your FFmpeg offers them.
+input, SRT output, the program with sound as an NDI or OMT source, fullscreen and external windows,
+multiview. NVENC, Quick Sync and AMF are used when your FFmpeg offers them.
 
 **Show tools.** Instant replay with events and tags, playlists, triggers, data sources from CSV,
 scripts, VISCA PTZ control, a telestrator, and a web controller for phones and tablets.
@@ -79,11 +80,17 @@ scripts, VISCA PTZ control, a telestrator, and a web controller for phones and t
 On Windows, take the installer or the portable zip from the [releases](../../releases). It installs for
 your account without administrator rights. FFmpeg is not included: install it with
 `winget install Gyan.FFmpeg`, or see the `FFmpeg.txt` next to the program. Web inputs also need Chrome,
-Chromium or Edge. How releases are made, signed and built is in [docs/releasing.md](docs/releasing.md).
+Chromium or Edge, and presentations need Microsoft PowerPoint or
+[LibreOffice](https://www.libreoffice.org). How releases are made, signed and built is in [docs/releasing.md](docs/releasing.md).
 
 To build it yourself, you need [Rust](https://rustup.rs) (edition 2024), and [FFmpeg](https://ffmpeg.org)
 on your `PATH`. Builds from source target CPUs with AVX2, see `.cargo/config.toml`; releases run on any
 x86-64 processor.
+
+NDI and OMT are optional and loaded only when used. NDI needs the NDI runtime, installed with
+[NDI Tools](https://ndi.video/tools/). OMT needs `libomt.dll` and `libvmx.dll` from the
+[Open Media Transport release](https://github.com/openmediatransport/libomtnet/releases), placed beside
+`livecraft.exe` or on the `PATH`. Without them, everything else works and LiveCraft says what is missing.
 
 ```sh
 cargo run --release
@@ -129,7 +136,7 @@ LiveCraft runs on Windows, Linux and macOS. Capture goes through FFmpeg's own de
 ### What is missing today
 
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
-- **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs.
+- **No video calls**, no DVD inputs.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
 
 The full list is in the [roadmap](ROADMAP.md).

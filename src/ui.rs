@@ -20,6 +20,7 @@ use crate::engine::{Engine, ROUTES, State};
 use crate::functions::Args;
 use crate::i18n::{Lang, language, set_language};
 use crate::model::*;
+use crate::netvideo::Net;
 use crate::output;
 use crate::secret;
 use crate::widgets::*;
@@ -211,6 +212,10 @@ pub struct App {
     format_draft: (usize, usize, u32),
     devices: Arc<Mutex<(Vec<String>, Vec<String>)>>,
     encoders: Arc<Mutex<Vec<String>>>,
+    /// NDI and OMT sources from the last look, by protocol; none until one ends.
+    net_found: Arc<Mutex<[Option<Result<Vec<String>, String>>; 2]>>,
+    net_looking: Arc<AtomicBool>,
+    net_at: Option<Instant>,
     message: Option<(String, Instant)>,
     shot_path: Option<String>,
     frames: u32,
@@ -344,8 +349,12 @@ impl App {
             edit_tab,
             selected_layer: 0,
             picking_colour: false,
-            settings_open: open == "reglages" || open == "options",
-            settings_tab: usize::from(open == "options"),
+            settings_open: open == "reglages" || open == "options" || open == "sorties",
+            settings_tab: match open {
+                "options" => 1,
+                "sorties" => 2,
+                _ => 0,
+            },
             playlist_open: open == "playlist",
             overlays_open: open == "incrustations",
             overlay_pick: 0,
@@ -391,6 +400,9 @@ impl App {
             format_draft,
             devices,
             encoders,
+            net_found: Arc::new(Mutex::new([None, None])),
+            net_looking: Arc::new(AtomicBool::new(false)),
+            net_at: None,
             message,
             shot_path,
             frames: 0,
@@ -452,6 +464,30 @@ impl App {
         self.screens = crate::platform::list_screens();
         let devices = self.devices.clone();
         std::thread::spawn(move || *devices.lock().unwrap() = crate::platform::list_devices());
+    }
+
+    /// Network sources come and go: while a list of them is on screen, it is
+    /// asked for again every second, away from the window's thread. The first
+    /// look also loads the runtimes, which takes a moment.
+    fn look_for_net_sources(&mut self) {
+        if self.net_at.is_some_and(|t| t.elapsed() < Duration::from_secs(1))
+            || self.net_looking.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        self.net_at = Some(Instant::now());
+        let (found, looking) = (self.net_found.clone(), self.net_looking.clone());
+        std::thread::spawn(move || {
+            for net in Net::ALL {
+                let list = net.sources();
+                found.lock().unwrap()[net as usize] = Some(list);
+            }
+            looking.store(false, Ordering::Release);
+        });
+    }
+
+    fn net_found(&self, net: Net) -> Option<Result<Vec<String>, String>> {
+        self.net_found.lock().unwrap()[net as usize].clone()
     }
 
     fn sync_textures(&mut self, ctx: &egui::Context) {

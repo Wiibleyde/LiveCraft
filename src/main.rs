@@ -21,6 +21,9 @@ mod mixer;
 mod model;
 #[cfg(test)]
 mod model_tests;
+mod ndi;
+mod netvideo;
+mod omt;
 mod output;
 mod outputs;
 mod platform;
@@ -30,6 +33,7 @@ mod replay;
 mod secret;
 mod selftest;
 mod sets;
+mod slides;
 mod sources;
 mod text;
 mod titles;
