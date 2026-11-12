@@ -540,6 +540,7 @@ fn play_clip(
     let step = play.speed.max(0.01) as f64 / fps as f64;
     let mut next = Instant::now();
     let mut ticks = 0u64;
+    let mut last_shown = false;
     while !rt.stopped() {
         if rt.replay.lock().unwrap().is_some() {
             break;
@@ -549,9 +550,16 @@ fn play_clip(
             next = Instant::now();
             continue;
         }
-        let clock = ticks as f64 * step;
+        let mut clock = ticks as f64 * step;
         if clock >= play.span_s {
-            break;
+            // Ticks rarely land on the out mark. The picture on screen at that
+            // moment is the moment's last, so show it once before stopping
+            // instead of ending a tick early on the picture before.
+            if last_shown {
+                break;
+            }
+            last_shown = true;
+            clock = play.span_s - 1e-6;
         }
         // Each camera shows the picture it had at this moment: pictures lost
         // while recording hold the one before for as long as they lasted, and
