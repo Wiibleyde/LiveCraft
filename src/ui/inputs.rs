@@ -7,7 +7,7 @@ impl App {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if !self.basic {
-                let all = RichText::new("Tout").size(11.0).color(Color32::WHITE);
+                let all = RichText::new(t!("inputs.tab_all")).size(11.0).color(Color32::WHITE);
                 let mut b =
                     egui::Button::new(all).fill(Color32::from_rgb(90, 92, 98)).min_size(vec2(36.0, 19.0));
                 if self.tab.is_none() {
@@ -43,16 +43,17 @@ impl App {
                 }
                 ui.add_space(6.0);
             }
-            ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Rechercher").desired_width(110.0));
+            let search = egui::TextEdit::singleline(&mut self.search).hint_text(t!("inputs.search"));
+            ui.add(search.desired_width(110.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !self.basic {
-                    let label = RichText::new("Mixeur audio").size(11.0).color(Color32::WHITE);
+                    let label = RichText::new(t!("inputs.audio_mixer")).size(11.0).color(Color32::WHITE);
                     let fill = if self.audio_open { GREEN } else { BTN };
                     let b = egui::Button::new(label).fill(fill).min_size(vec2(0.0, 19.0));
                     if ui.add(b).clicked() {
                         self.audio_open = !self.audio_open;
                     }
-                    let label = RichText::new("Ralenti").size(11.0).color(Color32::WHITE);
+                    let label = RichText::new(t!("inputs.replay")).size(11.0).color(Color32::WHITE);
                     let fill = if self.replay_open { GREEN } else { BTN };
                     let b = egui::Button::new(label).fill(fill).min_size(vec2(0.0, 19.0));
                     if ui.add(b).clicked() {
@@ -74,7 +75,7 @@ impl App {
         let query = self.search.trim().to_lowercase();
         if project.inputs.is_empty() {
             ui.centered_and_justified(|ui| {
-                let hint = "Aucune entrée : utilisez « Ajouter une entrée » en bas à gauche, ou glissez des fichiers ici";
+                let hint = t!("inputs.empty_hint");
                 ui.label(RichText::new(hint).color(DIM));
             });
             return;
@@ -151,8 +152,8 @@ impl App {
         );
         vertical_text(ui, rect, &input.name);
         let id = input.id;
-        let resp = named(resp, format!("Entrée {}", input.name));
-        let resp = resp.on_hover_text("Clic : aperçu · Clic droit : déplier");
+        let resp = named(resp, t!("inputs.input_named", name = input.name));
+        let resp = resp.on_hover_text(t!("inputs.strip_tip"));
         if resp.secondary_clicked() {
             self.with(|s| {
                 if let Some(i) = s.input_mut(id) {
@@ -215,9 +216,8 @@ impl App {
                 Rect::from_min_max(pic.right_top() + vec2(-6.0, 2.0), pic.right_bottom() - vec2(1.0, 2.0));
             draw_meter(ui, meter, rt.peak(), input.audio.muted);
         }
-        let resp = named(resp, format!("Entrée {}", input.name));
-        let resp =
-            resp.on_hover_text("Clic : aperçu · Double-clic : réglages · Clic droit sur le titre : replier");
+        let resp = named(resp, t!("inputs.input_named", name = input.name));
+        let resp = resp.on_hover_text(t!("inputs.card_tip"));
         // Header's X closes; right-clicking the title folds the card.
         let on_title =
             |r: &egui::Response| r.ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| head.contains(p));
@@ -251,10 +251,10 @@ impl App {
             egui::FontId::proportional(14.0),
             Color32::WHITE,
         );
-        let x = named(x, format!("Fermer {}", input.name));
-        if x.on_hover_text("Fermer l'entrée").clicked() {
+        let x = named(x, t!("inputs.close_named", name = input.name));
+        if x.on_hover_text(t!("inputs.close_tip")).clicked() {
             if self.with(|s| s.padlock) {
-                self.say("Verrouillé : ouvrez le cadenas pour fermer une entrée");
+                self.say(t!("inputs.locked_close"));
             } else {
                 self.engine.close_input(id);
                 self.thumbs.remove(&id);
@@ -280,20 +280,21 @@ impl App {
         top.spacing_mut().item_spacing.x = 1.0;
         top.spacing_mut().button_padding = vec2(5.0, 0.0);
         let go_tip = match &input.go {
-            GoAction::QuickPlay => "GO : passer au direct".to_string(),
-            GoAction::Transition(n) => format!("GO : transition {}", n + 1),
-            GoAction::Shortcut { function, .. } => format!("GO : {function}"),
+            GoAction::QuickPlay => t!("inputs.go_quick_play").to_string(),
+            GoAction::Transition(n) => t!("inputs.go_transition", n = n + 1),
+            GoAction::Shortcut { function, .. } => t!("inputs.go_function", function = function),
         };
         let go = named(tiny(&mut top, "GO", None), format!("GO {}", input.name));
         if go.on_hover_text(go_tip).clicked() {
             self.run_go(input);
         }
-        if named(tiny(&mut top, "Coupe", None), format!("Coupe {}", input.name)).clicked() {
+        let cut = named(tiny(&mut top, t!("inputs.cut"), None), t!("inputs.cut_named", name = input.name));
+        if cut.clicked() {
             self.with(|s| s.cut_to(id));
         }
         if let Kind::Video { looped, .. } = input.kind {
             let on = looped.then_some(GREEN);
-            if icon_button(&mut top, Icon::Loop, on).on_hover_text("Boucle").clicked() {
+            if icon_button(&mut top, Icon::Loop, on).on_hover_text(t!("inputs.loop")).clicked() {
                 self.call("Loop", &Args::new().input(&(self.input_number(project, id))));
             }
         }
@@ -314,16 +315,16 @@ impl App {
         for slot in 0..OVERLAY_CHANNELS {
             let on = (project.overlays[slot] == Some(id)).then_some(GREEN);
             let r = tiny(&mut bottom, &format!("{}", slot + 1), on);
-            let r = named(r, format!("Incrustation {} {}", slot + 1, input.name));
-            if r.on_hover_text(format!("Incrustation {}", slot + 1)).clicked() {
+            let r = named(r, t!("inputs.overlay_named", n = slot + 1, name = input.name));
+            if r.on_hover_text(t!("inputs.overlay_tip", n = slot + 1)).clicked() {
                 self.with(|s| s.toggle_overlay(slot, id));
             }
         }
         bottom.add_space(4.0);
         let has_audio = input.kind.has_audio();
         let on = (has_audio && !input.audio.muted).then_some(GREEN);
-        let audio = bottom.add_enabled_ui(has_audio, |ui| tiny(ui, "Audio", on)).inner;
-        let audio = named(audio, format!("Audio {}", input.name));
+        let audio = bottom.add_enabled_ui(has_audio, |ui| tiny(ui, t!("inputs.audio"), on)).inner;
+        let audio = named(audio, t!("inputs.audio_named", name = input.name));
         if audio.clicked() {
             self.with(|s| {
                 if let Some(a) = s.audio_mut(id) {
@@ -334,8 +335,8 @@ impl App {
         bottom.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let category =
                 input.category.and_then(|n| project.categories.get(n)).map_or(BTN, |c| rgb(c.color));
-            let g = named(gear(ui, category), format!("Réglages {}", input.name));
-            let g = g.on_hover_text("Réglages · Clic droit : instantané de l'entrée");
+            let g = named(gear(ui, category), t!("inputs.settings_named", name = input.name));
+            let g = g.on_hover_text(t!("inputs.settings_tip"));
             if g.secondary_clicked() {
                 self.take_snapshot(Some(id));
             } else if g.clicked() {
@@ -373,36 +374,36 @@ impl App {
     fn input_menu(&mut self, ui: &mut egui::Ui, input: &Input) {
         let id = input.id;
         ui.set_min_width(180.0);
-        if ui.button("Réglages…").clicked() {
+        if ui.button(t!("inputs.menu_settings")).clicked() {
             self.editing = Some(id);
             ui.close();
         }
-        if ui.button("Instantané de l'entrée…").clicked() {
+        if ui.button(t!("inputs.menu_snapshot")).clicked() {
             self.take_snapshot(Some(id));
             ui.close();
         }
-        if ui.button("Dupliquer (entrée virtuelle)").clicked() {
+        if ui.button(t!("inputs.menu_duplicate")).clicked() {
             let mut copy = input.clone();
             copy.id = self.engine.new_id();
-            copy.name = format!("{} (virtuelle)", input.name);
+            copy.name = t!("inputs.virtual_copy", name = input.name);
             self.engine.add_input(copy);
             ui.close();
         }
         match &input.kind {
             Kind::Camera { .. } => {
-                if ui.button("Commande PTZ…").clicked() {
+                if ui.button(t!("inputs.menu_ptz")).clicked() {
                     self.ptz_for = Some(id);
                     ui.close();
                 }
             }
             Kind::Telestrator { .. } => {
-                if ui.button("Dessiner…").clicked() {
+                if ui.button(t!("inputs.menu_draw")).clicked() {
                     self.telestrator_for = Some(id);
                     ui.close();
                 }
             }
             Kind::Designed { .. } => {
-                if ui.button("Modifier le titre…").clicked() {
+                if ui.button(t!("inputs.menu_edit_title")).clicked() {
                     self.designer_for = Some(id);
                     ui.close();
                 }
@@ -410,9 +411,9 @@ impl App {
             Kind::Title { presets, style, .. } => {
                 if *style == TitleStyle::Countdown {
                     for (label, f) in [
-                        ("Démarrer", "StartCountdown"),
-                        ("Pause", "PauseCountdown"),
-                        ("Remettre à zéro", "StopCountdown"),
+                        (t!("inputs.countdown_start"), "StartCountdown"),
+                        (t!("inputs.countdown_pause"), "PauseCountdown"),
+                        (t!("inputs.countdown_reset"), "StopCountdown"),
                     ] {
                         if ui.button(label).clicked() {
                             if let Some(rt) = self.engine.rt(id) {
@@ -448,7 +449,7 @@ impl App {
             Kind::Photos { .. } | Kind::List { .. } => {
                 let count = self.engine.rt(id).map_or(0, |r| r.items.load(Ordering::Relaxed));
                 for n in 0..count.min(30) {
-                    if ui.button(format!("Élément {}", n + 1)).clicked() {
+                    if ui.button(t!("inputs.menu_item", n = n + 1)).clicked() {
                         if let Some(rt) = self.engine.rt(id) {
                             rt.select.store(n as i64, Ordering::Relaxed);
                         }
@@ -483,7 +484,7 @@ impl App {
             }
             "livecraft" | "regie" | "vmix" => {
                 if self.with(|s| s.padlock) {
-                    self.say("Verrouillé : ouvrez le cadenas pour changer de projet");
+                    self.say(t!("inputs.locked_open_project"));
                 } else if self.with(|s| s.project.inputs.is_empty()) {
                     self.open_path(path);
                 } else {
@@ -501,16 +502,16 @@ impl App {
     }
 
     pub(super) fn add_menu(&mut self, ui: &mut egui::Ui) {
-        let button = egui::Button::new(RichText::new("Ajouter une entrée").size(12.0).color(TEXT))
+        let button = egui::Button::new(RichText::new(t!("inputs.add_input")).size(12.0).color(TEXT))
             .fill(BTN)
             .min_size(vec2(130.0, 22.0));
         let (cams, mics) = self.devices.lock().unwrap().clone();
         let (opened, _) = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
             ui.set_min_width(230.0);
-            if ui.button("Vidéo…").clicked() {
+            if ui.button(t!("inputs.add_video")).clicked() {
                 let picked = rfd::FileDialog::new()
                     .add_filter(
-                        "Vidéo",
+                        t!("inputs.filter_video"),
                         &["mp4", "mov", "mkv", "avi", "webm", "m4v", "ts", "mxf", "wmv", "mpg"],
                     )
                     .pick_files();
@@ -519,7 +520,7 @@ impl App {
                 }
                 ui.close();
             }
-            if ui.button("Liste de vidéos…").clicked() {
+            if ui.button(t!("inputs.add_video_list")).clicked() {
                 let picked = rfd::FileDialog::new().pick_files().unwrap_or_default();
                 let items: Vec<ListItem> = picked
                     .iter()
@@ -533,13 +534,13 @@ impl App {
                         looped: false,
                         shuffle: false,
                     };
-                    self.add_input("Liste", kind);
+                    self.add_input(t!("inputs.list_name"), kind);
                 }
                 ui.close();
             }
-            ui.menu_button("Caméra", |ui| {
+            ui.menu_button(t!("inputs.add_camera"), |ui| {
                 if cams.is_empty() {
-                    ui.label(RichText::new("Aucune caméra détectée").color(DIM));
+                    ui.label(RichText::new(t!("inputs.no_camera")).color(DIM));
                 }
                 for c in &cams {
                     if ui.button(c).clicked() {
@@ -548,8 +549,9 @@ impl App {
                     }
                 }
             });
-            if ui.button("Flux réseau (SRT, RTMP, RTSP, TS)").clicked() {
-                let id = self.add_input("Flux réseau", Kind::Network { url: "srt://".into(), buffer_ms: 0 });
+            if ui.button(t!("inputs.add_network")).clicked() {
+                let kind = Kind::Network { url: "srt://".into(), buffer_ms: 0 };
+                let id = self.add_input(t!("inputs.network_name"), kind);
                 self.editing = Some(id);
                 ui.close();
             }
@@ -559,17 +561,14 @@ impl App {
                     self.look_for_net_sources();
                     match self.net_found(net) {
                         None => {
-                            ui.label(RichText::new("Recherche des sources…").color(DIM));
+                            ui.label(RichText::new(t!("inputs.net_searching")).color(DIM));
                         }
                         Some(Err(missing)) => {
                             ui.label(RichText::new(missing).color(DIM));
                         }
                         Some(Ok(list)) => {
                             if list.is_empty() {
-                                ui.label(
-                                    RichText::new(format!("Aucune source {} trouvée", net.label()))
-                                        .color(DIM),
-                                );
+                                ui.label(RichText::new(t!("inputs.net_none", name = net.label())).color(DIM));
                             }
                             for source in list {
                                 if ui.button(&source).clicked() {
@@ -580,40 +579,40 @@ impl App {
                         }
                     }
                     ui.separator();
-                    if ui.button(format!("Autre source {}…", net.label())).clicked() {
+                    if ui.button(t!("inputs.net_other", name = net.label())).clicked() {
                         let id = self.add_input(net.label(), net.input(String::new()));
                         self.editing = Some(id);
                         ui.close();
                     }
                 });
             }
-            if ui.button("Page web").clicked() {
+            if ui.button(t!("inputs.web_page")).clicked() {
                 let kind = Kind::Browser { url: "https://".into(), alpha: false };
-                let id = self.add_input("Page web", kind);
+                let id = self.add_input(t!("inputs.web_page"), kind);
                 self.editing = Some(id);
                 ui.close();
             }
-            if ui.button("Capture de l'écran").clicked() {
-                self.add_input("Écran", Kind::Screen);
+            if ui.button(t!("inputs.add_screen")).clicked() {
+                self.add_input(t!("inputs.screen_name"), Kind::Screen);
                 ui.close();
             }
             ui.separator();
-            if ui.button("Image…").clicked() {
+            if ui.button(t!("inputs.add_image")).clicked() {
                 let picked = rfd::FileDialog::new()
-                    .add_filter("Image", &["png", "jpg", "jpeg", "webp", "bmp"])
+                    .add_filter(t!("inputs.filter_image"), &["png", "jpg", "jpeg", "webp", "bmp"])
                     .pick_files();
                 for p in picked.unwrap_or_default() {
                     self.add_file(&p);
                 }
                 ui.close();
             }
-            if ui.button("Photos (dossier)…").clicked() {
+            if ui.button(t!("inputs.add_photos")).clicked() {
                 if let Some(p) = rfd::FileDialog::new().pick_folder() {
                     self.add_file(&p);
                 }
                 ui.close();
             }
-            if ui.button("Séquence d'images…").clicked() {
+            if ui.button(t!("inputs.add_image_sequence")).clicked() {
                 if let Some(p) = rfd::FileDialog::new().pick_file() {
                     let first = p.to_string_lossy().into_owned();
                     self.add_input(&file_name(&p), Kind::ImageSequence { first, fps: 30.0, looped: true });
@@ -621,9 +620,9 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            ui.menu_button("Entrée audio", |ui| {
+            ui.menu_button(t!("inputs.add_audio_input"), |ui| {
                 if mics.is_empty() {
-                    ui.label(RichText::new("Aucun micro détecté").color(DIM));
+                    ui.label(RichText::new(t!("inputs.no_microphone")).color(DIM));
                 }
                 for m in &mics {
                     if ui.button(m).clicked() {
@@ -632,8 +631,10 @@ impl App {
                     }
                 }
                 ui.separator();
-                if ui.button("Audio système").on_hover_text("Tout ce que joue l'ordinateur").clicked() {
-                    let id = self.add_input("Audio système", Kind::SystemAudio);
+                let system =
+                    ui.button(t!("inputs.system_audio")).on_hover_text(t!("inputs.system_audio_tip"));
+                if system.clicked() {
+                    let id = self.add_input(t!("inputs.system_audio"), Kind::SystemAudio);
                     self.with(|s| {
                         if let Some(i) = s.input_mut(id) {
                             i.audio.muted = true;
@@ -642,9 +643,9 @@ impl App {
                     ui.close();
                 }
             });
-            if ui.button("Fichier audio…").clicked() {
+            if ui.button(t!("inputs.add_audio_file")).clicked() {
                 let picked = rfd::FileDialog::new()
-                    .add_filter("Audio", &["mp3", "wav", "m4a", "flac", "ogg", "aac"])
+                    .add_filter(t!("inputs.filter_audio"), &["mp3", "wav", "m4a", "flac", "ogg", "aac"])
                     .pick_files();
                 for p in picked.unwrap_or_default() {
                     self.add_file(&p);
@@ -652,10 +653,10 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            ui.menu_button("Titre", |ui| {
+            ui.menu_button(t!("inputs.add_title"), |ui| {
                 let title = |style| Kind::Title {
-                    text: "Votre titre".into(),
-                    sub: "Sous-titre".into(),
+                    text: t!("inputs.title_default_text").into(),
+                    sub: t!("inputs.title_default_sub").into(),
                     style,
                     color: [255, 255, 255],
                     accent: [240, 120, 40],
@@ -667,61 +668,62 @@ impl App {
                     data: None,
                 };
                 for (label, style) in [
-                    ("Bandeau", TitleStyle::LowerThird),
-                    ("Centré", TitleStyle::Centered),
-                    ("Défilant", TitleStyle::Ticker),
-                    ("Compte à rebours", TitleStyle::Countdown),
+                    (t!("inputs.title_lower_third"), TitleStyle::LowerThird),
+                    (t!("inputs.title_centred"), TitleStyle::Centered),
+                    (t!("inputs.title_ticker"), TitleStyle::Ticker),
+                    (t!("inputs.title_countdown"), TitleStyle::Countdown),
                 ] {
                     if ui.button(label).clicked() {
                         self.add_input(label, title(style));
                         ui.close();
                     }
                 }
-                if ui.button("Personnalisé…").clicked() {
+                if ui.button(t!("inputs.title_custom")).clicked() {
                     let id = self.add_input(
-                        "Titre personnalisé",
+                        t!("inputs.title_custom_name"),
                         Kind::Designed { objects: Vec::new(), anim_ms: 500 },
                     );
                     self.designer_for = Some(id);
                     ui.close();
                 }
             });
-            if ui.button("Scène (couches)").clicked() {
-                let id = self.add_input("Scène", Kind::Scene);
+            if ui.button(t!("inputs.add_scene")).clicked() {
+                let id = self.add_input(t!("inputs.scene_name"), Kind::Scene);
                 self.editing = Some(id);
                 self.edit_tab = 6;
                 ui.close();
             }
-            if ui.button("Mix (second mélangeur)").clicked() {
-                let id = self.add_input("Mix", Kind::Mix { preview: None, output: None, ms: 1000 });
+            if ui.button(t!("inputs.add_mix")).clicked() {
+                let kind = Kind::Mix { preview: None, output: None, ms: 1000 };
+                let id = self.add_input(t!("inputs.mix_name"), kind);
                 self.editing = Some(id);
                 ui.close();
             }
-            if ui.button("Télestrateur").clicked() {
-                let id = self.add_input("Télestrateur", Kind::Telestrator { background: None });
+            if ui.button(t!("inputs.telestrator")).clicked() {
+                let id = self.add_input(t!("inputs.telestrator"), Kind::Telestrator { background: None });
                 self.telestrator_for = Some(id);
                 ui.close();
             }
             ui.separator();
-            ui.menu_button("Couleur et mires", |ui| {
-                if ui.button("Couleur").clicked() {
-                    self.add_input("Couleur", Kind::Solid { color: [24, 62, 120] });
+            ui.menu_button(t!("inputs.add_colour_bars"), |ui| {
+                if ui.button(t!("inputs.colour")).clicked() {
+                    self.add_input(t!("inputs.colour"), Kind::Solid { color: [24, 62, 120] });
                     ui.close();
                 }
-                if ui.button("Mire").clicked() {
-                    self.add_input("Mire", Kind::Bars);
+                if ui.button(t!("inputs.bars")).clicked() {
+                    self.add_input(t!("inputs.bars"), Kind::Bars);
                     ui.close();
                 }
-                if ui.button("Mire animée").clicked() {
-                    self.add_input("Mire animée", Kind::Motion);
+                if ui.button(t!("inputs.motion_bars")).clicked() {
+                    self.add_input(t!("inputs.motion_bars"), Kind::Motion);
                     ui.close();
                 }
-                if ui.button("Horloge").clicked() {
-                    self.add_input("Horloge", Kind::Clock);
+                if ui.button(t!("inputs.clock")).clicked() {
+                    self.add_input(t!("inputs.clock"), Kind::Clock);
                     ui.close();
                 }
-                if ui.button("Son de test").clicked() {
-                    let id = self.add_input("Son de test", Kind::Tone);
+                if ui.button(t!("inputs.test_tone")).clicked() {
+                    let id = self.add_input(t!("inputs.test_tone"), Kind::Tone);
                     self.with(|s| {
                         if let Some(i) = s.input_mut(id) {
                             i.audio.muted = true;

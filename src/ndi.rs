@@ -9,7 +9,6 @@ use std::ptr::{null, null_mut};
 use std::sync::{LazyLock, Mutex};
 
 const DLL: &str = "Processing.NDI.Lib.x64.dll";
-pub const MISSING: &str = "Runtime NDI introuvable : installez NDI Tools ou le runtime NDI (ndi.video/tools), puis relancez LiveCraft";
 
 #[repr(C)]
 struct Source {
@@ -112,13 +111,13 @@ fn api() -> Result<&'static Api, String> {
 /// program or on the PATH is found too.
 fn load() -> Result<Api, String> {
     let candidates = netvideo::runtime_candidates(DLL, &["NDI_RUNTIME_DIR_V6", "NDI_RUNTIME_DIR_V5"]);
-    let lib = Library::open(&candidates).ok_or(MISSING)?;
+    let lib = Library::open(&candidates).ok_or(t!("ndi.missing"))?;
     // SAFETY: each type is the signature the SDK documents for that name, and
     // the library stays loaded for the life of the program.
     unsafe {
         let initialize: unsafe extern "C" fn() -> bool = lib.symbol("NDIlib_initialize")?;
         if !initialize() {
-            return Err("Le runtime NDI ne prend pas en charge ce processeur".into());
+            return Err(t!("ndi.cpu").into());
         }
         Ok(Api {
             find_create: lib.symbol("NDIlib_find_create_v2")?,
@@ -157,7 +156,7 @@ pub fn sources() -> Result<Vec<String>, String> {
         // SAFETY: the settings outlive the call.
         let made = unsafe { (api.find_create)(&settings) };
         if made.is_null() {
-            return Err("La recherche NDI n'a pas pu démarrer".into());
+            return Err(t!("ndi.find_failed").into());
         }
         // SAFETY: `made` is a live finder. The first answers take a moment.
         unsafe { (api.find_wait)(made, 1500) };
@@ -192,7 +191,7 @@ unsafe impl Send for Receiver {}
 impl Receiver {
     pub fn new(source: &str) -> Result<Self, String> {
         let api = api()?;
-        let name = CString::new(source).map_err(|_| "Nom de source NDI invalide")?;
+        let name = CString::new(source).map_err(|_| t!("ndi.bad_source_name"))?;
         let own = CString::new("LiveCraft").unwrap();
         let settings = RecvCreate {
             source: Source { name: name.as_ptr(), url: null() },
@@ -204,7 +203,7 @@ impl Receiver {
         // SAFETY: the settings and their strings outlive the call.
         let instance = unsafe { (api.recv_create)(&settings) };
         if instance.is_null() {
-            return Err("Le récepteur NDI n'a pas pu être créé".into());
+            return Err(t!("ndi.receiver_failed").into());
         }
         Ok(Self { api, instance })
     }
@@ -277,7 +276,7 @@ unsafe impl Send for Sender {}
 impl Sender {
     pub fn new(name: &str) -> Result<Self, String> {
         let api = api()?;
-        let name = CString::new(name).map_err(|_| "Nom de sortie NDI invalide")?;
+        let name = CString::new(name).map_err(|_| t!("ndi.bad_name"))?;
         // The program is already paced by the mixer: a second clock here would
         // only make the mixer wait.
         let settings =
@@ -285,7 +284,7 @@ impl Sender {
         // SAFETY: the settings and their strings outlive the call.
         let instance = unsafe { (api.send_create)(&settings) };
         if instance.is_null() {
-            return Err("La sortie NDI n'a pas pu être créée (nom déjà pris ?)".into());
+            return Err(t!("ndi.sender_failed").into());
         }
         Ok(Self { api, instance, planar: Vec::new() })
     }

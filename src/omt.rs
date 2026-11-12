@@ -10,8 +10,6 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 const DLL: &str = "libomt.dll";
-pub const MISSING: &str = "Bibliothèque OMT introuvable : placez libomt.dll et libvmx.dll \
-     (github.com/openmediatransport) à côté de LiveCraft ou dans le PATH, puis relancez LiveCraft";
 
 #[repr(C)]
 struct MediaFrame {
@@ -72,7 +70,7 @@ fn api() -> Result<&'static Api, String> {
 
 fn load() -> Result<Api, String> {
     let candidates = netvideo::runtime_candidates(DLL, &[]);
-    let lib = Library::open(&candidates).ok_or(MISSING)?;
+    let lib = Library::open(&candidates).ok_or(t!("omt.missing"))?;
     // SAFETY: each type is the signature `libomt.h` declares for that name, and
     // the library stays loaded for the life of the program.
     unsafe {
@@ -135,12 +133,12 @@ unsafe impl Send for Receiver {}
 impl Receiver {
     pub fn new(source: &str) -> Result<Self, String> {
         let api = api()?;
-        let address = CString::new(source).map_err(|_| "Nom de source OMT invalide")?;
+        let address = CString::new(source).map_err(|_| t!("omt.bad_source_name"))?;
         // SAFETY: the address outlives the call.
         let instance =
             unsafe { (api.receive_create)(address.as_ptr(), FRAME_VIDEO | FRAME_AUDIO, PREFER_BGRA, 0) };
         if instance.is_null() {
-            return Err("Le récepteur OMT n'a pas pu être créé".into());
+            return Err(t!("omt.receiver_failed").into());
         }
         Ok(Self { api, instance })
     }
@@ -210,11 +208,11 @@ unsafe impl Send for Sender {}
 impl Sender {
     pub fn new(name: &str) -> Result<Self, String> {
         let api = api()?;
-        let name = CString::new(name).map_err(|_| "Nom de sortie OMT invalide")?;
+        let name = CString::new(name).map_err(|_| t!("omt.bad_name"))?;
         // SAFETY: the name outlives the call.
         let instance = unsafe { (api.send_create)(name.as_ptr(), QUALITY_DEFAULT) };
         if instance.is_null() {
-            return Err("La sortie OMT n'a pas pu être créée (nom déjà pris ?)".into());
+            return Err(t!("omt.sender_failed").into());
         }
         Ok(Self { api, instance, began: Instant::now(), bgra: Vec::new(), planar: Vec::new() })
     }

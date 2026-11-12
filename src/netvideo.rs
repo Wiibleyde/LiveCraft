@@ -98,7 +98,7 @@ impl Library {
             windows_sys::Win32::System::LibraryLoader::GetProcAddress(self.0, wanted.as_ptr().cast())
         };
         let Some(found) = found else {
-            return Err(format!("{name} manque : version trop ancienne de la bibliothèque"));
+            return Err(t!("netvideo.symbol_missing", name = name));
         };
         assert_eq!(size_of::<T>(), size_of_val(&found));
         // SAFETY: same size, and the caller vouches for the signature.
@@ -191,7 +191,7 @@ pub fn run_input(rt: &Arc<InputRt>, net: Net, source: &str, w: usize, h: usize) 
     let label = net.label();
     let source = source.trim();
     if source.is_empty() {
-        rt.set_status(format!("Choisissez une source {label} dans les réglages de l'entrée"));
+        rt.set_status(t!("netvideo.choose_source", label = label));
         return;
     }
     let mut receiver = match net.receiver(source) {
@@ -201,7 +201,7 @@ pub fn run_input(rt: &Arc<InputRt>, net: Net, source: &str, w: usize, h: usize) 
             return;
         }
     };
-    rt.set_status(format!("Recherche de la source {label} « {source} »…"));
+    rt.set_status(t!("netvideo.searching", label = label, source = source));
     let mut spare: Option<Frame> = None;
     let mut scratch: Option<Frame> = None;
     let mut resampler = Resampler::default();
@@ -237,7 +237,7 @@ pub fn run_input(rt: &Arc<InputRt>, net: Net, source: &str, w: usize, h: usize) 
             heard = Some(Instant::now());
         } else if !lost && heard.is_some_and(|t| t.elapsed() > Duration::from_secs(3)) {
             lost = true;
-            rt.set_status(format!("Source {label} « {source} » perdue, en attente de son retour…"));
+            rt.set_status(t!("netvideo.lost", label = label, source = source));
         }
     }
 }

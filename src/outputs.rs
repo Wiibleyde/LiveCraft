@@ -99,7 +99,7 @@ impl Engine {
                 .into_owned();
             let opened = std::fs::create_dir_all(dir).map_err(|e| e.to_string()).and_then(|()| {
                 Encoder::start(Spec {
-                    label: format!("Enregistrement {}", n + 1),
+                    label: t!("outputs.recording_n", n = n + 1),
                     target: Target::File { path: path.clone(), split_minutes: cfg.split_minutes },
                     codec: cfg.codec.clone(),
                     w,
@@ -122,7 +122,7 @@ impl Engine {
             }
         }
         if started.is_empty() {
-            return Err("Aucun enregistreur activé".into());
+            return Err(t!("outputs.no_recorder").into());
         }
         *self.recorders.lock().unwrap() = started;
         *self.record_started.lock().unwrap() = Some(Instant::now());
@@ -150,7 +150,7 @@ impl Engine {
         let ready: Vec<&StreamCfg> =
             cfgs.iter().filter(|c| c.enabled && c.url.trim().len() > "rtmp://".len()).collect();
         let Some(lead) = ready.first() else {
-            return Err("Indiquez d'abord une adresse de diffusion dans les réglages".into());
+            return Err(t!("outputs.no_stream_address").into());
         };
         let shared: Vec<String> =
             ready.iter().enumerate().filter(|(n, c)| *n == 0 || c.shared).map(|(_, c)| address(c)).collect();
@@ -166,10 +166,10 @@ impl Engine {
             audio_kbps: c.audio_kbps,
             audio: AudioPick::MASTER,
         };
-        let mut started =
-            vec![Encoder::start(spec(format!("Diffusion ({} destination(s))", shared.len()), shared, lead))?];
+        let label = t!("outputs.streaming_shared", count = shared.len());
+        let mut started = vec![Encoder::start(spec(label, shared, lead))?];
         for (n, c) in ready.iter().enumerate().filter(|(n, c)| *n > 0 && !c.shared) {
-            match Encoder::start(spec(format!("Diffusion {}", n + 1), vec![address(c)], c)) {
+            match Encoder::start(spec(t!("outputs.streaming_n", n = n + 1), vec![address(c)], c)) {
                 Ok(e) => started.push(e),
                 Err(e) => {
                     finish_later(started, Duration::from_secs(3));
@@ -211,7 +211,7 @@ impl Engine {
                 .to_string_lossy()
                 .into_owned();
             let opened = Encoder::start(Spec {
-                label: format!("Multi : {}", input.name),
+                label: t!("outputs.multi_label", name = input.name),
                 target: Target::File { path, split_minutes: 0 },
                 codec: cfg.codec.clone(),
                 w,
@@ -294,7 +294,7 @@ impl Engine {
                 .collect()
         };
         if wanted.is_empty() {
-            return Err("Cochez d'abord NDI ou OMT dans les réglages des sorties".into());
+            return Err(t!("outputs.net_none_ticked").into());
         }
         // A sender just stopped may still hold its name; wait for it to let go.
         net_teardowns().wait_idle(Duration::from_secs(5));
@@ -358,16 +358,25 @@ impl Engine {
 
     pub(crate) fn check_outputs(&self) {
         let mut problem = None;
-        for (slot, what) in [(&self.recorders, "Enregistrement"), (&self.streamers, "Diffusion")] {
+        for (slot, recording) in [(&self.recorders, true), (&self.streamers, false)] {
             let mut list = slot.lock().unwrap();
             for enc in list.iter() {
                 if let Some(warning) = enc.take_warning() {
-                    problem = Some(format!("{what} : {warning}"));
+                    problem = Some(if recording {
+                        t!("outputs.recording_warning", warning = warning)
+                    } else {
+                        t!("outputs.streaming_warning", warning = warning)
+                    });
                 }
             }
             if let Some(i) = list.iter().position(|e| e.failure().is_some()) {
                 let enc = list.remove(i);
-                problem = Some(format!("{what} arrêté : {}", enc.failure().unwrap_or_default()));
+                let reason = enc.failure().unwrap_or_default();
+                problem = Some(if recording {
+                    t!("outputs.recording_stopped", reason = reason)
+                } else {
+                    t!("outputs.streaming_stopped", reason = reason)
+                });
                 finish_later(vec![enc], Duration::from_secs(2));
             }
         }
@@ -381,14 +390,14 @@ impl Engine {
         let mut multi = self.multi.lock().unwrap();
         if let Some(i) = multi.iter().position(|(_, e)| e.failure().is_some()) {
             let (_, enc) = multi.remove(i);
-            problem = Some(format!("Multi-enregistrement : {}", enc.failure().unwrap_or_default()));
+            problem = Some(t!("outputs.multi_failed", reason = enc.failure().unwrap_or_default()));
             finish_later(vec![enc], Duration::from_secs(2));
         }
         drop(multi);
         let mut srt = self.srt.lock().unwrap();
         if let Some(i) = srt.iter().position(|(_, e)| e.failure().is_some()) {
             let (_, enc) = srt.remove(i);
-            problem = Some(format!("SRT arrêté : {}", enc.failure().unwrap_or_default()));
+            problem = Some(t!("outputs.srt_stopped", reason = enc.failure().unwrap_or_default()));
             finish_later(vec![enc], Duration::from_secs(2));
         }
         drop(srt);
