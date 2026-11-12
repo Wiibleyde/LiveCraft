@@ -712,20 +712,28 @@ pub fn check(dir: &str) -> Result<String, String> {
         let dvd = desk.dvd(dir)?;
         desk.countdown()?;
         desk.overlay()?;
-        desk.card_crash(&heavy)?;
-        desk.card_missing_for_file(&heavy)?;
-        desk.card_tail(&short)?;
-        desk.card_missing_for_stream()?;
-        desk.card_stall()?;
-        desk.card_not_blamed()?;
+        // Hardware decoding is Windows only (see `decode::CARD`).
+        if crate::decode::CARD.is_some() {
+            desk.card_crash(&heavy)?;
+            desk.card_missing_for_file(&heavy)?;
+            desk.card_tail(&short)?;
+            desk.card_missing_for_stream()?;
+            desk.card_stall()?;
+            desk.card_not_blamed()?;
+        }
         desk.virtual_set(dir)?;
         desk.web_pages()?;
         replay_marks(dir).map(|()| dvd)
     })();
     desk.engine.shutdown();
     steps.map(|dvd| {
+        let card = if crate::decode::CARD.is_some() {
+            "carte graphique et repli logiciel"
+        } else {
+            "carte graphique ignorée (Windows seulement)"
+        };
         format!(
-            "marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, carte graphique et repli logiciel, plateau virtuel, pages web, ralenti malgré les pertes"
+            "marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, {card}, plateau virtuel, pages web, ralenti malgré les pertes"
         )
     })
 }

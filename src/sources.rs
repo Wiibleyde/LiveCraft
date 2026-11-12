@@ -350,7 +350,7 @@ pub fn start_seeded(
 }
 
 fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32, hardware: bool) {
-    let card = hardware.then_some(decode::CARD);
+    let card = hardware.then_some(decode::CARD).flatten();
     match kind {
         Kind::Bars => {
             rt.publish(titles::test_card(w, h));

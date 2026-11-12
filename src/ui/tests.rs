@@ -706,6 +706,8 @@ fn a_moving_setting_restarts_its_source_once_it_settles() {
     end(h);
 }
 
+// Hardware decoding exists on Windows only.
+#[cfg(windows)]
 #[test]
 fn turning_off_the_card_moves_running_streams_to_software_only() {
     // A listening stream waits for a sender, so its decoder stays as started.
