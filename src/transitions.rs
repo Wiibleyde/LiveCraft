@@ -1,6 +1,7 @@
 //! Picture transitions between two full frames. Merge and stingers need the
 //! layer structure, so the mixer handles those itself.
 
+use crate::canvas::Canvas;
 use crate::frame::Frame;
 use crate::model::{Position, TransKind};
 use rayon::prelude::*;
@@ -10,14 +11,15 @@ fn ease(t: f32) -> f32 {
 }
 
 /// Writes into `out` the state of a transition from `a` to `b` at `t` (0..1).
-pub fn apply(out: &mut Frame, a: &Frame, b: &Frame, kind: TransKind, t: f32) {
+pub fn apply<C: Canvas>(out: &mut C, a: &C::Pic, b: &C::Pic, kind: TransKind, t: f32) {
     let t = t.clamp(0.0, 1.0);
-    let (w, h) = (out.w as f32, out.h as f32);
+    let (fw, fh) = out.size();
+    let (w, h) = (fw as f32, fh as f32);
     match kind {
         TransKind::Cut => out.copy_from(if t < 1.0 { a } else { b }),
         TransKind::Fade | TransKind::Merge | TransKind::Stinger(_) => out.mix(a, b, t),
         TransKind::AlphaFade => {
-            out.data.fill(0);
+            out.clear();
             out.blend_over(a, ((1.0 - t) * 255.0) as u8);
             out.blend_over(b, (t * 255.0) as u8);
         }
@@ -33,8 +35,8 @@ pub fn apply(out: &mut Frame, a: &Frame, b: &Frame, kind: TransKind, t: f32) {
         }
         TransKind::Slide => out.slide(a, b, t),
         TransKind::SlideReverse => out.slide(b, a, 1.0 - t),
-        TransKind::VerticalSlide => vertical_slide(out, a, b, t),
-        TransKind::VerticalSlideReverse => vertical_slide(out, b, a, 1.0 - t),
+        TransKind::VerticalSlide => out.vertical_slide(a, b, t),
+        TransKind::VerticalSlideReverse => out.vertical_slide(b, a, 1.0 - t),
         TransKind::Zoom => {
             out.copy_from(a);
             let s = ease(t);
@@ -56,26 +58,26 @@ pub fn apply(out: &mut Frame, a: &Frame, b: &Frame, kind: TransKind, t: f32) {
                 rotate: (1.0 - s) * std::f32::consts::TAU,
                 ..Position::default()
             };
-            out.blend_over(&b.transform(&p, false), 255);
+            out.blend_transformed(b, &p, 255);
         }
         TransKind::CrossZoom => {
             let s = ease(t);
             let za = Position { zoom: 1.0 + 2.0 * s, ..Position::default() };
             let zb = Position { zoom: 0.33 + 0.67 * s, ..Position::default() };
-            out.data.fill(0);
-            out.blend_over(&a.transform(&za, false), ((1.0 - s) * 255.0) as u8);
-            out.blend_over(&b.transform(&zb, false), (s * 255.0) as u8);
+            out.clear();
+            out.blend_transformed(a, &za, ((1.0 - s) * 255.0) as u8);
+            out.blend_transformed(b, &zb, (s * 255.0) as u8);
         }
-        TransKind::Cube => cube(out, a, b, t, 1.0),
+        TransKind::Cube => out.cube(a, b, t, 1.0),
         TransKind::CubeZoom => {
             let z = 1.0 - 0.35 * (t * std::f32::consts::PI).sin();
-            cube(out, a, b, t, z);
+            out.cube(a, b, t, z);
         }
         TransKind::BarnDoor => {
             // The old picture opens from the middle like two doors.
             out.copy_from(b);
             let s = ease(t);
-            let half = (out.w / 2) as f32;
+            let half = (fw / 2) as f32;
             let shift = half * s;
             out.blit_region(a, [0.0, 0.5, 0.0, 0.0], -shift, 0.0, half, h, 255, 0.0);
             out.blit_region(a, [0.5, 0.0, 0.0, 0.0], half + shift, 0.0, half, h, 255, 0.0);
@@ -83,12 +85,15 @@ pub fn apply(out: &mut Frame, a: &Frame, b: &Frame, kind: TransKind, t: f32) {
     }
 }
 
-fn vertical_slide(out: &mut Frame, a: &Frame, b: &Frame, t: f32) {
-    let rows = (t * out.h as f32) as usize;
-    let stride = out.w * 4;
-    let keep = (out.h - rows) * stride;
-    out.data[..keep].copy_from_slice(&a.data[rows * stride..]);
-    out.data[keep..].copy_from_slice(&b.data[..rows * stride]);
+impl Frame {
+    /// `b` pushes `a` out to the top.
+    pub fn vertical_slide(&mut self, a: &Frame, b: &Frame, t: f32) {
+        let rows = (t * self.h as f32) as usize;
+        let stride = self.w * 4;
+        let keep = (self.h - rows) * stride;
+        self.data[..keep].copy_from_slice(&a.data[rows * stride..]);
+        self.data[keep..].copy_from_slice(&b.data[..rows * stride]);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -123,9 +128,14 @@ fn cube_column(c: f32, theta: f32) -> Option<Column> {
     None
 }
 
-fn cube(out: &mut Frame, a: &Frame, b: &Frame, t: f32, zoom: f32) {
+/// How far the cube has turned at `t`, in radians.
+pub(crate) fn cube_angle(t: f32) -> f32 {
+    ease(t) * std::f32::consts::FRAC_PI_2
+}
+
+pub(crate) fn cube(out: &mut Frame, a: &Frame, b: &Frame, t: f32, zoom: f32) {
     let (w, h) = (out.w, out.h);
-    let theta = ease(t) * std::f32::consts::FRAC_PI_2;
+    let theta = cube_angle(t);
     let cols: Vec<Option<Column>> = (0..w)
         .map(|x| {
             let c = ((x as f32 + 0.5) / w as f32 - 0.5) / zoom;
@@ -161,8 +171,9 @@ fn cube(out: &mut Frame, a: &Frame, b: &Frame, t: f32, zoom: f32) {
 mod tests {
     use super::*;
 
-    fn frames() -> (Frame, Frame) {
-        (Frame::solid(64, 36, [200, 0, 0]), Frame::solid(64, 36, [0, 0, 200]))
+    fn frames() -> (std::sync::Arc<Frame>, std::sync::Arc<Frame>) {
+        let solid = |rgb| std::sync::Arc::new(Frame::solid(64, 36, rgb));
+        (solid([200, 0, 0]), solid([0, 0, 200]))
     }
 
     /// Every transition starts on A and ends on B.

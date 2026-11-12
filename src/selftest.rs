@@ -4,7 +4,7 @@
 //! out over NDI and OMT and takes it back in, where those runtimes are installed.
 
 use crate::api::ApiConfig;
-use crate::engine::Engine;
+use crate::engine::{Compositor, Engine};
 use crate::functions::Args;
 use crate::model::*;
 use crate::netvideo::Net;
@@ -329,6 +329,12 @@ fn check(dir: &str) -> Result<String, String> {
     let project_fps = engine.state.lock().unwrap().project.fps;
     let frame_s = 1.0 / project_fps.max(1) as f64;
     let mix_us = engine.stats.mix_us.load(Ordering::Relaxed);
+    // Says which side this run has checked: the card when there is one.
+    let by = match engine.compositor.lock().unwrap().clone() {
+        Compositor::Gpu(name) => format!("la carte graphique {name}"),
+        Compositor::Cpu(why) => format!("le processeur ({why})"),
+        Compositor::Starting => "personne encore".into(),
+    };
     if let Some(e) = engine.output_error.lock().unwrap().clone() {
         return Err(e);
     }
@@ -374,8 +380,8 @@ fn check(dir: &str) -> Result<String, String> {
         apart.push(format!("{:.0} ms", (sound - picture) * 1000.0));
     }
     Ok(format!(
-        "enregistreurs {one}/ {second}| diffusion {streamed}(images coupées {cut}) | cadence {fps}/s, rendu {mix_us} µs, \
-         images perdues {dropped}, répétées {repeated}, écart son-image {}, fin égalisée de {:.0} ms, \
+        "enregistreurs {one}/ {second}| diffusion {streamed}(images coupées {cut}) | cadence {fps}/s, rendu {mix_us} µs \
+         par {by}, images perdues {dropped}, répétées {repeated}, écart son-image {}, fin égalisée de {:.0} ms, \
          crête son {peak:.2}| {call}",
         apart.join(" / "),
         padded * 1000.0
