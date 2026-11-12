@@ -591,13 +591,19 @@ mod tests {
 
     /// Runs for about `seconds` and never reads its input.
     fn idle_process(seconds: u32) -> Child {
-        Command::new("ping")
-            .args(["-n", &(seconds + 1).to_string(), "127.0.0.1"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
+        #[cfg(windows)]
+        let mut idle = {
+            let mut c = Command::new("ping");
+            c.args(["-n", &(seconds + 1).to_string(), "127.0.0.1"]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut idle = {
+            let mut c = Command::new("sleep");
+            c.arg(seconds.to_string());
+            c
+        };
+        idle.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()
     }
 
     /// Writers that take most of the patience must not cost ffmpeg its time
