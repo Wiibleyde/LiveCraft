@@ -10,6 +10,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test                                 # includes interface tests with real clicks
 cargo run -- --selftest target/selftest    # real media end to end, needs FFmpeg
+cargo run -- --livecheck target/livecheck  # virtual camera and mic streamed and read back, see README
 cargo run -- --screenshot target/shot.png  # look at what you changed
 ```
 

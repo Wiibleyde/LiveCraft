@@ -272,6 +272,7 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
         Kind::Designed { objects: Vec::new(), anim_ms: 500 },
         Kind::Mix { preview: Some(1), output: Some(2), ms: 500 },
         Kind::Telestrator { background: None },
+        crate::sets::new_set(SetLook::Evening),
         Kind::Replay,
     ];
     for (n, kind) in extra.into_iter().enumerate() {
@@ -409,6 +410,73 @@ fn the_old_name_still_opens_old_files() {
     end(h);
 }
 
+/// What a double-clicked .livecraft file does: the installer's file type
+/// starts LiveCraft with `--project <file>`.
+/// Opening a project by name replaces the desk, which the session file held:
+/// one copy is kept, and saving a project never leaves it half written.
+#[test]
+fn opening_a_project_keeps_the_session_and_saving_swaps_atomically() {
+    let dir = std::env::temp_dir().join(format!("livecraft-backup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = dir.join("session.json");
+    assert!(!super::back_up_session(&session), "nothing to keep");
+    std::fs::write(&session, b"first").unwrap();
+    assert!(super::back_up_session(&session));
+    std::fs::write(&session, b"second").unwrap();
+    assert!(super::back_up_session(&session));
+    assert_eq!(std::fs::read(dir.join("session.prev.json")).unwrap(), b"second", "the last one is kept");
+
+    let file = dir.join("show.livecraft");
+    std::fs::write(&file, b"old").unwrap();
+    super::bars::write_beside_then_swap(&file, b"new").unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"new");
+    assert!(!dir.join("show.livecraft.tmp").exists(), "no leftover");
+    let missing = dir.join("no").join("show.livecraft");
+    assert!(super::bars::write_beside_then_swap(&missing, b"x").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_project_opened_from_explorer_saves_back_to_its_own_file() {
+    let dir = std::env::temp_dir().join(format!("livecraft-start-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("emission.livecraft");
+    let mut on_disk = small_project();
+    on_disk.inputs.iter_mut().find(|i| i.id == 1).unwrap().name = "Caméra du public".into();
+    std::fs::write(&file, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+    let start = |path: std::path::PathBuf| {
+        let path = path.to_string_lossy().into_owned();
+        let mut h = Harness::builder()
+            .with_size(vec2(2200.0, 1100.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::start(cc, saved(Project::blank()), None, "", Some(path), false));
+        h.run_steps(4);
+        h
+    };
+
+    let mut h = start(file.clone());
+    assert!(project(&h).inputs.iter().any(|i| i.name == "Caméra du public"), "the file, not the session");
+    h.get_by_label("emission");
+    click(&mut h, "Entrée CAM 2");
+    // The output bar's record button has the same name; this is the top bar's.
+    h.get_all_by_label("Enregistrer")
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .unwrap()
+        .click();
+    h.run_steps(3);
+    assert!(!h.state().engine.is_recording());
+    let back: Project = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(back.preview, Some(2), "saved into the file it came from, without asking where");
+    end(h);
+
+    let h = start(dir.join("absente.livecraft"));
+    assert!(project(&h).inputs.is_empty(), "the session's desk stays");
+    let said = h.state().message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said.starts_with("Projet illisible"), "{said}");
+    end(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_dragged_card_lands_just_before_its_target() {
     let mut h = desk(small_project());
@@ -508,6 +576,20 @@ fn loading_a_project_leaves_nothing_of_the_last_one() {
     end(h);
 }
 
+/// A scene added from the menu used to flash its settings and close them at
+/// once, as that frame's copy of the project did not have it yet.
+#[test]
+fn an_input_added_from_the_menu_keeps_its_settings_open() {
+    let mut h = desk(small_project());
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Scène (couches)");
+    let added = project(&h).inputs.last().map(|i| i.id);
+    assert!(added.is_some_and(|id| id > 16), "a scene was added");
+    h.run_steps(3);
+    assert_eq!(h.state().editing, added);
+    end(h);
+}
+
 /// Every function by name, on the real engine. What needs an output or writes
 /// files is left to the end-to-end run.
 #[test]
@@ -542,6 +624,55 @@ fn every_named_function_is_known_and_leaves_the_desk_working() {
     assert!(engine.call("OverlayInput9", &Args::new().input("2")).is_err());
     engine.call("RemoveInput", &Args::new().input("2")).unwrap();
     assert!(engine.state.lock().unwrap().input(2).is_none());
+    end(h);
+}
+
+fn preview_red_at(h: &Harness<'static, App>, x: f32, y: f32) -> Option<bool> {
+    let f = h.state().engine.preview.lock().unwrap().clone()?;
+    let i = (((y * f.h as f32) as usize) * f.w + (x * f.w as f32) as usize) * 4;
+    Some(f.data[i] > 150 && f.data[i + 1] < 80 && f.data[i + 2] < 80)
+}
+
+/// Made from the menu, given a presenter from its settings, then sent from
+/// the wide shot to the close-up with the card's button: the camera must
+/// move there over time, not cut, and the preview must show it.
+#[test]
+fn a_virtual_set_is_made_from_the_menu_and_its_camera_glides_between_presets() {
+    let mut p = Project::blank();
+    p.out_w = 320;
+    p.out_h = 180;
+    p.inputs = vec![Input::new(1, "Présentatrice", Kind::Solid { color: [200, 30, 30] })];
+    let mut h = desk(p);
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Plateau virtuel");
+    let set = project(&h).inputs.iter().find(|i| matches!(i.kind, Kind::VirtualSet { .. })).map(|i| i.id);
+    let set = set.expect("the menu adds a virtual set");
+    assert_eq!(h.state().editing, Some(set), "its settings open at once");
+    click(&mut h, "Ajouter un présentateur");
+    let layers = project(&h).inputs.iter().find(|i| i.id == set).unwrap().layers.clone();
+    assert_eq!(layers.iter().map(|l| l.input).collect::<Vec<_>>(), vec![1]);
+    h.state_mut().editing = None;
+    h.run_steps(2);
+
+    click(&mut h, "Entrée Plateau virtuel");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // Wide shot: the presenter stands in the middle, the decor beside her.
+    while preview_red_at(&h, 0.5, 0.5) != Some(true) {
+        assert!(Instant::now() < deadline, "the set never reached the preview");
+        wait(&mut h, 20);
+    }
+    assert_eq!(preview_red_at(&h, 0.1, 0.5), Some(false));
+
+    click(&mut h, "Caméra 3 Plateau virtuel");
+    let moving = h.state().with(|s| s.set_moves.contains_key(&set));
+    assert!(moving, "the camera moves rather than cuts");
+    let kind = project(&h).inputs.iter().find(|i| i.id == set).unwrap().kind.clone();
+    assert!(matches!(kind, Kind::VirtualSet { camera: 2, .. }));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.state().with(|s| s.set_moves.contains_key(&set)) || preview_red_at(&h, 0.1, 0.5) != Some(true) {
+        assert!(Instant::now() < deadline, "the close-up never arrived");
+        wait(&mut h, 20);
+    }
     end(h);
 }
 

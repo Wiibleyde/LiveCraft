@@ -194,7 +194,7 @@ impl App {
         let project = self.with(|s| s.project.clone()).without_secrets();
         let done = serde_json::to_vec_pretty(&project)
             .map_err(|e| e.to_string())
-            .and_then(|j| std::fs::write(&path, j).map_err(|e| e.to_string()));
+            .and_then(|j| write_beside_then_swap(std::path::Path::new(&path), &j).map_err(|e| e.to_string()));
         match done {
             Ok(()) => {
                 self.saved.last_file = Some(path.clone());
@@ -391,7 +391,20 @@ fn read_any(path: &str) -> Result<Project, String> {
     read_project(path)
 }
 
-fn read_project(path: &str) -> Result<Project, String> {
+/// Written beside the file and swapped in: a crash or a full disk half way
+/// through must leave the person's previous project whole.
+pub(super) fn write_beside_then_swap(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut next = path.as_os_str().to_owned();
+    next.push(".tmp");
+    let next = std::path::PathBuf::from(next);
+    let done = std::fs::write(&next, bytes).and_then(|()| std::fs::rename(&next, path));
+    if done.is_err() {
+        let _ = std::fs::remove_file(&next);
+    }
+    done
+}
+
+pub(super) fn read_project(path: &str) -> Result<Project, String> {
     std::fs::read(path)
         .map_err(|e| e.to_string())
         .and_then(|b| serde_json::from_slice::<Project>(&b).map_err(|e| e.to_string()))

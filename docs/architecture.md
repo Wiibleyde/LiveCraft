@@ -25,6 +25,7 @@ so a slow window cannot hold up the show.
 | `canvas.rs` | The steps of composing, which the processor and the graphics card both follow |
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels on the processor: blending, scaling, colour, keys, effects |
 | `gpu.rs`, `gpu.wgsl` | Pixels on the graphics card, with the same arithmetic |
+| `sets.rs` | Virtual sets: built-in decors and camera moves; the mixer composes them |
 | `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
@@ -35,6 +36,7 @@ so a slow window cannot hold up the show.
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
 | `i18n.rs`, `locales/` | Interface text: `t!("key")` reads it from one catalog per language |
 | `selftest.rs`, `playtest.rs` | `--selftest`: real end-to-end checks |
+| `livecheck.rs` | `--livecheck`: a virtual camera and microphone streamed to a local server and read back |
 
 ## Processor or graphics card
 
