@@ -93,17 +93,19 @@ impl App {
                 Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. } | Kind::VideoDelay { .. }
             );
             let keep = input.kind.same_source(&before.kind);
-            self.with(|s| {
-                if let Some(slot) = s.input_mut(id) {
-                    // Plug-ins are edited straight in the project, and their
-                    // state moves on by itself: this window's copy is stale.
-                    let mut before = before.clone();
-                    before.audio.plugins.clone_from(&slot.audio.plugins);
-                    input.audio.plugins.clone_from(&slot.audio.plugins);
-                    slot.merge_changes(&before, input);
-                }
+            let refused = self.with(|s| {
+                let mut next = s.input(id)?.clone();
+                // Plug-ins are edited straight in the project, and their
+                // state moves on by itself: this window's copy is stale.
+                let mut before = before.clone();
+                before.audio.plugins.clone_from(&next.audio.plugins);
+                input.audio.plugins.clone_from(&next.audio.plugins);
+                next.merge_changes(&before, input);
+                s.put_input(next).err()
             });
-            if source_changed && live {
+            if let Some(why) = refused {
+                self.say(why);
+            } else if source_changed && live {
                 self.queue_restart(id, keep);
             }
         }
@@ -679,8 +681,13 @@ impl App {
         if let Some(n) = layers_canvas(ui, &mut input.layers, &names, self.selected_layer, aspect) {
             self.selected_layer = n;
         }
-        let choices: Vec<&Input> =
-            project.inputs.iter().filter(|i| i.id != id && i.kind.has_picture()).collect();
+        let choices: Vec<&Input> = project
+            .inputs
+            .iter()
+            .filter(|i| {
+                i.id != id && i.kind.has_picture() && !crate::desk::link_loops(&project.inputs, id, i.id)
+            })
+            .collect();
         let mut remove = None;
         let mut up = None;
         for (n, l) in input.layers.iter_mut().enumerate() {
@@ -768,15 +775,34 @@ fn delay_editor(ui: &mut egui::Ui, id: u64, source: &mut Option<u64>, ms: &mut u
         named(combo.response, t!("input_settings.delay.source_combo"));
     });
     let (w, h, fps) = (project.out_w, project.out_h, project.fps);
-    let longest = crate::delay::longest_ms(w, h, fps);
-    ui.add(egui::Slider::new(ms, 0..=longest).suffix(" ms").text(t!("input_settings.delay.time")));
+    let mut delays = crate::desk::listed_delays(&project.inputs);
+    if let Some(mine) = delays.iter_mut().find(|d| d.0 == id) {
+        (mine.1, mine.2) = (*source, *ms);
+    }
+    let longest = crate::delay::room_ms(&delays, id, w, h, fps);
+    // Each step of a drag would jump the picture and the sound on air: the
+    // time is taken once the slider is let go.
+    let dragging = egui::Id::unique(("retard-glisse", id));
+    let mut shown = ui.data(|d| d.get_temp::<u32>(dragging)).unwrap_or(*ms);
+    let slider =
+        egui::Slider::new(&mut shown, 0..=longest).suffix(" ms").text(t!("input_settings.delay.time"));
+    let r = ui.add(slider);
+    if r.dragged() {
+        ui.data_mut(|d| d.insert_temp(dragging, shown));
+    } else {
+        ui.data_mut(|d| d.remove::<u32>(dragging));
+        if r.changed() || r.drag_stopped() {
+            *ms = shown;
+        }
+    }
     let note = |ui: &mut egui::Ui, text: &str| {
         ui.label(RichText::new(text).small().color(DIM));
     };
     let seconds = format!("{:.1}", longest as f32 / 1000.0);
     note(ui, &t!("input_settings.delay.longest", seconds = seconds, w = w, h = h, fps = fps));
-    let size = format!("{:.1}", crate::delay::bytes_held(*ms, w, h, fps) as f64 / 1e9);
-    note(ui, &t!("input_settings.delay.memory", size = size));
+    let (_, used) = crate::delay::share(&delays, w, h, fps);
+    let gb = |bytes: usize| format!("{:.1}", bytes as f64 / 1e9);
+    note(ui, &t!("input_settings.delay.memory", used = gb(used), limit = gb(crate::delay::BUDGET)));
     note(ui, t!("input_settings.delay.sound"));
 }
 

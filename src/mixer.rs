@@ -45,8 +45,8 @@ struct Plan {
     set_views: HashMap<u64, SetView>,
     /// Every input someone can see or hear right now, however deep.
     showing: HashSet<u64>,
-    /// Each Video Delay with its source and time, in the order to feed them.
-    delays: Vec<(u64, Option<u64>, u32)>,
+    /// Each Video Delay as it runs, in the order to feed them.
+    delays: Vec<delay::Run>,
 }
 
 impl State {
@@ -100,7 +100,7 @@ impl State {
         let showing = self.with_layers(seen);
         Plan {
             showing,
-            delays: delays_in_order(&self.project.inputs),
+            delays: delays_to_run(&self.project),
             snap: self.snapshot(),
             base,
             stinger,
@@ -161,6 +161,8 @@ struct Mixer {
     positions: HashMap<u64, u64>,
     /// What each Video Delay keeps of its source, by input.
     delays: HashMap<u64, delay::Pictures>,
+    /// The project those pictures belong to, counted as the engine does.
+    project: u64,
 }
 
 struct Ctx<'a> {
@@ -340,30 +342,35 @@ impl Mixer {
             return;
         }
         let (w, h, fps) = (c.plan.snap.w, c.plan.snap.h, c.plan.snap.fps);
-        let longest = delay::longest_ms(w, h, fps);
-        let most = delay::most_pictures(w, h);
         let period = clock::NS / fps.max(1) as u64;
         let mut let_go = Vec::new();
         self.delays.retain(|id, kept| {
-            let open = delays.iter().any(|d| d.0 == *id);
+            let open = delays.iter().any(|d| d.id == *id);
             if !open {
                 kept.fit(0, 0, &mut let_go);
             }
             open
         });
-        for &(id, source, ms) in delays {
-            let shown = source.and_then(|s| self.picture(s, c, 0));
-            let kept = self.delays.entry(id).or_default();
+        for run in delays {
+            let shown = run.source.and_then(|s| self.picture(s, c, 0));
+            let kept = self.delays.entry(run.id).or_default();
             kept.fit(w, h, &mut let_go);
-            let out = kept.step(at, shown, delay::nanos(ms.min(longest)), period, most, &mut let_go);
-            if let Some(rt) = c.rts.get(&id) {
+            let out = kept.step(at, shown, delay::nanos(run.ms), period, run.pictures, &mut let_go);
+            if let Some(rt) = c.rts.get(&run.id) {
                 rt.show(out);
             }
         }
-        // A delay made shorter or closed lets many pictures go at once, which
-        // would take longer to free than a tick lasts.
-        if let_go.len() > 2 {
-            thread::spawn(move || drop(let_go));
+        delay::free_later(let_go);
+    }
+
+    /// Another project opened: its delays have numbers the last one's had,
+    /// and must not show their pictures.
+    fn follow_project(&mut self, project: u64) {
+        if project != self.project {
+            self.project = project;
+            let mut let_go = Vec::new();
+            self.delays.drain().for_each(|(_, mut kept)| kept.fit(0, 0, &mut let_go));
+            delay::free_later(let_go);
         }
     }
 
@@ -768,6 +775,7 @@ impl Engine {
             let c = Ctx { plan: &plan, rts: &rts };
             let t0 = Instant::now();
             // Before composing, so a delay shown on air is of this very tick.
+            m.follow_project(self.project_generation.load(Ordering::Acquire));
             m.run_delays(&c, pace.stamp());
             let started = self.compose(&mut m, &c);
             let compose_us = t0.elapsed().as_micros() as u64;
@@ -1327,6 +1335,41 @@ mod tests {
         assert!(seq > held, "what it held plays out");
         m.run_delays(&c, tick(33));
         assert_eq!(rts[&3].seq(), seq, "a still source changes nothing once it has played out");
+
+        // Another project whose delay has the same number starts afresh.
+        m.follow_project(1);
+        camera.publish(Frame::solid(32, 18, [200, 0, 0]));
+        m.run_delays(&c, tick(34));
+        assert_eq!(red(3), Some(200), "nothing kept from the last project");
+    }
+
+    /// Its source closed, a delay still plays what it kept, then shows nothing.
+    #[test]
+    fn a_delay_plays_out_what_it_kept_of_a_closed_source() {
+        let mut p = Project::blank();
+        (p.out_w, p.out_h, p.fps) = (32, 18, 30);
+        p.inputs = vec![
+            Input::new(1, "Caméra", Kind::Bars),
+            Input::new(2, "Retard", Kind::VideoDelay { source: Some(1), ms: 100 }),
+        ];
+        let mut s = State::new(p);
+        let camera = InputRt::new(false, true);
+        let rts = HashMap::from([(1, camera.clone()), (2, InputRt::new(false, true))]);
+        let mut m = Mixer::default();
+        for n in 0..10u64 {
+            camera.publish(Frame::solid(32, 18, [n as u8 * 8, 0, 0]));
+            let plan = s.plan(Instant::now(), Vec::new());
+            m.run_delays(&Ctx { plan: &plan, rts: &rts }, tick(n));
+        }
+        s.close_input(1);
+        let plan = s.plan(Instant::now(), Vec::new());
+        let shown: Vec<Option<u8>> = (10..15u64)
+            .map(|n| {
+                m.run_delays(&Ctx { plan: &plan, rts: &rts }, tick(n));
+                rts[&2].latest().map(|f| f.data[0])
+            })
+            .collect();
+        assert_eq!(shown, [Some(56), Some(64), Some(72), None, None]);
     }
 
     #[test]

@@ -605,6 +605,52 @@ fn mixer_cost() {
     });
 }
 
+/// `cargo test delay_cost -- --ignored --nocapture`: what four Video Delays
+/// of four moving 1080p sources, a second each, cost the mixer thread per
+/// tick, paced at 30 frames a second as the show runs.
+#[cfg(windows)]
+#[test]
+#[ignore = "measure: run alone"]
+fn delay_cost() {
+    let (w, h, fps) = (1920, 1080, 30);
+    let mut p = Project::blank();
+    (p.out_w, p.out_h, p.fps) = (w, h, fps);
+    for k in 1..=4 {
+        p.inputs.push(Input::new(k, "Caméra", Kind::Bars));
+        p.inputs.push(Input::new(10 + k, "Retard", Kind::VideoDelay { source: Some(k), ms: 1000 }));
+    }
+    let plan = State::new(p).plan(Instant::now(), Vec::new());
+    let rts: HashMap<u64, Arc<InputRt>> =
+        (1..=4).chain(11..=14).map(|id| (id, InputRt::new(false, true))).collect();
+    let c = Ctx { plan: &plan, rts: &rts };
+    let mut m = Mixer::default();
+    let (warm, ticks) = (60u64, 300u64);
+    let period = clock::NS / fps as u64;
+    let start = clock::now();
+    let (mut took, mut worst) = (Duration::ZERO, Duration::ZERO);
+    for n in 0..warm + ticks {
+        let at = start + n * period;
+        thread::sleep(clock::instant(at).saturating_duration_since(Instant::now()));
+        // A new picture from every camera, in a buffer from the pool, as a decoder's.
+        for k in 1..=4 {
+            rts[&k].publish(Frame::new(w, h));
+        }
+        let t0 = Instant::now();
+        m.run_delays(&c, at);
+        let spent = t0.elapsed();
+        if n >= warm {
+            took += spent;
+            worst = worst.max(spent);
+        }
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    println!(
+        "4 retards 1080p30 d'une seconde : {:.3} ms par image en moyenne, {:.3} ms au pire",
+        ms(took) / ticks as f64,
+        ms(worst)
+    );
+}
+
 /// `cargo test engine_cost -- --ignored --nocapture`: the whole
 /// program running a real desk, two looping videos in a scene with a title
 /// on top and a corrected preview, on the processor then on the card.

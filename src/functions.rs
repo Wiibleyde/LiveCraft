@@ -405,7 +405,9 @@ impl Engine {
             }
             "StopPlayList" => self.state.lock().unwrap().playlist_on = false,
             "NextPlayListEntry" => self.playlist_step(),
-            "Undo" => self.undo(),
+            "Undo" => {
+                self.undo();
+            }
             "ScriptStart" => {
                 let wanted = a.value.clone().unwrap_or_default();
                 let code = {
@@ -644,9 +646,9 @@ mod tests {
         assert!(call("SetVideoDelaySource", "2", "Personne").is_err());
         assert!(call("SetVideoDelay", "1", "100").is_err(), "not a delay");
         call("SetVideoDelay", "2", "999999").unwrap();
-        assert_eq!(kind(), Kind::VideoDelay { source: Some(1), ms: 8566 }, "held to what memory allows");
+        assert_eq!(kind(), Kind::VideoDelay { source: Some(1), ms: 10_000 }, "held to ten seconds");
         call("SetVideoDelaySource", "2", "").unwrap();
-        assert_eq!(kind(), Kind::VideoDelay { source: None, ms: 8566 });
+        assert_eq!(kind(), Kind::VideoDelay { source: None, ms: 10_000 });
         engine.shutdown();
     }
 

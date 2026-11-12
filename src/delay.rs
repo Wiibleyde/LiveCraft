@@ -6,8 +6,10 @@
 //! picture back, and it must land on the right picture. Keeping a picture
 //! only keeps it alive: a still source holds one picture for the whole delay,
 //! and the buffers let go return to the frame pool. A moving source holds one
-//! picture a tick, and `BUDGET` bounds that: it sets the longest delay at the
-//! project's size and frame rate, which the settings show.
+//! picture a tick, and one `BUDGET` for all the delays bounds that. Delays of
+//! one source keep the same pictures, which count once; each delay's longest
+//! time is what the others leave, at the project's size and frame rate, and
+//! the settings show it, with what all of them hold.
 //!
 //! The sound is the source's own, taken in the sound loop after its own
 //! treatment and before its fader, and held back by the same time to the
@@ -16,11 +18,12 @@
 
 use crate::frame::Frame;
 use crate::sources::AUDIO_RATE;
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, LazyLock, mpsc};
+use std::thread;
 
-/// What one delay may hold in pictures, in bytes.
-pub const BUDGET: usize = 2 << 30;
+/// What all the delays together may hold in pictures, in bytes.
+pub const BUDGET: usize = 3 << 30;
 /// The longest delay offered, whatever memory allows.
 pub const MOST_MS: u32 = 10_000;
 
@@ -28,23 +31,80 @@ fn picture_bytes(w: usize, h: usize) -> usize {
     (w * h * 4).max(1)
 }
 
-/// Pictures one delay may hold at this size.
-pub fn most_pictures(w: usize, h: usize) -> usize {
-    (BUDGET / picture_bytes(w, h)).max(2)
+/// Pictures a delay of `ms` holds at most at this rate: the one shown, and
+/// one for every tick after it.
+fn pictures_for(ms: u32, fps: u32) -> usize {
+    (ms.min(MOST_MS) as usize * fps.max(1) as usize).div_ceil(1000) + 1
 }
 
-/// The longest delay at this size and frame rate, in milliseconds: the
-/// picture shown and every one after it must fit in `BUDGET`.
-pub fn longest_ms(w: usize, h: usize, fps: u32) -> u32 {
-    let ticks = most_pictures(w, h) as u64 - 1;
-    (ticks * 1000 / fps.max(1) as u64).min(MOST_MS as u64) as u32
+/// The longest delay that `pictures` cover at this rate.
+fn ms_for(pictures: usize, fps: u32) -> u32 {
+    (pictures.saturating_sub(1) as u64 * 1000 / fps.max(1) as u64).min(MOST_MS as u64) as u32
 }
 
-/// The most a delay of `ms` holds in pictures, in bytes: a new picture at
-/// every tick.
-pub fn bytes_held(ms: u32, w: usize, h: usize, fps: u32) -> usize {
-    let ticks = (ms.min(longest_ms(w, h, fps)) as usize * fps.max(1) as usize).div_ceil(1000);
-    (ticks + 1).min(most_pictures(w, h)) * picture_bytes(w, h)
+/// A delay as the loops run it: its time held to the memory it is given,
+/// and the pictures that memory keeps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Run {
+    pub id: u64,
+    pub source: Option<u64>,
+    pub ms: u32,
+    pub pictures: usize,
+}
+
+/// The longest time asked of each source, sources in the order of their
+/// first delay, leaving out delay `skip`. Delays of one source keep the same
+/// pictures, so a source counts once, at its longest.
+fn longest_per_source(delays: &[(u64, Option<u64>, u32)], skip: Option<u64>) -> Vec<(u64, u32)> {
+    let mut longest: Vec<(u64, u32)> = Vec::new();
+    for &(_, source, ms) in delays.iter().filter(|d| Some(d.0) != skip) {
+        let Some(source) = source else { continue };
+        match longest.iter_mut().find(|(s, _)| *s == source) {
+            Some((_, most)) => *most = (*most).max(ms),
+            None => longest.push((source, ms)),
+        }
+    }
+    longest
+}
+
+/// Shares `BUDGET` among `delays`, (input, source, time) in the project's
+/// order: each source in turn takes what its longest delay needs, as far as
+/// what is left goes, and each of its delays is held to that. The settings
+/// keep the times within it; a larger project format or a file can ask for
+/// more, and the last sources then get less. Returns how each delay runs,
+/// and the bytes all of them may hold together.
+pub fn share(delays: &[(u64, Option<u64>, u32)], w: usize, h: usize, fps: u32) -> (Vec<Run>, usize) {
+    let mut left = BUDGET / picture_bytes(w, h);
+    let mut given: HashMap<u64, usize> = HashMap::new();
+    for (source, ms) in longest_per_source(delays, None) {
+        // The picture on screen is there anyway.
+        let n = pictures_for(ms, fps).min(left).max(1);
+        left = left.saturating_sub(n);
+        given.insert(source, n);
+    }
+    let used = given.values().sum::<usize>() * picture_bytes(w, h);
+    let runs = delays
+        .iter()
+        .map(|&(id, source, ms)| match source.and_then(|s| given.get(&s)) {
+            Some(&pictures) => Run { id, source, ms: ms.min(ms_for(pictures, fps)), pictures },
+            // Nothing new to keep, but what it kept of a source just closed
+            // still plays out: it takes no more memory than it had.
+            None => Run { id, source, ms: ms.min(MOST_MS), pictures: pictures_for(ms, fps) },
+        })
+        .collect();
+    (runs, used)
+}
+
+/// The longest delay `id` may be set to: what the delays of the other
+/// sources leave, at this size and rate.
+pub fn room_ms(delays: &[(u64, Option<u64>, u32)], id: u64, w: usize, h: usize, fps: u32) -> u32 {
+    let mine = delays.iter().find(|d| d.0 == id).and_then(|d| d.1);
+    let others: usize = longest_per_source(delays, Some(id))
+        .into_iter()
+        .filter(|(s, _)| Some(*s) != mine)
+        .map(|(_, ms)| pictures_for(ms, fps))
+        .sum();
+    ms_for((BUDGET / picture_bytes(w, h)).saturating_sub(others), fps)
 }
 
 /// A delay in nanoseconds of the shared clock.
@@ -55,6 +115,23 @@ pub fn nanos(ms: u32) -> u64 {
 /// A delay in frames of sound.
 pub fn sound_frames(ms: u32) -> usize {
     ms.min(MOST_MS) as usize * AUDIO_RATE / 1000
+}
+
+/// Frees pictures the delays let go on a thread of its own, which lives as
+/// long as the program: a delay made shorter lets hundreds go at once, which
+/// takes longer to free than a tick lasts, and the mixer must not wait.
+pub fn free_later(pictures: Vec<Arc<Frame>>) {
+    static FREER: LazyLock<Option<mpsc::Sender<Vec<Arc<Frame>>>>> = LazyLock::new(|| {
+        let (tx, rx) = mpsc::channel::<Vec<Arc<Frame>>>();
+        let freer = thread::Builder::new().name("retard-liberation".into());
+        freer.spawn(move || rx.into_iter().for_each(drop)).ok()?;
+        Some(tx)
+    });
+    if !pictures.is_empty()
+        && let Some(tx) = FREER.as_ref()
+    {
+        let _ = tx.send(pictures);
+    }
 }
 
 fn same(a: &Option<Arc<Frame>>, b: &Option<Arc<Frame>>) -> bool {
@@ -120,12 +197,20 @@ impl Pictures {
     }
 }
 
+/// How long the sound before and after a change of delay overlap, in
+/// frames: cut straight from one to the other, the seam clicks.
+const SEAM: usize = AUDIO_RATE / 125;
+
 /// What one delay keeps of its source's sound: interleaved stereo, oldest
 /// first, behind `lead` samples of silence still to play.
 #[derive(Default)]
 pub struct Sound {
     line: VecDeque<f32>,
     lead: usize,
+    /// The delay of the last block, in frames.
+    delay: Option<usize>,
+    /// The last block ended in that silence.
+    quiet: bool,
 }
 
 impl Sound {
@@ -134,18 +219,31 @@ impl Sound {
     /// with what came `delay` frames earlier.
     ///
     /// A delay that grows plays silence until it is filled, as the picture
-    /// holds meanwhile; one that shrinks drops what it no longer needs.
+    /// holds meanwhile; one that shrinks drops what it no longer needs. Either
+    /// way what the old delay would have played next fades into the new one
+    /// over a few milliseconds, and sound coming back after that silence
+    /// fades in.
     pub fn step(&mut self, fresh: Option<&[f32]>, skipped: usize, delay: usize, out: &mut [f32]) {
         let block = out.len();
         let delay = delay.min(sound_frames(MOST_MS));
         // The blocks given up went by for the delay too: silence comes in for
-        // them, and as much goes out unheard.
-        let gap = skipped * block;
+        // them, and as much goes out unheard. Silence beyond the delay itself
+        // changes nothing more, so after a computer slept for hours it is not
+        // counted out sample by sample.
+        let gap = skipped.saturating_mul(block).min(delay * 2);
         self.line.extend(std::iter::repeat_n(0.0, gap));
         match fresh {
             Some(s) if s.len() == block => self.line.extend(s.iter().copied()),
             _ => self.line.extend(std::iter::repeat_n(0.0, block)),
         }
+        let seam = (SEAM * 2).min(block);
+        let mut before = [0f32; SEAM * 2];
+        let moved = self.delay.is_some_and(|d| d != delay);
+        if moved {
+            // Without the change, the next block would begin after the gap.
+            before[..seam].iter_mut().enumerate().for_each(|(n, v)| *v = self.peek(gap + n));
+        }
+        self.delay = Some(delay);
         let want = delay * 2 + gap + block;
         let held = self.lead + self.line.len();
         if held < want {
@@ -158,16 +256,42 @@ impl Sound {
         }
         self.take(gap, None);
         self.take(block, Some(out));
+        if moved {
+            let frames = seam / 2;
+            for (n, pair) in out[..seam].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                let t = (n + 1) as f32 / frames as f32;
+                pair[0] = before[n * 2] * (1.0 - t) + pair[0] * t;
+                pair[1] = before[n * 2 + 1] * (1.0 - t) + pair[1] * t;
+            }
+        }
+        // A delay made much shorter gives back the room it no longer needs.
+        let need = delay * 2 + block;
+        if self.line.capacity() > 4 * need.max(AUDIO_RATE * 2) {
+            self.line.shrink_to(need + block);
+        }
+    }
+
+    /// Sample `n` of what is held, its silence first.
+    fn peek(&self, n: usize) -> f32 {
+        n.checked_sub(self.lead).map_or(0.0, |i| self.line.get(i).copied().unwrap_or(0.0))
     }
 
     fn take(&mut self, n: usize, out: Option<&mut [f32]>) {
         let quiet = n.min(self.lead);
         self.lead -= quiet;
         let sound = self.line.drain(..n - quiet);
-        if let Some(out) = out {
-            out[..quiet].fill(0.0);
-            out[quiet..].iter_mut().zip(sound).for_each(|(o, s)| *o = s);
+        let Some(out) = out else { return };
+        out[..quiet].fill(0.0);
+        out[quiet..].iter_mut().zip(sound).for_each(|(o, s)| *o = s);
+        if (quiet > 0 || self.quiet) && quiet < n {
+            let frames = SEAM.min((n - quiet) / 2);
+            for (k, pair) in out[quiet..quiet + frames * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                let t = (k + 1) as f32 / SEAM as f32;
+                pair[0] *= t;
+                pair[1] *= t;
+            }
         }
+        self.quiet = quiet == n;
     }
 
     /// Samples held, silence still to play included.
@@ -256,21 +380,32 @@ mod tests {
         assert_eq!(let_go.len(), 190, "the rest is let go for the caller to free");
     }
 
-    /// The memory a setting costs is what the settings say, and the longest
-    /// delay offered fits in it.
+    /// One budget for all the delays: a source's pictures count once however
+    /// many delays show it, and each delay may take what the others leave.
     #[test]
-    fn the_longest_delay_follows_size_and_rate() {
-        assert_eq!(longest_ms(1920, 1080, 30), 8566);
-        assert_eq!(longest_ms(1920, 1080, 60), 4283);
-        assert_eq!(longest_ms(3840, 2160, 30), 2100);
-        assert_eq!(longest_ms(1280, 720, 30), MOST_MS, "smaller pictures stop at ten seconds");
-        for (w, h, fps) in [(1920, 1080, 30), (1920, 1080, 60), (3840, 2160, 25), (1280, 720, 50)] {
-            let longest = longest_ms(w, h, fps);
-            assert!(bytes_held(longest, w, h, fps) <= BUDGET, "{w}x{h} {fps}");
-            let ticks = (longest as f64 * fps as f64 / 1000.0).round() as usize;
-            assert!(ticks < most_pictures(w, h), "{w}x{h} {fps}: the picture shown fits too");
-        }
-        assert_eq!(bytes_held(1000, 1920, 1080, 30), 31 * 1920 * 1080 * 4);
+    fn one_budget_is_shared_and_a_source_counts_once() {
+        let (w, h, fps) = (1920, 1080, 30);
+        let bytes = 1920 * 1080 * 4;
+        assert_eq!(room_ms(&[(10, Some(1), 0)], 10, w, h, fps), MOST_MS, "ten seconds of 1080p30 fit");
+        assert_eq!(room_ms(&[(10, Some(1), 0)], 10, w, h, 60), 6450);
+        assert_eq!(room_ms(&[(10, Some(1), 0)], 10, 3840, 2160, 30), 3200);
+        let same = [(10, Some(1), 10_000), (11, Some(1), 4000)];
+        let (runs, used) = share(&same, w, h, fps);
+        assert_eq!(used, 301 * bytes, "two delays of one camera keep the same pictures");
+        assert_eq!((runs[0].ms, runs[1].ms), (10_000, 4000));
+        assert_eq!(room_ms(&same, 11, w, h, fps), MOST_MS);
+        // 388 pictures in all, 301 taken by the first camera.
+        let two = [(10, Some(1), 10_000), (12, Some(2), 10_000)];
+        assert_eq!(room_ms(&two, 12, w, h, fps), 2866);
+        assert_eq!(room_ms(&two, 10, w, h, fps), 2866, "each is held to what the other leaves");
+        // Asked for more than there is, as a file or a larger format can, the
+        // later source gets what is left.
+        let (runs, used) = share(&two, w, h, fps);
+        assert_eq!((runs[0].ms, runs[1].ms, runs[1].pictures), (10_000, 2866, 87));
+        assert!(used <= BUDGET);
+        let (runs, used) = share(&[(13, None, 5000)], w, h, fps);
+        assert_eq!((runs[0].ms, used), (5000, 0), "a delay of nothing keeps nothing new");
+        assert_eq!(runs[0].pictures, 151, "but what it kept of a closed source plays out");
     }
 
     #[test]
@@ -360,7 +495,9 @@ mod tests {
             assert_eq!(s.held(), delay * 2, "block {b}");
         }
         assert!(heard[..delay].iter().all(|v| *v == 0), "silence while the delay fills");
-        for (n, v) in heard.iter().enumerate().skip(delay) {
+        // Then the sound fades in, and comes on to the frame.
+        assert!(heard[delay..delay + SEAM].iter().enumerate().all(|(k, v)| *v as usize <= k + 1));
+        for (n, v) in heard.iter().enumerate().skip(delay + SEAM) {
             assert_eq!(*v as usize, n - delay + 1, "frame {n}");
         }
     }
@@ -380,7 +517,8 @@ mod tests {
             heard.extend(frames(&out).into_iter().enumerate().map(|(n, v)| (at + n, v)));
             b += if b == 9 { 4 } else { 1 };
         }
-        for (at, v) in heard {
+        // The first frames after the delay filled fade in.
+        for (at, v) in heard.into_iter().filter(|(at, _)| !(delay..delay + SEAM).contains(at)) {
             let source = at.checked_sub(delay);
             let lost = source.is_some_and(|f| (10 * BLOCK / 2..13 * BLOCK / 2).contains(&f));
             let expected = match source {
@@ -399,18 +537,86 @@ mod tests {
             s.step(Some(&ramp(b)), 0, 960, &mut out);
         }
         // Block 19 is the next one due at one block of delay; three blocks
-        // more of delay put three blocks of silence before it.
+        // more of delay put three blocks of silence before it, once the
+        // sound on its way has faded out.
         s.step(Some(&ramp(20)), 0, 960 + 2880, &mut out);
-        assert!(frames(&out).iter().all(|v| *v == 0), "three blocks of silence for the time added");
+        assert!(frames(&out)[SEAM..].iter().all(|v| *v == 0), "three blocks of silence for the time added");
+        assert!(out[0] > 19.0 * 960.0 * 0.99 && out[2 * SEAM - 2] == 0.0, "faded out");
         for b in 21..23 {
             s.step(Some(&ramp(b)), 0, 3840, &mut out);
             assert!(frames(&out).iter().all(|v| *v == 0));
         }
         s.step(Some(&ramp(23)), 0, 3840, &mut out);
-        assert_eq!(frames(&out)[0], 19 * 960 + 1, "then the sound goes on from where it was");
+        assert!(out[0] < 19.0 * 960.0 / 100.0, "the sound comes back faded in");
+        assert_eq!(frames(&out)[SEAM], 19 * 960 + 1 + SEAM as u64, "from where it was");
         s.step(Some(&ramp(24)), 0, 0, &mut out);
-        assert_eq!(frames(&out)[0], 24 * 960 + 1, "no delay: the block itself");
+        assert_eq!(frames(&out)[SEAM], 24 * 960 + 1 + SEAM as u64, "no delay: the block itself");
         assert_eq!(s.held(), 0);
+    }
+
+    /// A tone at half level, one block of the sound loop after another.
+    fn tone(block: u64) -> Vec<f32> {
+        let step = 440.0 * std::f64::consts::TAU / AUDIO_RATE as f64;
+        (0..BLOCK as u64 / 2)
+            .flat_map(|n| [((block * 960 + n) as f64 * step).sin() as f32 * 0.5; 2])
+            .collect()
+    }
+
+    /// Changing the delay on air, longer then shorter, never jumps further
+    /// from one sample to the next than the tone itself does, give or take
+    /// what a fade over a few milliseconds adds.
+    #[test]
+    fn a_change_of_delay_fades_rather_than_clicks() {
+        let mut s = Sound::default();
+        let mut out = vec![0f32; BLOCK];
+        let mut heard: Vec<f32> = Vec::new();
+        for b in 0..90u64 {
+            let delay = match b {
+                0..30 => 960,
+                30..60 => 960 + 2880 + 333,
+                _ => 300,
+            };
+            s.step(Some(&tone(b)), 0, delay, &mut out);
+            heard.extend(out.iter().step_by(2));
+        }
+        let slope = 0.5 * 440.0 * std::f32::consts::TAU / AUDIO_RATE as f32;
+        let steepest = heard.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+        assert!(steepest < slope + 1.0 / SEAM as f32 + 1e-3, "a click: {steepest} against {slope}");
+    }
+
+    /// After hours asleep the loop gives up millions of blocks at once: no
+    /// more than the delay of silence is held for them, and the sound carries
+    /// on in step afterwards.
+    #[test]
+    fn hours_given_up_cost_no_more_than_the_delay() {
+        let mut s = Sound::default();
+        let delay = 4800;
+        let mut out = vec![0f32; BLOCK];
+        for b in 0..10 {
+            s.step(Some(&ramp(b)), 0, delay, &mut out);
+        }
+        let eight_hours = 50 * 3600 * 8;
+        s.step(Some(&ramp(1000)), eight_hours, delay, &mut out);
+        assert!(out.iter().all(|v| *v == 0.0));
+        assert_eq!(s.held(), delay * 2);
+        assert!(s.line.capacity() < 100_000, "{}", s.line.capacity());
+        for b in 1001..1006 {
+            s.step(Some(&ramp(b)), 0, delay, &mut out);
+        }
+        assert_eq!(frames(&out)[0], 1000 * 960 + 1, "five blocks later, what came in after the sleep");
+    }
+
+    #[test]
+    fn a_much_shorter_delay_gives_its_room_back() {
+        let mut s = Sound::default();
+        let mut out = vec![0f32; BLOCK];
+        for b in 0..600 {
+            s.step(Some(&ramp(b)), 0, sound_frames(MOST_MS), &mut out);
+        }
+        let big = s.line.capacity();
+        s.step(Some(&ramp(600)), 0, 480, &mut out);
+        assert!(s.line.capacity() * 4 < big, "{big} then {}", s.line.capacity());
+        assert_eq!(s.held(), 960);
     }
 
     #[test]

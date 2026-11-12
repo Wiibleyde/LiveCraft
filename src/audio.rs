@@ -5,7 +5,7 @@ use crate::clap;
 use crate::clock::{self, Drift, Pace, Take};
 use crate::delay;
 use crate::dsp::Chain;
-use crate::engine::{Engine, delays_in_order};
+use crate::engine::{Engine, delays_to_run};
 use crate::model::{AudioCfg, AudioPick, Kind, ReturnSound};
 use crate::plugins::{Owner, Rack};
 use crate::sources::{AUDIO_RATE, Ring};
@@ -157,8 +157,7 @@ impl Engine {
         let s = self.state.lock().unwrap();
         let p = &s.project;
         let air = s.on_air();
-        let delays = delays_in_order(&p.inputs);
-        let longest = delay::longest_ms(p.out_w, p.out_h, p.fps);
+        let delays = delays_to_run(p);
         let mut strips: Vec<Strip> = p
             .inputs
             .iter()
@@ -175,16 +174,13 @@ impl Engine {
                     Kind::VideoCall { return_sound, .. } => Some(return_sound),
                     _ => None,
                 },
-                delay: match i.kind {
-                    Kind::VideoDelay { source, ms } => Some((source, delay::sound_frames(ms.min(longest)))),
-                    _ => None,
-                },
-                tapped: delays.iter().any(|d| d.1 == Some(i.id)),
+                delay: delays.iter().find(|d| d.id == i.id).map(|d| (d.source, delay::sound_frames(d.ms))),
+                tapped: delays.iter().any(|d| d.source == Some(i.id)),
             })
             .collect();
         // A delay takes its source's block of this turn: sources first, then
         // the delays, each after any it plays.
-        let rank = |id: u64| delays.iter().position(|d| d.0 == id).map_or(0, |n| n + 1);
+        let rank = |id: u64| delays.iter().position(|d| d.id == id).map_or(0, |n| n + 1);
         strips.sort_by_key(|s| rank(s.id));
         let fade = if p.ftb_audio { 1.0 - s.ftb_level } else { 1.0 };
         let master = if p.master_muted { 0.0 } else { p.master_level * p.master_level * fade };
@@ -238,6 +234,7 @@ impl Engine {
         // its sources made this turn, after their own treatment.
         let mut lines: HashMap<u64, delay::Sound> = HashMap::new();
         let mut taps: HashMap<u64, Vec<f32>> = HashMap::new();
+        let mut project = self.project_generation.load(Ordering::Acquire);
         let mut raw = vec![0f32; BLOCK + 2];
         let mut tmp = vec![0f32; BLOCK];
         let mut buses = vec![vec![0f32; BLOCK]; 8];
@@ -262,6 +259,10 @@ impl Engine {
             drifts.retain(|id, _| mix.strips.iter().any(|s| s.id == *id && s.live));
             own.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             own.values_mut().for_each(|v| v.fill(0.0));
+            // Another project's delays have the last one's numbers, not its sound.
+            if std::mem::replace(&mut project, self.project_generation.load(Ordering::Acquire)) != project {
+                lines.clear();
+            }
             lines.retain(|id, _| mix.strips.iter().any(|s| s.id == *id && s.delay.is_some()));
             taps.clear();
             dry.fill(0.0);
