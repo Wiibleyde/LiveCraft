@@ -1,9 +1,10 @@
 //! The picture thread. Each tick it works out what should be on screen and
 //! recomposes only if something in it changed, so a still desk costs nothing.
 
+use crate::canvas::{Canvas, Cpu, Painter, Pic, processed};
 use crate::engine::*;
 use crate::frame::Frame;
-use crate::fx;
+use crate::gpu;
 use crate::model::*;
 use crate::sets;
 use crate::sources::InputRt;
@@ -106,31 +107,95 @@ impl State {
     }
 }
 
-struct Memo {
+struct Memo<T> {
     sig: u64,
-    pic: Option<Arc<Frame>>,
+    pic: Option<T>,
+}
+
+/// Finished pictures of one painter, reused until their fingerprint changes.
+struct Pictures<P: Painter> {
+    memo: HashMap<u64, Memo<Pic<P>>>,
+    /// Built-in set decors, by look, back or front, and size.
+    looks: HashMap<(SetLook, bool, usize, usize), Pic<P>>,
+}
+
+impl<P: Painter> Default for Pictures<P> {
+    fn default() -> Self {
+        Self { memo: HashMap::new(), looks: HashMap::new() }
+    }
+}
+
+/// Composing on the graphics card, and the output picture on its way back.
+struct OnGpu {
+    painter: gpu::Painter,
+    pics: Pictures<gpu::Painter>,
+    program: Option<gpu::Readback>,
 }
 
 #[derive(Default)]
 struct Mixer {
     pool: Vec<Arc<Frame>>,
     last_sig: u64,
-    memo: HashMap<u64, Memo>,
+    cpu: Cpu,
+    pics: Pictures<Cpu>,
+    /// Set while the graphics card composes; the processor does otherwise.
+    gpu: Option<Box<OnGpu>>,
+    /// The card could not be used: not asked again until the setting changes.
+    gpu_refused: bool,
+    /// Why the card was left during the last tick, to be said at the next.
+    gpu_lost: Option<String>,
+    /// The card was left with the output on its way back.
+    program_owed: bool,
     /// Card-sized pictures, which never touch the full-size compositing.
-    small: HashMap<u64, Memo>,
+    small: HashMap<u64, Memo<Arc<Frame>>>,
     preview_sig: u64,
     route_sig: [u64; ROUTES],
     thumb_sig: HashMap<u64, u64>,
-    black: Option<Arc<Frame>>,
     completions: HashMap<u64, u64>,
     positions: HashMap<u64, u64>,
-    /// Built-in set decors, by look, back or front, and size.
-    looks: HashMap<(SetLook, bool, usize, usize), Arc<Frame>>,
 }
 
 struct Ctx<'a> {
     plan: &'a Plan,
     rts: &'a HashMap<u64, Arc<InputRt>>,
+}
+
+/// Fingerprint of everything an input's picture depends on.
+fn sig(id: u64, c: &Ctx, depth: u8) -> u64 {
+    let mut h = DefaultHasher::new();
+    id.hash(&mut h);
+    if depth > MAX_DEPTH {
+        return h.finish();
+    }
+    c.plan.snap.version.hash(&mut h);
+    c.rts.get(&id).map_or(0, |r| r.seq()).hash(&mut h);
+    let Some(input) = c.plan.snap.inputs.get(&id) else { return h.finish() };
+    for l in input.layers.iter().filter(|l| l.visible) {
+        sig(l.input, c, depth + 1).hash(&mut h);
+    }
+    if let Kind::Mix { output, .. } = input.kind {
+        output.map(|o| sig(o, c, depth + 1)).hash(&mut h);
+        if let Some((from, t)) = c.plan.fades.get(&id) {
+            from.map(|o| sig(o, c, depth + 1)).hash(&mut h);
+            t.to_bits().hash(&mut h);
+        }
+    }
+    if let Kind::VirtualSet { background, foreground, .. } = input.kind {
+        for part in [background, foreground].into_iter().flatten() {
+            sig(part, c, depth + 1).hash(&mut h);
+        }
+        if let Some(v) = c.plan.set_views.get(&id) {
+            [v.zoom, v.x, v.y].map(f32::to_bits).hash(&mut h);
+        }
+    }
+    if let Some(fill) = input.key.fill_input.filter(|_| input.key.mode == KeyMode::Fill) {
+        sig(fill, c, depth + 1).hash(&mut h);
+    }
+    h.finish()
+}
+
+fn opt_sig(id: Option<u64>, c: &Ctx) -> u64 {
+    id.map_or(0, |i| sig(i, c, 0))
 }
 
 impl Mixer {
@@ -150,72 +215,113 @@ impl Mixer {
     /// Closed inputs must not keep their last pictures in memory.
     fn forget_closed(&mut self, snap: &Snapshot) {
         let open = |id: &u64| snap.inputs.contains_key(id);
-        self.memo.retain(|id, _| open(id));
+        self.pics.memo.retain(|id, _| open(id));
+        if let Some(g) = &mut self.gpu {
+            g.pics.memo.retain(|id, _| open(id));
+        }
         self.small.retain(|id, _| open(id));
         self.thumb_sig.retain(|id, _| open(id));
         self.completions.retain(|id, _| open(id));
         self.positions.retain(|id, _| open(id));
     }
 
-    fn black(&mut self, w: usize, h: usize) -> Arc<Frame> {
-        match &self.black {
-            Some(b) if b.w == w && b.h == h => b.clone(),
-            _ => {
-                let b = Arc::new(Frame::new(w, h));
-                self.black = Some(b.clone());
-                b
+    /// Moves composing to or from the graphics card. Everything is composed
+    /// again on the new side, so nothing stale carries over. `open` gives the
+    /// card once it is ready, `None` before.
+    fn choose_painter(
+        &mut self,
+        wanted: bool,
+        open: impl FnOnce() -> Option<Result<gpu::Painter, String>>,
+    ) -> Option<Compositor> {
+        self.leave_failed_card();
+        if let Some(why) = self.gpu_lost.take() {
+            return Some(Compositor::Cpu(why));
+        }
+        if !wanted {
+            self.gpu_refused = false;
+            if self.gpu.take().is_some() {
+                self.last_sig = 0;
+                self.preview_sig = 0;
             }
+            return Some(Compositor::Cpu(t!("mixer.cpu_chosen").into()));
         }
-    }
-
-    /// Fingerprint of everything an input's picture depends on.
-    fn sig(&self, id: u64, c: &Ctx, depth: u8) -> u64 {
-        let mut h = DefaultHasher::new();
-        id.hash(&mut h);
-        if depth > MAX_DEPTH {
-            return h.finish();
-        }
-        c.plan.snap.version.hash(&mut h);
-        c.rts.get(&id).map_or(0, |r| r.seq()).hash(&mut h);
-        let Some(input) = c.plan.snap.inputs.get(&id) else { return h.finish() };
-        for l in input.layers.iter().filter(|l| l.visible) {
-            self.sig(l.input, c, depth + 1).hash(&mut h);
-        }
-        if let Kind::Mix { output, .. } = input.kind {
-            output.map(|o| self.sig(o, c, depth + 1)).hash(&mut h);
-            if let Some((from, t)) = c.plan.fades.get(&id) {
-                from.map(|o| self.sig(o, c, depth + 1)).hash(&mut h);
-                t.to_bits().hash(&mut h);
-            }
-        }
-        if let Kind::VirtualSet { background, foreground, .. } = input.kind {
-            for part in [background, foreground].into_iter().flatten() {
-                self.sig(part, c, depth + 1).hash(&mut h);
-            }
-            if let Some(v) = c.plan.set_views.get(&id) {
-                [v.zoom, v.x, v.y].map(f32::to_bits).hash(&mut h);
-            }
-        }
-        if let Some(fill) = input.key.fill_input.filter(|_| input.key.mode == KeyMode::Fill) {
-            self.sig(fill, c, depth + 1).hash(&mut h);
-        }
-        h.finish()
-    }
-
-    /// The input's finished picture, reused until something in it changes.
-    fn picture(&mut self, id: u64, c: &Ctx, depth: u8) -> Option<Arc<Frame>> {
-        if depth > MAX_DEPTH {
+        if self.gpu.is_some() || self.gpu_refused {
             return None;
         }
-        let sig = self.sig(id, c, depth);
-        if let Some(m) = self.memo.get(&id)
-            && m.sig == sig
-        {
-            return m.pic.clone();
+        // Opening the card takes up to a second: the processor composes
+        // meanwhile, so the picture never waits for it.
+        match open() {
+            None => Some(Compositor::Starting),
+            Some(Ok(painter)) => {
+                self.last_sig = 0;
+                self.preview_sig = 0;
+                let name = painter.adapter_name().to_string();
+                self.gpu = Some(Box::new(OnGpu { painter, pics: Pictures::default(), program: None }));
+                Some(Compositor::Gpu(name))
+            }
+            Some(Err(why)) => {
+                self.gpu_refused = true;
+                Some(Compositor::Cpu(why))
+            }
         }
-        let pic = self.render(id, c, depth);
-        self.memo.insert(id, Memo { sig, pic: pic.clone() });
-        pic
+    }
+
+    /// Leaves a card that has been given up, at once: what is still to be
+    /// made in this tick is made by the processor, and the next tick says why.
+    fn leave_failed_card(&mut self) -> bool {
+        let Some(why) = self.gpu.as_ref().and_then(|g| g.painter.failed()) else { return false };
+        self.program_owed |= self.gpu.take().is_some_and(|g| g.program.is_some());
+        self.gpu_refused = true;
+        self.gpu_lost = Some(why);
+        self.last_sig = 0;
+        self.preview_sig = 0;
+        true
+    }
+
+    /// The input's finished picture as a frame in memory, wherever it was made.
+    fn picture(&mut self, id: u64, c: &Ctx, depth: u8) -> Option<Arc<Frame>> {
+        if let Some(g) = &mut self.gpu {
+            let pic = g.pics.picture(&mut g.painter, id, c, depth);
+            let frame = pic.map(|p| g.painter.frame(&p));
+            if !self.leave_failed_card() {
+                return frame;
+            }
+        }
+        self.pics.picture(&mut self.cpu, id, c, depth)
+    }
+
+    /// Composes the output picture. From the processor it is ready at once;
+    /// from the graphics card it comes back with `collect_program`, its copy
+    /// running meanwhile.
+    fn compose_program(&mut self, c: &Ctx) -> Option<Frame> {
+        let (w, h) = (c.plan.snap.w, c.plan.snap.h);
+        if let Some(g) = &mut self.gpu {
+            let mut out = g.painter.canvas(w, h);
+            g.pics.compose(&mut g.painter, c, &mut out);
+            g.program = Some(g.painter.start_readback(out));
+            return None;
+        }
+        let mut out = self.take_buffer(w, h);
+        self.pics.compose(&mut self.cpu, c, &mut out);
+        Some(out)
+    }
+
+    /// The output picture back from the card. Had the card been left on the
+    /// way, the processor composes it again at once.
+    fn collect_program(&mut self, c: &Ctx) -> Option<Frame> {
+        let back = self.gpu.as_mut().and_then(|g| g.program.take());
+        if back.is_none() && !std::mem::take(&mut self.program_owed) {
+            return None;
+        }
+        let mut out = self.take_buffer(c.plan.snap.w, c.plan.snap.h);
+        if let (Some(back), Some(g)) = (back, &mut self.gpu) {
+            g.painter.finish_readback(back, &mut out);
+        }
+        if self.gpu.is_none() || self.leave_failed_card() {
+            self.program_owed = false;
+            self.pics.compose(&mut self.cpu, c, &mut out);
+        }
+        Some(out)
     }
 
     /// An input as its card shows it, made at card size: a scene off air costs
@@ -225,7 +331,7 @@ impl Mixer {
         if depth > MAX_DEPTH {
             return None;
         }
-        let sig = self.sig(id, c, depth);
+        let sig = sig(id, c, depth);
         if let Some(m) = self.small.get(&id)
             && m.sig == sig
         {
@@ -236,13 +342,23 @@ impl Mixer {
         pic
     }
 
+    /// A virtual set at card size, made from card-size pictures.
+    fn small_set_picture(&mut self, id: u64, c: &Ctx, depth: u8, size: (usize, usize)) -> Option<Arc<Frame>> {
+        let mut out = Frame::new(size.0, size.1);
+        draw_set(&mut out, id, c, |part| match part {
+            SetPart::Input(i) => self.small_picture(i, c, depth + 1, size),
+            SetPart::Decor(look, front) => self.pics.decor(&mut self.cpu, look, front, size.0, size.1),
+        })?;
+        Some(Arc::new(out))
+    }
+
     fn render_small(&mut self, id: u64, c: &Ctx, depth: u8, size: (usize, usize)) -> Option<Arc<Frame>> {
         let input = c.plan.snap.inputs.get(&id)?;
         let (w, h) = size;
         let mut base = match input.kind {
             Kind::Scene => None,
             Kind::Mix { output, .. } => output.and_then(|o| self.small_picture(o, c, depth + 1, size)),
-            Kind::VirtualSet { .. } => self.set_picture(id, c, depth, Some(size)),
+            Kind::VirtualSet { .. } => self.small_set_picture(id, c, depth, size),
             _ => c.rts.get(&id).and_then(|r| r.latest()).map(|f| Arc::new(f.thumbnail(w, h))),
         };
         if let (true, Some(src)) = (input.needs_processing(), &base) {
@@ -267,14 +383,32 @@ impl Mixer {
         }
         Some(Arc::new(out))
     }
+}
 
-    fn base_picture(&mut self, id: u64, c: &Ctx, depth: u8) -> Option<Arc<Frame>> {
+impl<P: Painter> Pictures<P> {
+    /// The input's finished picture, reused until something in it changes.
+    fn picture(&mut self, p: &mut P, id: u64, c: &Ctx, depth: u8) -> Option<Pic<P>> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        let sig = sig(id, c, depth);
+        if let Some(m) = self.memo.get(&id)
+            && m.sig == sig
+        {
+            return m.pic.clone();
+        }
+        let pic = self.render(p, id, c, depth);
+        self.memo.insert(id, Memo { sig, pic: pic.clone() });
+        pic
+    }
+
+    fn base_picture(&mut self, p: &mut P, id: u64, c: &Ctx, depth: u8) -> Option<Pic<P>> {
         let input = c.plan.snap.inputs.get(&id)?;
         let mut base = match input.kind {
             Kind::Scene => None,
-            Kind::Mix { output, .. } => self.mix_picture(id, output, c, depth),
-            Kind::VirtualSet { .. } => self.set_picture(id, c, depth, None),
-            _ => c.rts.get(&id).and_then(|r| r.latest()),
+            Kind::Mix { output, .. } => self.mix_picture(p, id, output, c, depth),
+            Kind::VirtualSet { .. } => self.set_picture(p, id, c, depth),
+            _ => c.rts.get(&id).and_then(|r| r.latest()).map(|f| p.source(f)),
         };
         if input.needs_processing()
             && let Some(src) = &base
@@ -283,117 +417,81 @@ impl Mixer {
                 .key
                 .fill_input
                 .filter(|_| input.key.mode == KeyMode::Fill)
-                .and_then(|f| self.picture(f, c, depth + 1));
-            base = Some(Arc::new(processed(src, input, fill.as_deref())));
+                .and_then(|f| self.picture(p, f, c, depth + 1));
+            base = Some(p.process(src, input, fill.as_ref()));
         }
         base
     }
 
-    fn mix_picture(&mut self, id: u64, output: Option<u64>, c: &Ctx, depth: u8) -> Option<Arc<Frame>> {
-        let to = output.and_then(|o| self.picture(o, c, depth + 1));
+    fn mix_picture(&mut self, p: &mut P, id: u64, output: Option<u64>, c: &Ctx, depth: u8) -> Option<Pic<P>> {
+        let to = output.and_then(|o| self.picture(p, o, c, depth + 1));
         let Some((from, t)) = c.plan.fades.get(&id).copied() else { return to };
-        let from = from.and_then(|o| self.picture(o, c, depth + 1));
+        let from = from.and_then(|o| self.picture(p, o, c, depth + 1));
         let (w, h) = (c.plan.snap.w, c.plan.snap.h);
-        let black = self.black(w, h);
+        let black = p.black(w, h);
         let usable =
-            |f: Option<Arc<Frame>>| f.filter(|f| f.w == w && f.h == h).unwrap_or_else(|| black.clone());
+            |f: Option<Pic<P>>| f.filter(|f| P::Canvas::pic_size(f) == (w, h)).unwrap_or(black.clone());
         let (a, b) = (usable(from), usable(to));
-        let mut out = Frame::new(w, h);
+        let mut out = p.canvas(w, h);
         out.mix(&a, &b, t);
-        Some(Arc::new(out))
+        Some(p.done(out))
     }
 
-    /// A virtual set through its camera: backdrop, presenters, then the desk
-    /// in front, each moved and enlarged by the camera. `card` asks for it at
-    /// card size, made from card-size pictures.
-    fn set_picture(
-        &mut self,
-        id: u64,
-        c: &Ctx,
-        depth: u8,
-        card: Option<(usize, usize)>,
-    ) -> Option<Arc<Frame>> {
-        let input = c.plan.snap.inputs.get(&id)?;
-        let Kind::VirtualSet { look, background, foreground, .. } = input.kind else { return None };
-        let view = c.plan.set_views.get(&id).copied().or_else(|| sets::resting_view(&input.kind))?;
-        let (w, h) = card.unwrap_or((c.plan.snap.w, c.plan.snap.h));
-        let draw = |out: &mut Frame, pic: &Frame, l: &Layer| {
-            let mut seen = *l;
-            seen.placement = view.place(l.placement);
-            draw_layer(out, pic, &seen, 255);
-        };
-        let mut out = Frame::new(w, h);
-        let back = match background {
-            Some(b) => self.part(b, c, depth, card),
-            None => self.look(look, false, w, h),
-        };
-        if let Some(p) = back {
-            draw(&mut out, &p, &Layer::new(id, Placement::FULL));
-        }
-        for l in input.layers.iter().filter(|l| l.visible && l.input != id) {
-            if let Some(p) = self.part(l.input, c, depth, card) {
-                draw(&mut out, &p, l);
-            }
-        }
-        let front = match foreground {
-            Some(f) => self.part(f, c, depth, card),
-            None => self.look(look, true, w, h),
-        };
-        if let Some(p) = front {
-            draw(&mut out, &p, &Layer::new(id, Placement::FULL));
-        }
-        Some(Arc::new(out))
-    }
-
-    fn part(&mut self, id: u64, c: &Ctx, depth: u8, card: Option<(usize, usize)>) -> Option<Arc<Frame>> {
-        match card {
-            Some(size) => self.small_picture(id, c, depth + 1, size),
-            None => self.picture(id, c, depth + 1),
-        }
+    /// A virtual set at full size, see `draw_set`.
+    fn set_picture(&mut self, p: &mut P, id: u64, c: &Ctx, depth: u8) -> Option<Pic<P>> {
+        let (w, h) = (c.plan.snap.w, c.plan.snap.h);
+        let mut out = p.canvas(w, h);
+        draw_set(&mut out, id, c, |part| match part {
+            SetPart::Input(i) => self.picture(p, i, c, depth + 1),
+            SetPart::Decor(look, front) => self.decor(p, look, front, w, h),
+        })?;
+        Some(p.done(out))
     }
 
     /// A built-in decor is drawn once per size, then reused.
-    fn look(&mut self, look: SetLook, front: bool, w: usize, h: usize) -> Option<Arc<Frame>> {
+    fn decor(&mut self, p: &mut P, look: SetLook, front: bool, w: usize, h: usize) -> Option<Pic<P>> {
         let key = (look, front, w, h);
-        if let Some(f) = self.looks.get(&key) {
-            return Some(f.clone());
+        if let Some(pic) = self.looks.get(&key) {
+            return Some(pic.clone());
         }
-        let f = Arc::new(if front { sets::desk(look, w, h) } else { sets::backdrop(look, w, h) }?);
+        let f = if front { sets::desk(look, w, h) } else { sets::backdrop(look, w, h) }?;
         // Sizes left behind by a change of format are not worth keeping.
         if self.looks.len() >= 8 {
             self.looks.clear();
         }
-        self.looks.insert(key, f.clone());
-        Some(f)
+        let pic = p.source(Arc::new(f));
+        self.looks.insert(key, pic.clone());
+        Some(pic)
     }
 
-    fn render(&mut self, id: u64, c: &Ctx, depth: u8) -> Option<Arc<Frame>> {
+    fn render(&mut self, p: &mut P, id: u64, c: &Ctx, depth: u8) -> Option<Pic<P>> {
         let input = c.plan.snap.inputs.get(&id)?;
-        let base = self.base_picture(id, c, depth);
+        let base = self.base_picture(p, id, c, depth);
         if !draws_layers_on_top(input) {
             return base;
         }
         let scene = matches!(input.kind, Kind::Scene);
         let (w, h) = (c.plan.snap.w, c.plan.snap.h);
         let mut out = match &base {
-            Some(b) if b.w == w && b.h == h => (**b).clone(),
-            _ => Frame::new(w, h),
+            Some(b) if P::Canvas::pic_size(b) == (w, h) => p.canvas_from(b),
+            _ => p.canvas(w, h),
         };
         for l in input.layers.iter().filter(|l| l.visible && l.input != id) {
-            if let Some(p) = self.picture(l.input, c, depth + 1) {
-                draw_layer(&mut out, &p, l, 255);
+            if let Some(pic) = self.picture(p, l.input, c, depth + 1) {
+                draw_layer(&mut out, &pic, l, 255);
             }
         }
+        let out = p.done(out);
         // A scene has no picture of its own: its settings act on the result.
         if scene && input.needs_processing() {
-            return Some(Arc::new(processed(&out, input, None)));
+            return Some(p.process(&out, input, None));
         }
-        Some(Arc::new(out))
+        Some(out)
     }
 
     /// Layers matching on both sides travel to their new place; the rest
     /// fade, as the Merge transition does.
-    fn merge(&mut self, out: &mut Frame, from: Option<u64>, to: Option<u64>, t: f32, c: &Ctx) {
+    fn merge(&mut self, p: &mut P, out: &mut P::Canvas, from: Option<u64>, to: Option<u64>, t: f32, c: &Ctx) {
         let items = |id: Option<u64>| -> Vec<Layer> {
             let Some(input) = id.and_then(|i| c.plan.snap.inputs.get(&i)) else { return Vec::new() };
             let mut v = Vec::new();
@@ -406,10 +504,10 @@ impl Mixer {
             v
         };
         let (a, b) = (items(from), items(to));
-        out.data.fill(0);
+        out.clear();
         for l in a.iter().filter(|l| !b.iter().any(|o| o.input == l.input)) {
-            if let Some(p) = self.layer_source(l, from, c) {
-                draw_layer(out, &p, l, ((1.0 - t) * 255.0) as u8);
+            if let Some(pic) = self.layer_source(p, l, from, c) {
+                draw_layer(out, &pic, l, ((1.0 - t) * 255.0) as u8);
             }
         }
         for l in &b {
@@ -420,13 +518,13 @@ impl Mixer {
                     for k in 0..4 {
                         moved.crop[k] = start.crop[k] + (l.crop[k] - start.crop[k]) * t;
                     }
-                    if let Some(p) = self.layer_source(&moved, to, c) {
-                        draw_layer(out, &p, &moved, 255);
+                    if let Some(pic) = self.layer_source(p, &moved, to, c) {
+                        draw_layer(out, &pic, &moved, 255);
                     }
                 }
                 None => {
-                    if let Some(p) = self.layer_source(l, to, c) {
-                        draw_layer(out, &p, l, (t * 255.0) as u8);
+                    if let Some(pic) = self.layer_source(p, l, to, c) {
+                        draw_layer(out, &pic, l, (t * 255.0) as u8);
                     }
                 }
             }
@@ -434,20 +532,47 @@ impl Mixer {
     }
 
     /// An input's own base when it stands for itself, else the layer's input.
-    fn layer_source(&mut self, l: &Layer, owner: Option<u64>, c: &Ctx) -> Option<Arc<Frame>> {
-        if owner == Some(l.input) { self.base_picture(l.input, c, 1) } else { self.picture(l.input, c, 1) }
+    fn layer_source(&mut self, p: &mut P, l: &Layer, owner: Option<u64>, c: &Ctx) -> Option<Pic<P>> {
+        if owner == Some(l.input) {
+            self.base_picture(p, l.input, c, 1)
+        } else {
+            self.picture(p, l.input, c, 1)
+        }
     }
 
-    fn opt_sig(&self, id: Option<u64>, c: &Ctx) -> u64 {
-        id.map_or(0, |i| self.sig(i, c, 0))
+    /// The output picture: the base or the transition under way, then the
+    /// stinger, overlays and fade to black.
+    fn compose(&mut self, p: &mut P, c: &Ctx, out: &mut P::Canvas) {
+        let (w, h) = (c.plan.snap.w, c.plan.snap.h);
+        let full = |f: &Pic<P>| P::Canvas::pic_size(f) == (w, h);
+        match c.plan.base {
+            Base::One(id) => match id.and_then(|i| self.picture(p, i, c, 0)) {
+                Some(f) if full(&f) => out.copy_from(&f),
+                _ => out.clear(),
+            },
+            Base::Mix { from, to, kind: TransKind::Merge, t } => self.merge(p, out, from, to, t, c),
+            Base::Mix { from, to, kind, t } => {
+                let black = p.black(w, h);
+                let usable = |f: Option<Pic<P>>| f.filter(full).unwrap_or(black.clone());
+                let a = usable(from.and_then(|i| self.picture(p, i, c, 0)));
+                let b = usable(to.and_then(|i| self.picture(p, i, c, 0)));
+                transitions::apply(out, &a, &b, kind, t);
+            }
+        }
+        let stinger = c.plan.stinger.and_then(|(id, under)| Some((self.picture(p, id, c, 0)?, under)));
+        if let Some((s, true)) = &stinger {
+            out.blit_region(s, [0.0; 4], 0.0, 0.0, w as f32, h as f32, 255, 0.0);
+        }
+        for o in &c.plan.overlays {
+            if let Some(pic) = self.picture(p, o.id, c, 0) {
+                draw_overlay(out, &pic, o);
+            }
+        }
+        if let Some((s, false)) = &stinger {
+            out.blit_region(s, [0.0; 4], 0.0, 0.0, w as f32, h as f32, 255, 0.0);
+        }
+        out.finish(1.0 - c.plan.ftb);
     }
-}
-
-/// One odd setting must never take the whole output down: the input shows
-/// unprocessed instead.
-fn processed(src: &Frame, input: &Input, fill: Option<&Frame>) -> Frame {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fx::process(src, input, fill)))
-        .unwrap_or_else(|_| src.clone())
 }
 
 /// A virtual set's layers are its presenters, already drawn inside it under
@@ -456,13 +581,49 @@ fn draws_layers_on_top(input: &Input) -> bool {
     !matches!(input.kind, Kind::VirtualSet { .. }) && input.layers.iter().any(|l| l.visible)
 }
 
-fn draw_layer(out: &mut Frame, pic: &Frame, l: &Layer, opacity: u8) {
+/// What a virtual set is made of, from the back.
+enum SetPart {
+    Input(u64),
+    /// A built-in decor: the backdrop, or the desk in front.
+    Decor(SetLook, bool),
+}
+
+/// A virtual set through its camera: backdrop, presenters, then the desk in
+/// front, each moved and enlarged by the camera. `part` gives each piece at
+/// the size of `out`. `None` when `id` is no virtual set.
+fn draw_set<C: Canvas>(
+    out: &mut C,
+    id: u64,
+    c: &Ctx,
+    mut part: impl FnMut(SetPart) -> Option<C::Pic>,
+) -> Option<()> {
+    let input = c.plan.snap.inputs.get(&id)?;
+    let Kind::VirtualSet { look, background, foreground, .. } = input.kind else { return None };
+    let view = c.plan.set_views.get(&id).copied().or_else(|| sets::resting_view(&input.kind))?;
+    let mut draw = |out: &mut C, piece: SetPart, l: &Layer| {
+        if let Some(pic) = part(piece) {
+            let mut seen = *l;
+            seen.placement = view.place(l.placement);
+            draw_layer(out, &pic, &seen, 255);
+        }
+    };
+    let whole = Layer::new(id, Placement::FULL);
+    draw(out, background.map_or(SetPart::Decor(look, false), SetPart::Input), &whole);
+    for l in input.layers.iter().filter(|l| l.visible && l.input != id) {
+        draw(out, SetPart::Input(l.input), l);
+    }
+    draw(out, foreground.map_or(SetPart::Decor(look, true), SetPart::Input), &whole);
+    Some(())
+}
+
+fn draw_layer<C: Canvas>(out: &mut C, pic: &C::Pic, l: &Layer, opacity: u8) {
     let p = l.placement;
-    if p.is_full() && l.crop == [0.0; 4] && l.border.thickness <= 0.0 && pic.w == out.w && pic.h == out.h {
+    let (ow, oh) = out.size();
+    if p.is_full() && l.crop == [0.0; 4] && l.border.thickness <= 0.0 && C::pic_size(pic) == (ow, oh) {
         out.blend_over(pic, opacity);
         return;
     }
-    let (fw, fh) = (out.w as f32, out.h as f32);
+    let (fw, fh) = (ow as f32, oh as f32);
     let (w, h) = (fw * p.scale, fh * p.scale);
     let x = fw * p.x + l.crop[0] * w;
     let y = fh * p.y + l.crop[2] * h;
@@ -485,8 +646,9 @@ fn border_size(b: &Border, scale: f32, longest_side: f32) -> (f32, f32) {
 }
 
 /// Places an overlay at its stage of coming on, per its effect.
-fn draw_overlay(out: &mut Frame, pic: &Frame, o: &OverlayDraw) {
-    let (fw, fh) = (out.w as f32, out.h as f32);
+fn draw_overlay<C: Canvas>(out: &mut C, pic: &C::Pic, o: &OverlayDraw) {
+    let (ow, oh) = out.size();
+    let (fw, fh) = (ow as f32, oh as f32);
     let p = if o.cfg.pip { o.cfg.placement } else { Placement::FULL };
     let (mut x, mut y) = (fw * p.x, fh * p.y);
     let (mut w, mut h) = (fw * p.scale, fh * p.scale);
@@ -519,7 +681,7 @@ fn draw_overlay(out: &mut Frame, pic: &Frame, o: &OverlayDraw) {
         out.fill_round(x - th, y - th, w + 2.0 * th, h + 2.0 * th, outer, o.cfg.border.color, opacity as u8);
     }
     let radius = if o.cfg.pip { round } else { 0.0 };
-    if t >= 1.0 && !o.cfg.pip && pic.w == out.w && pic.h == out.h {
+    if t >= 1.0 && !o.cfg.pip && C::pic_size(pic) == (ow, oh) {
         out.blend_over(pic, 255);
     } else {
         out.blit_region(pic, crop, x, y, w, h, opacity as u8, radius);
@@ -555,15 +717,24 @@ impl Engine {
             self.watch_timelines(&mut m, &plan.snap, &rts);
             self.playlist_tick(now);
 
+            let wanted = self.use_gpu.load(Ordering::Relaxed);
+            if let Some(now_using) = m.choose_painter(wanted, gpu::Painter::open_soon) {
+                *self.compositor.lock().unwrap() = now_using;
+            }
             let c = Ctx { plan: &plan, rts: &rts };
             let t0 = Instant::now();
-            if self.compose(&mut m, &c) {
+            let started = self.compose(&mut m, &c);
+            let compose_us = t0.elapsed().as_micros() as u64;
+            self.update_preview(&mut m, &c);
+            if started {
+                let t1 = Instant::now();
+                self.collect_program(&mut m, &c);
                 composed += 1;
-                self.stats.mix_us.store(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+                let mix_us = compose_us + t1.elapsed().as_micros() as u64;
+                self.stats.mix_us.store(mix_us, Ordering::Relaxed);
                 self.ping();
             }
             self.show_program_to_guests(&rts);
-            self.update_preview(&mut m, &c);
             let refresh_all = tick_n.is_multiple_of((fps / 6).max(1));
             self.update_routes(&mut m, &c, refresh_all);
             self.feed_outputs(&mut m, &c, now);
@@ -750,23 +921,24 @@ impl Engine {
         s.playlist_next = Some(Instant::now() + Duration::from_millis(wait));
     }
 
-    /// Returns true when a new picture was published.
+    /// Returns true when a new picture is on its way. On the processor it is
+    /// published at once; from the graphics card, by `collect_program`.
     fn compose(&self, m: &mut Mixer, c: &Ctx) -> bool {
         let (w, h) = (c.plan.snap.w, c.plan.snap.h);
         let mut sig = DefaultHasher::new();
         c.plan.snap.version.hash(&mut sig);
         (w, h, c.plan.ftb.to_bits()).hash(&mut sig);
         match c.plan.base {
-            Base::One(id) => m.opt_sig(id, c).hash(&mut sig),
+            Base::One(id) => opt_sig(id, c).hash(&mut sig),
             Base::Mix { from, to, t, .. } => {
-                (m.opt_sig(from, c), m.opt_sig(to, c), t.to_bits()).hash(&mut sig);
+                (opt_sig(from, c), opt_sig(to, c), t.to_bits()).hash(&mut sig);
             }
         }
         if let Some((id, _)) = c.plan.stinger {
-            m.sig(id, c, 0).hash(&mut sig);
+            self::sig(id, c, 0).hash(&mut sig);
         }
         for o in &c.plan.overlays {
-            (m.sig(o.id, c, 0), o.t.to_bits()).hash(&mut sig);
+            (self::sig(o.id, c, 0), o.t.to_bits()).hash(&mut sig);
         }
         let sig = sig.finish();
         if sig == m.last_sig {
@@ -774,48 +946,27 @@ impl Engine {
         }
         m.last_sig = sig;
 
-        let mut out = m.take_buffer(w, h);
-        match c.plan.base {
-            Base::One(id) => match id.and_then(|i| m.picture(i, c, 0)) {
-                Some(f) if f.w == w && f.h == h => out.copy_from(&f),
-                _ => out.data.fill(0),
-            },
-            Base::Mix { from, to, kind: TransKind::Merge, t } => m.merge(&mut out, from, to, t, c),
-            Base::Mix { from, to, kind, t } => {
-                let black = m.black(w, h);
-                let usable = |f: Option<Arc<Frame>>| {
-                    f.filter(|f| f.w == w && f.h == h).unwrap_or_else(|| black.clone())
-                };
-                let a = usable(from.and_then(|i| m.picture(i, c, 0)));
-                let b = usable(to.and_then(|i| m.picture(i, c, 0)));
-                transitions::apply(&mut out, &a, &b, kind, t);
-            }
+        if let Some(out) = m.compose_program(c) {
+            self.publish_program(m, out);
         }
-        let stinger = c.plan.stinger.and_then(|(id, under)| Some((m.picture(id, c, 0)?, under)));
-        if let Some((p, true)) = &stinger {
-            out.blit_region(p, [0.0; 4], 0.0, 0.0, w as f32, h as f32, 255, 0.0);
-        }
-        for o in &c.plan.overlays {
-            if let Some(p) = m.picture(o.id, c, 0) {
-                draw_overlay(&mut out, &p, o);
-            }
-        }
-        if let Some((p, false)) = &stinger {
-            out.blit_region(p, [0.0; 4], 0.0, 0.0, w as f32, h as f32, 255, 0.0);
-        }
-        if c.plan.ftb > 0.0 {
-            out.dim(1.0 - c.plan.ftb);
-        }
-        out.make_opaque();
-        let out = Arc::new(out);
-        let old = std::mem::replace(&mut *self.program.lock().unwrap(), out);
-        m.pool.push(old);
-        self.program_seq.fetch_add(1, Ordering::Release);
         true
     }
 
+    /// Waits for the output picture coming back from the graphics card.
+    fn collect_program(&self, m: &mut Mixer, c: &Ctx) {
+        if let Some(out) = m.collect_program(c) {
+            self.publish_program(m, out);
+        }
+    }
+
+    fn publish_program(&self, m: &mut Mixer, out: Frame) {
+        let old = std::mem::replace(&mut *self.program.lock().unwrap(), Arc::new(out));
+        m.pool.push(old);
+        self.program_seq.fetch_add(1, Ordering::Release);
+    }
+
     fn update_preview(&self, m: &mut Mixer, c: &Ctx) {
-        let sig = m.opt_sig(c.plan.preview, c);
+        let sig = opt_sig(c.plan.preview, c);
         if sig == m.preview_sig {
             return;
         }
@@ -897,7 +1048,7 @@ impl Engine {
     fn update_thumbs(&self, m: &mut Mixer, c: &Ctx) {
         let mut any = false;
         for &id in &c.plan.snap.order {
-            let sig = m.sig(id, c, 0);
+            let sig = sig(id, c, 0);
             if m.thumb_sig.get(&id) == Some(&sig) {
                 continue;
             }
@@ -973,6 +1124,10 @@ fn multiview(m: &mut Mixer, c: &Ctx, inputs_only: bool) -> Frame {
 }
 
 #[cfg(test)]
+#[path = "mixer_gpu_tests.rs"]
+mod gpu_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -995,7 +1150,7 @@ mod tests {
     #[test]
     fn a_border_shrinks_with_its_picture_and_keeps_square_corners() {
         let mut out = Frame::solid(1920, 1080, [0, 0, 0]);
-        let pic = Frame::solid(1920, 1080, [0, 0, 255]);
+        let pic = Arc::new(Frame::solid(1920, 1080, [0, 0, 255]));
         let mut l = Layer::new(1, Placement { x: 0.5, y: 0.5, scale: 0.3 });
         l.border.thickness = 20.0;
         draw_layer(&mut out, &pic, &l, 255);
@@ -1052,7 +1207,7 @@ mod tests {
         assert_eq!((f.w, f.h), (64, 36));
         assert_eq!(f.data[(5 * 64 + 48) * 4], 255, "inside the layer");
         assert_eq!(f.data[(30 * 64 + 10) * 4 + 3], 0, "outside it");
-        assert!(m.memo.is_empty(), "nothing composed at full size");
+        assert!(m.pics.memo.is_empty(), "nothing composed at full size");
     }
 
     #[test]
@@ -1093,7 +1248,7 @@ mod tests {
     #[test]
     fn layer_crop_keeps_its_place() {
         let mut out = Frame::solid(100, 100, [0, 0, 0]);
-        let pic = Frame::solid(100, 100, [255, 0, 0]);
+        let pic = Arc::new(Frame::solid(100, 100, [255, 0, 0]));
         let mut l = Layer::new(1, Placement { x: 0.0, y: 0.0, scale: 1.0 });
         l.crop = [0.5, 0.0, 0.0, 0.0];
         draw_layer(&mut out, &pic, &l, 255);
@@ -1104,7 +1259,7 @@ mod tests {
     #[test]
     fn overlay_picture_in_picture_stays_in_its_box() {
         let mut out = Frame::solid(100, 100, [0, 0, 0]);
-        let pic = Frame::solid(100, 100, [0, 255, 0]);
+        let pic = Arc::new(Frame::solid(100, 100, [0, 255, 0]));
         let cfg = OverlayCfg {
             pip: true,
             placement: Placement { x: 0.5, y: 0.5, scale: 0.25 },

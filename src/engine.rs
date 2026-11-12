@@ -68,6 +68,16 @@ impl TickTimes {
     }
 }
 
+/// What composes the pictures, as the settings show it.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Compositor {
+    Starting,
+    /// The graphics card, by name.
+    Gpu(String),
+    /// The processor, and why.
+    Cpu(String),
+}
+
 /// A window showing something other than the plain output.
 pub const ROUTES: usize = 3;
 
@@ -100,6 +110,9 @@ pub struct Engine {
     pub stream_started: Mutex<Option<Instant>>,
     pub(crate) repaint: Mutex<Option<eframe::egui::Context>>,
     pub(crate) quit: AtomicBool,
+    /// Compose on the graphics card when there is a suitable one.
+    pub use_gpu: AtomicBool,
+    pub compositor: Mutex<Compositor>,
     next_id: AtomicU64,
     /// Counts the projects opened, so that what ran for the last one is not kept.
     pub(crate) project_generation: AtomicU64,
@@ -139,6 +152,8 @@ impl Engine {
             repaint: Mutex::new(None),
             quit: AtomicBool::new(false),
             next_id: AtomicU64::new(next),
+            use_gpu: AtomicBool::new(true),
+            compositor: Mutex::new(Compositor::Starting),
             project_generation: AtomicU64::new(0),
             thumb_clock: AtomicU64::new(0),
             script_stop: AtomicU64::new(0),

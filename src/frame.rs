@@ -65,6 +65,13 @@ impl Frame {
         Self { w, h, data }
     }
 
+    /// For a picture about to be overwritten whole: a spare buffer is not
+    /// cleared first.
+    pub fn for_overwrite(w: usize, h: usize) -> Self {
+        let data = spare(w * h * 4).unwrap_or_else(|| vec![0; w * h * 4]);
+        Self { w, h, data }
+    }
+
     pub fn solid(w: usize, h: usize, rgb: [u8; 3]) -> Self {
         let mut f = Self::new(w, h);
         for p in f.data.as_chunks_mut::<4>().0 {
@@ -257,7 +264,7 @@ impl Frame {
     }
 }
 
-fn chroma(r: f32, g: f32, b: f32) -> (f32, f32) {
+pub fn chroma(r: f32, g: f32, b: f32) -> (f32, f32) {
     (-0.169 * r - 0.331 * g + 0.5 * b, 0.5 * r - 0.419 * g - 0.081 * b)
 }
 

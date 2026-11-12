@@ -433,6 +433,12 @@ settings.add_source = Ajouter une source
 settings.source_n = Source {n}
 settings.about_tagline = Mélangeur vidéo en direct, reconstruit à partir de la documentation publique.
 settings.about_ffmpeg = Les vidéos, caméras et sorties passent par ffmpeg, à installer séparément.
+settings.compositing = Composition de l'image
+settings.compose_on_gpu = Composer sur la carte graphique
+settings.compositor_starting = Démarrage…
+settings.on_gpu = Sur la carte graphique : {name}
+settings.on_cpu = Sur le processeur : {reason}
+settings.gpu_try_again = Décochez puis recochez la case pour réessayer la carte.
 
 # src/ui/windows.rs
 windows.overlays_title = Incrustations et stingers
@@ -798,6 +804,18 @@ outputs.srt_stopped = SRT arrêté : {reason}
 
 # src/audio.rs
 audio.default_output = Sortie par défaut
+
+# src/mixer.rs
+mixer.cpu_chosen = choisi dans les réglages
+
+# src/gpu.rs
+gpu.none = aucune carte graphique adaptée
+gpu.software_only = {name} n'est qu'une émulation logicielle
+gpu.unusable = carte graphique inutilisable : {error}
+gpu.error = erreur de la carte graphique : {error}
+gpu.lost = carte graphique perdue : {reason}
+gpu.not_responding = la carte graphique ne répond plus : {error}
+gpu.picture_lost = image perdue en revenant de la carte graphique
 
 # src/ui/plugin_chain.rs
 plugin_chain.title = Plug-ins
