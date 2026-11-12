@@ -27,6 +27,7 @@ mod replay;
 mod secret;
 mod selftest;
 mod sets;
+mod slides;
 mod sources;
 mod text;
 mod titles;

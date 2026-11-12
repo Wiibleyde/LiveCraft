@@ -73,6 +73,11 @@ pub enum Kind {
         fps: f32,
         looped: bool,
     },
+    /// A presentation; its slides are turned into pictures by PowerPoint or
+    /// LibreOffice, whichever the machine has.
+    PowerPoint {
+        path: String,
+    },
     Camera {
         device: String,
         ptz_host: String,
@@ -162,6 +167,7 @@ impl Kind {
             Kind::List { .. } => t!("model.kind.list"),
             Kind::Photos { .. } => t!("model.kind.photos"),
             Kind::ImageSequence { .. } => t!("model.kind.image_sequence"),
+            Kind::PowerPoint { .. } => t!("model.kind.powerpoint"),
             Kind::Camera { .. } => t!("model.kind.camera"),
             Kind::Network { .. } => t!("model.kind.network"),
             Kind::Browser { .. } => t!("model.kind.browser"),
@@ -190,6 +196,7 @@ impl Kind {
             Kind::List { .. } => "VideoList",
             Kind::Photos { .. } => "Photos",
             Kind::ImageSequence { .. } => "ImageSequence",
+            Kind::PowerPoint { .. } => "PowerPoint",
             Kind::Camera { .. } => "Capture",
             Kind::Network { .. } => "Stream",
             Kind::Browser { .. } => "Browser",
@@ -233,7 +240,8 @@ impl Kind {
         match (self, other) {
             (Kind::Video { path: a, .. }, Kind::Video { path: b, .. })
             | (Kind::AudioFile { path: a, .. }, Kind::AudioFile { path: b, .. })
-            | (Kind::ImageSequence { first: a, .. }, Kind::ImageSequence { first: b, .. }) => a == b,
+            | (Kind::ImageSequence { first: a, .. }, Kind::ImageSequence { first: b, .. })
+            | (Kind::PowerPoint { path: a }, Kind::PowerPoint { path: b }) => a == b,
             (Kind::List { items: a, .. }, Kind::List { items: b, .. }) => a == b,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
