@@ -8,7 +8,7 @@ use crate::model::*;
 use crate::output::{Encoder, Spec, Target};
 use crate::replay::{Camera, ReplayState};
 use crate::sources::{InputRt, ffmpeg};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
@@ -50,6 +50,69 @@ fn clip(dir: &str, name: &str, seconds: u32) -> Result<String, String> {
     ];
     make(&args, &format!("{dir}/{name}.mp4"))
 }
+
+/// A small DVD-Video made from generated media: title 1 is three two-second
+/// chapters, red, green then blue, over a tone; title 2 is two seconds of
+/// white. None when ffmpeg, dvdauthor or ffmpeg's dvdvideo demuxer is missing, as
+/// neither comes with LiveCraft.
+pub(crate) fn dvd_fixture(dir: &str) -> Result<Option<String>, String> {
+    // A missing program is a reason to skip, not a failure: CI has no ffmpeg.
+    let Ok(demuxers) = ffmpeg().arg("-demuxers").stderr(Stdio::null()).output() else {
+        return Ok(None);
+    };
+    let has_dvdauthor =
+        Command::new("dvdauthor").arg("-h").stdout(Stdio::null()).stderr(Stdio::null()).status();
+    if !String::from_utf8_lossy(&demuxers.stdout).contains(" dvdvideo ") || has_dvdauthor.is_err() {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let colours = "color=c=red:s=720x576:r=25:d=2[a];color=c=lime:s=720x576:r=25:d=2[b];\
+                   color=c=blue:s=720x576:r=25:d=2[c];[a][b][c]concat=n=3";
+    // A picture group every 0.4 s lets each chapter start exactly on its colour.
+    let dvd = ["-target", "pal-dvd", "-g", "10", "-b:v", "1500k"];
+    let tone = "sine=frequency=440:duration=6";
+    let mut args = vec!["-f", "lavfi", "-i", colours, "-f", "lavfi", "-i", tone];
+    args.extend(dvd);
+    let first = make(&args, &format!("{dir}/chapitres.mpg"))?;
+    let white = "color=c=white:s=720x576:r=25:d=2";
+    let mut args = vec!["-f", "lavfi", "-i", white, "-f", "lavfi", "-i", "sine=frequency=880:duration=2"];
+    args.extend(dvd);
+    let second = make(&args, &format!("{dir}/blanc.mpg"))?;
+    let disc = format!("{dir}/disque");
+    let _ = std::fs::remove_dir_all(&disc);
+    for step in [vec!["-t", "-c", "0,2,4", first.as_str()], vec!["-t", second.as_str()], vec!["-T"]] {
+        let done = Command::new("dvdauthor")
+            .env("VIDEO_FORMAT", "PAL")
+            .arg("-o")
+            .arg(&disc)
+            .args(step)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !done.success() {
+            return Err("dvdauthor n'a pas pu créer le DVD d'essai".into());
+        }
+    }
+    Ok(Some(disc))
+}
+
+/// The colour in the middle of the latest picture.
+pub(crate) fn centre(rt: &InputRt) -> [u8; 3] {
+    rt.latest().map_or([0; 3], |f| {
+        let i = (f.h / 2 * f.w + f.w / 2) * 4;
+        [f.data[i], f.data[i + 1], f.data[i + 2]]
+    })
+}
+
+pub(crate) fn near(a: [u8; 3], b: [u8; 3]) -> bool {
+    a.iter().zip(b).all(|(x, y)| x.abs_diff(y) < 60)
+}
+
+pub(crate) const RED: [u8; 3] = [255, 0, 0];
+pub(crate) const GREEN: [u8; 3] = [0, 255, 0];
+pub(crate) const BLUE: [u8; 3] = [0, 0, 255];
 
 pub(crate) fn until(seconds: f32, what: &str, mut done: impl FnMut() -> bool) -> Result<(), String> {
     let end = Instant::now() + Duration::from_secs_f32(seconds);
@@ -238,6 +301,41 @@ impl Desk {
         self.call("PreviewInput", "2", "")?;
         self.call("OverlayInput1Last", "", "")?;
         until(2.0, "incrustation rappelée", || on() == Some(id))
+    }
+
+    /// A DVD plays with picture and sound, and its chapters answer the same
+    /// functions as remote control.
+    fn dvd(&self, dir: &str) -> Result<&'static str, String> {
+        let Some(disc) = dvd_fixture(&format!("{dir}/dvd"))? else {
+            return Ok("DVD ignoré (dvdauthor ou le démultiplexeur dvdvideo de ffmpeg manque)");
+        };
+        let (_, rt) = self.add("DVD", Kind::Dvd { path: disc, title: 1 })?;
+        until(10.0, "titres du DVD", || rt.titles.lock().unwrap().len() == 2)?;
+        until(10.0, "première image rouge", || near(centre(&rt), RED))?;
+        until(3.0, "trois chapitres", || rt.items.load(Ordering::Relaxed) == 3)?;
+        if rt.is_playing() {
+            return Err("un DVD attend qu'on lance la lecture".into());
+        }
+        self.call("Play", "DVD", "")?;
+        until(3.0, "son du DVD", || rt.peak() > 0.0)?;
+        let shown: &InputRt = &rt;
+        let chapter = |n: u64, colour: [u8; 3]| {
+            move || shown.item.load(Ordering::Relaxed) == n && near(centre(shown), colour)
+        };
+        self.call("NextItem", "DVD", "")?;
+        until(5.0, "chapitre 2 en vert", chapter(1, GREEN))?;
+        if !self.engine.xml_state().contains("selectedIndex=\"2\"") {
+            return Err("l'état distant doit donner le chapitre 2".into());
+        }
+        self.call("NextItem", "DVD", "")?;
+        until(5.0, "chapitre 3 en bleu", chapter(2, BLUE))?;
+        self.call("PreviousItem", "DVD", "")?;
+        until(5.0, "retour au chapitre 2", chapter(1, GREEN))?;
+        self.call("SelectIndex", "DVD", "1")?;
+        until(5.0, "chapitre 1 choisi", chapter(0, RED))?;
+        self.call("SelectIndex", "DVD", "3")?;
+        until(6.0, "fin du titre", || done(&rt) == 1)?;
+        Ok("DVD")
     }
 
     /// A presenter filmed on green, keyed into a set on air, then the camera
@@ -441,15 +539,17 @@ pub fn check(dir: &str) -> Result<String, String> {
         desk.looping(&short)?;
         desk.list(&short)?;
         desk.audio(dir)?;
+        let dvd = desk.dvd(dir)?;
         desk.countdown()?;
         desk.overlay()?;
         desk.virtual_set(dir)?;
         desk.web_pages()?;
-        replay_marks(dir)
+        replay_marks(dir).map(|()| dvd)
     })();
     desk.engine.shutdown();
-    steps.map(|()| {
-        "marques, reprise, boucle, liste, son, compte à rebours, incrustation, plateau virtuel, pages web, ralenti malgré les pertes"
-            .to_string()
+    steps.map(|dvd| {
+        format!(
+            "marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, plateau virtuel, pages web, ralenti malgré les pertes"
+        )
     })
 }

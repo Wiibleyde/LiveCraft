@@ -45,6 +45,8 @@ cargo run -- --selftest target/selftest
 
 `--selftest` needs FFmpeg. It generates its own media, then really plays, records, streams and
 replays, so run it for anything touching sources, outputs or timing.
+The DVD checks author a small disc with `dvdauthor` (and image it with `mkisofs` when present); without
+them on your `PATH`, they say so and are skipped.
 
 `--soak <folder> <length>` (for example `45m`) runs a whole show for that long: looping videos, a list,
 music, a web page, titles, transitions, recording, a local stream, replays and remote control calls.

@@ -320,15 +320,34 @@ impl App {
                 rt.seek_ms.store(0, Ordering::Relaxed);
             }
         }
-        if let (Kind::PowerPoint { .. }, Some(rt)) = (&input.kind, &rt) {
-            // Through the named functions, so the card does what a remote does.
-            let number = self.input_number(project, id);
-            let back = named(
-                icon_button(&mut top, Icon::Step(false), None),
+        // Slides and chapters step through the same items; the card calls the named
+        // functions, so it does what a remote does.
+        let stepping = match input.kind {
+            Kind::PowerPoint { .. } => Some((
+                "PreviousPicture",
+                "NextPicture",
+                t!("slides.previous"),
+                t!("slides.next"),
                 t!("slides.previous_named", name = input.name),
-            );
-            if back.on_hover_text(t!("slides.previous")).clicked() {
-                self.call("PreviousPicture", &Args::new().input(&number));
+                t!("slides.next_named", name = input.name),
+            )),
+            Kind::Dvd { .. } => Some((
+                "PreviousItem",
+                "NextItem",
+                t!("inputs.dvd_previous_chapter"),
+                t!("inputs.dvd_next_chapter"),
+                format!("{} {}", t!("inputs.dvd_previous_chapter"), input.name),
+                format!("{} {}", t!("inputs.dvd_next_chapter"), input.name),
+            )),
+            _ => None,
+        };
+        if let (Some((previous, next, previous_tip, next_tip, previous_name, next_name)), Some(rt)) =
+            (stepping, &rt)
+        {
+            let number = self.input_number(project, id);
+            let back = named(icon_button(&mut top, Icon::Step(false), None), previous_name);
+            if back.on_hover_text(previous_tip).clicked() {
+                self.call(previous, &Args::new().input(&number));
             }
             let count = rt.items.load(Ordering::Relaxed);
             let at = match count {
@@ -336,12 +355,9 @@ impl App {
                 n => format!("{}/{n}", rt.item.load(Ordering::Relaxed) + 1),
             };
             top.label(RichText::new(at).size(10.5).color(TEXT));
-            let on = named(
-                icon_button(&mut top, Icon::Step(true), None),
-                t!("slides.next_named", name = input.name),
-            );
-            if on.on_hover_text(t!("slides.next")).clicked() {
-                self.call("NextPicture", &Args::new().input(&number));
+            let on = named(icon_button(&mut top, Icon::Step(true), None), next_name);
+            if on.on_hover_text(next_tip).clicked() {
+                self.call(next, &Args::new().input(&number));
             }
         }
         let mut bottom =
@@ -514,6 +530,17 @@ impl App {
                     }
                 }
             }
+            Kind::Dvd { .. } => {
+                let chapters = self.engine.rt(id).map_or(Vec::new(), |r| r.chapters.lock().unwrap().clone());
+                for (n, start) in chapters.iter().enumerate().take(99) {
+                    if ui.button(t!("inputs.dvd_menu_chapter", n = n + 1, start = clock(*start))).clicked() {
+                        if let Some(rt) = self.engine.rt(id) {
+                            rt.select.store(n as i64, Ordering::Relaxed);
+                        }
+                        ui.close();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -527,11 +554,27 @@ impl App {
         id
     }
 
+    /// A picked folder or image that turns out not to be a DVD says so,
+    /// rather than becoming a photo slideshow or a broken video.
+    fn add_dvd(&mut self, p: &std::path::Path) {
+        match crate::dvd::recognise(p) {
+            Some(disc) => {
+                self.add_input(&crate::dvd::display_name(&disc), Kind::Dvd { path: disc, title: 1 });
+            }
+            None => self.say(t!("inputs.dvd_not_a_disc")),
+        }
+    }
+
     /// Makes the right kind of input from a file.
     pub(super) fn add_file(&mut self, p: &std::path::Path) {
         let name = file_name(p);
         let path = p.to_string_lossy().into_owned();
         let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        // A disc folder or image wins over the photo folder and video guesses below.
+        if crate::dvd::recognise(p).is_some() {
+            self.add_dvd(p);
+            return;
+        }
         match ext.as_str() {
             "png" | "jpg" | "jpeg" | "webp" | "bmp" => {
                 self.add_input(&name, Kind::Image { path });
@@ -615,6 +658,37 @@ impl App {
                 self.editing = Some(id);
                 ui.close();
             }
+            for net in Net::ALL {
+                ui.menu_button(net.label(), |ui| {
+                    ui.set_max_width(340.0);
+                    self.look_for_net_sources();
+                    match self.net_found(net) {
+                        None => {
+                            ui.label(RichText::new(t!("inputs.net_searching")).color(DIM));
+                        }
+                        Some(Err(missing)) => {
+                            ui.label(RichText::new(missing).color(DIM));
+                        }
+                        Some(Ok(list)) => {
+                            if list.is_empty() {
+                                ui.label(RichText::new(t!("inputs.net_none", name = net.label())).color(DIM));
+                            }
+                            for source in list {
+                                if ui.button(&source).clicked() {
+                                    self.add_input(&source, net.input(source.clone()));
+                                    ui.close();
+                                }
+                            }
+                        }
+                    }
+                    ui.separator();
+                    if ui.button(t!("inputs.net_other", name = net.label())).clicked() {
+                        let id = self.add_input(net.label(), net.input(String::new()));
+                        self.editing = Some(id);
+                        ui.close();
+                    }
+                });
+            }
             if ui.button(t!("inputs.web_page")).clicked() {
                 let kind = Kind::Browser { url: "https://".into(), alpha: false };
                 let id = self.add_input(t!("inputs.web_page"), kind);
@@ -625,6 +699,31 @@ impl App {
                 self.add_input(t!("inputs.screen_name"), Kind::Screen);
                 ui.close();
             }
+            ui.menu_button(t!("inputs.dvd_menu"), |ui| {
+                for drive in crate::dvd::optical_drives_cached() {
+                    if ui.button(t!("inputs.dvd_drive", drive = drive.trim_end_matches('\\'))).clicked() {
+                        self.add_input(
+                            &crate::dvd::display_name(&drive),
+                            Kind::Dvd { path: drive, title: 1 },
+                        );
+                        ui.close();
+                    }
+                }
+                if ui.button(t!("inputs.dvd_folder")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        self.add_dvd(&p);
+                    }
+                    ui.close();
+                }
+                if ui.button(t!("inputs.dvd_image")).clicked() {
+                    if let Some(p) =
+                        rfd::FileDialog::new().add_filter(t!("inputs.dvd_image_filter"), &["iso"]).pick_file()
+                    {
+                        self.add_dvd(&p);
+                    }
+                    ui.close();
+                }
+            });
             ui.separator();
             if ui.button(t!("inputs.add_image")).clicked() {
                 let picked = rfd::FileDialog::new()

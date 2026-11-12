@@ -265,9 +265,12 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
         Kind::List { items: Vec::new(), auto_next: true, auto_first: false, looped: false, shuffle: false },
         Kind::Photos { folder: "x".into(), seconds: 0.0 },
         Kind::ImageSequence { first: "x0001.png".into(), fps: 30.0, looped: true },
+        Kind::Dvd { path: "C:/introuvable/disque.iso".into(), title: 1 },
         Kind::PowerPoint { path: "x.pptx".into() },
         Kind::Camera { device: "x".into(), ptz_host: String::new() },
         Kind::Network { url: "srt://127.0.0.1:1".into(), buffer_ms: 0 },
+        Kind::Ndi { source: String::new() },
+        Kind::Omt { source: "omt://127.0.0.1:1".into() },
         Kind::Browser { url: "about:blank".into(), alpha: false },
         Kind::Microphone { device: "x".into() },
         Kind::Designed { objects: Vec::new(), anim_ms: 500 },
@@ -344,6 +347,95 @@ fn an_empty_desk_shows_its_hint_and_buttons_are_safe() {
     wait(&mut h, 200);
     click(&mut h, "Fondu au noir");
     assert!(project(&h).inputs.is_empty());
+    end(h);
+}
+
+#[test]
+fn an_ndi_or_omt_input_comes_from_the_menu_and_asks_for_its_source() {
+    let mut h = desk(small_project());
+    let before = project(&h).inputs.len();
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "OMT");
+    click(&mut h, "Autre source OMT…");
+    let p = project(&h);
+    assert_eq!(p.inputs.len(), before + 1);
+    let added = p.inputs.last().unwrap().clone();
+    assert_eq!(added.kind, Kind::Omt { source: String::new() });
+    assert_eq!(h.state().editing, Some(added.id), "ses réglages s'ouvrent pour choisir la source");
+    h.get_by_label("Nom exact");
+    let rt = h.state().engine.rt(added.id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !rt.status().is_some_and(|s| s.contains("Choisissez une source OMT")) {
+        assert!(Instant::now() < deadline, "la carte doit dire quoi faire : {:?}", rt.status());
+        wait(&mut h, 20);
+    }
+    end(h);
+}
+
+#[test]
+fn network_outputs_start_and_stop_from_the_settings() {
+    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = desk(small_project());
+    h.state_mut().settings_open = true;
+    h.state_mut().settings_tab = 2;
+    h.run_steps(3);
+    let engine = h.state().engine.clone();
+    click(&mut h, "Démarrer NDI / OMT");
+    assert!(!engine.is_net());
+    let said =
+        |h: &Harness<'static, App>| h.state().message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said(&h).contains("Cochez"), "rien de coché doit le dire : {}", said(&h));
+    click(&mut h, "NDI");
+    assert!(project(&h).ndi_out.enabled, "la case cochée doit rester dans le projet");
+    click(&mut h, "Démarrer NDI / OMT");
+    match crate::netvideo::Net::Ndi.available() {
+        Ok(()) => {
+            assert!(engine.is_net(), "{}", said(&h));
+            assert_eq!(engine.net.lock().unwrap()[0].name, "LiveCraft");
+            click(&mut h, "Arrêter NDI / OMT");
+            assert!(!engine.is_net());
+        }
+        // Without the runtime, nothing starts and the reason is on screen.
+        Err(missing) => {
+            assert!(!engine.is_net());
+            assert_eq!(said(&h), missing);
+        }
+    }
+    end(h);
+}
+
+/// Both tests offer the same source names, and a name is taken for the whole
+/// process: they run one after the other.
+static NET_NAMES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Stop then Start at once: the sender just stopped is still being torn down,
+/// and the new one must not fail on its name ("nom déjà pris").
+#[test]
+fn a_network_output_starts_again_right_after_it_stops() {
+    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = desk(small_project());
+    h.state_mut().settings_open = true;
+    h.state_mut().settings_tab = 2;
+    h.run_steps(3);
+    let engine = h.state().engine.clone();
+    let (ndi, omt) =
+        (crate::netvideo::Net::Ndi.available().is_ok(), crate::netvideo::Net::Omt.available().is_ok());
+    if !ndi && !omt {
+        end(h);
+        return;
+    }
+    if ndi {
+        click(&mut h, "NDI");
+    }
+    if omt {
+        click(&mut h, "OMT");
+    }
+    for round in 0..4 {
+        click(&mut h, "Démarrer NDI / OMT");
+        assert!(engine.is_net(), "tour {round} : le démarrage doit réussir juste après l'arrêt");
+        click(&mut h, "Arrêter NDI / OMT");
+        assert!(!engine.is_net());
+    }
     end(h);
 }
 
@@ -685,6 +777,62 @@ fn a_virtual_set_is_made_from_the_menu_and_its_camera_glides_between_presets() {
         wait(&mut h, 20);
     }
     end(h);
+}
+
+/// Generous: other tests and builds share the machine, and a DVD title takes a moment to open.
+fn until(h: &mut Harness<'static, App>, what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !done() {
+        assert!(Instant::now() < deadline, "attendu sans succès : {what}");
+        wait(h, 30);
+    }
+}
+
+/// Dropping a disc's VIDEO_TS folder makes a DVD input, whose card and
+/// settings step through chapters and switch titles.
+#[test]
+fn a_dropped_dvd_folder_plays_and_steps_through_chapters() {
+    use crate::playtest::{BLUE, GREEN, RED, centre, near};
+    let dir = std::env::temp_dir().join(format!("livecraft-dvd-ui-{}", std::process::id()));
+    let Some(disc) = crate::playtest::dvd_fixture(&dir.to_string_lossy()).unwrap() else {
+        eprintln!("ignoré : dvdauthor ou le démultiplexeur dvdvideo manque");
+        return;
+    };
+    // An empty desk, so the new card is on screen to be clicked.
+    let mut p = Project::blank();
+    p.out_w = 320;
+    p.out_h = 180;
+    let mut h = desk(p);
+    h.state_mut().add_file(&std::path::Path::new(&disc).join("VIDEO_TS"));
+    h.run_steps(3);
+    let input = project(&h).inputs.last().cloned().unwrap();
+    assert_eq!(input.kind, Kind::Dvd { path: disc.clone(), title: 1 }, "the disc, not the VIDEO_TS folder");
+    assert_eq!(input.name, "disque");
+    let rt = h.state().engine.rt(input.id).unwrap();
+    until(&mut h, "trois chapitres en rouge", || {
+        rt.items.load(Ordering::Relaxed) == 3 && near(centre(&rt), RED)
+    });
+    let on = |rt: &sources::InputRt, n: u64, colour| {
+        rt.item.load(Ordering::Relaxed) == n && near(centre(rt), colour)
+    };
+    click(&mut h, "Chapitre suivant disque");
+    until(&mut h, "chapitre 2 en vert", || on(&rt, 1, GREEN));
+    click(&mut h, "Chapitre précédent disque");
+    until(&mut h, "retour au chapitre 1", || on(&rt, 0, RED));
+    h.state_mut().editing = Some(input.id);
+    h.state_mut().edit_tab = 0;
+    h.run_steps(3);
+    click(&mut h, "Chapitre 3");
+    until(&mut h, "chapitre 3 en bleu", || on(&rt, 2, BLUE));
+    click(&mut h, "Titre du DVD");
+    click(&mut h, "Titre 2 : 1 chapitre(s), 00:02");
+    let engine = h.state().engine.clone();
+    until(&mut h, "le titre 2 en blanc", || {
+        engine.rt(input.id).is_some_and(|rt| near(centre(&rt), [255, 255, 255]))
+    });
+    assert_eq!(project(&h).inputs.last().unwrap().kind, Kind::Dvd { path: disc, title: 2 });
+    end(h);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Text on screen that only the French catalog holds: after a switch to English, any of it

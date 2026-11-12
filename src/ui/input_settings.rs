@@ -153,6 +153,7 @@ impl App {
         let rt = self.engine.rt(input.id);
         let (cams, mics) = self.devices.lock().unwrap().clone();
         let id = input.id;
+        let key = input.key_id();
         let mut change_path = None;
         match &mut input.kind {
             Kind::Solid { color } => {
@@ -313,6 +314,74 @@ impl App {
                     video_controls(ui, rt, 440.0);
                 }
             }
+            Kind::Dvd { path, title } => {
+                path_row(ui, path);
+                ui.horizontal(|ui| {
+                    if ui.button(t!("input_settings.dvd_change_folder")).clicked()
+                        && let Some(p) = rfd::FileDialog::new().pick_folder()
+                    {
+                        match crate::dvd::recognise(&p) {
+                            Some(disc) => *path = disc,
+                            None => self.say(t!("input_settings.dvd_folder_needed")),
+                        }
+                    }
+                    if ui.button(t!("input_settings.dvd_change_image")).clicked()
+                        && let Some(p) = rfd::FileDialog::new()
+                            .add_filter(t!("inputs.dvd_image_filter"), &["iso"])
+                            .pick_file()
+                    {
+                        *path = p.to_string_lossy().into_owned();
+                    }
+                });
+                let titles = rt.as_ref().map_or(Vec::new(), |r| r.titles.lock().unwrap().clone());
+                ui.horizontal(|ui| {
+                    ui.label(t!("input_settings.dvd_title"));
+                    if titles.is_empty() {
+                        // Tables unread yet, or an image only ffmpeg can list.
+                        ui.add(egui::DragValue::new(title).range(1..=99));
+                    } else {
+                        let shown = t!("input_settings.dvd_title_n", n = (*title).max(1));
+                        let combo = egui::ComboBox::from_id_salt("dvd-titre").selected_text(shown).show_ui(
+                            ui,
+                            |ui| {
+                                for t in &titles {
+                                    let text = t!(
+                                        "input_settings.dvd_title_row",
+                                        n = t.number,
+                                        chapters = t.chapters,
+                                        length = clock(t.duration_ms)
+                                    );
+                                    ui.selectable_value(title, t.number, text);
+                                }
+                            },
+                        );
+                        named(combo.response, t!("input_settings.dvd_title_combo"));
+                    }
+                });
+                if let Some(rt) = &rt {
+                    let chapters = rt.chapters.lock().unwrap().clone();
+                    let at = rt.item.load(Ordering::Relaxed) as usize;
+                    ui.horizontal(|ui| {
+                        for (label, function) in [
+                            (t!("inputs.dvd_previous_chapter"), "PreviousItem"),
+                            (t!("inputs.dvd_next_chapter"), "NextItem"),
+                        ] {
+                            if ui.button(label).clicked() {
+                                self.call(function, &Args::new().input(&key));
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for (n, start) in chapters.iter().enumerate() {
+                            let r = ui.selectable_label(n == at, format!("{} · {}", n + 1, clock(*start)));
+                            if named(r, t!("input_settings.dvd_chapter_n", n = n + 1)).clicked() {
+                                rt.select.store(n as i64, Ordering::Relaxed);
+                            }
+                        }
+                    });
+                    video_controls(ui, rt, 440.0);
+                }
+            }
             Kind::List { items, auto_next, auto_first, looped, shuffle } => {
                 ui.horizontal(|ui| {
                     ui.checkbox(auto_next, t!("input_settings.auto_next"));
@@ -395,6 +464,8 @@ impl App {
                 ui.text_edit_singleline(url);
                 ui.add(egui::Slider::new(buffer_ms, 0..=5000).text(t!("input_settings.buffer_ms")));
             }
+            Kind::Ndi { source } => self.net_source_editor(ui, Net::Ndi, source),
+            Kind::Omt { source } => self.net_source_editor(ui, Net::Omt, source),
             Kind::Browser { url, alpha } => {
                 ui.label(t!("input_settings.page_address"));
                 ui.text_edit_singleline(url);
@@ -441,6 +512,28 @@ impl App {
                 ui.label(RichText::new(other.label()).color(DIM));
             }
         }
+    }
+
+    /// A source picked from those seen on the network, or typed in full for
+    /// one that is not on yet.
+    fn net_source_editor(&mut self, ui: &mut egui::Ui, net: Net, source: &mut String) {
+        self.look_for_net_sources();
+        let found = self.net_found(net);
+        let list = found.as_ref().and_then(|f| f.as_ref().ok()).cloned().unwrap_or_default();
+        device_combo(ui, t!("input_settings.net_source"), source, &list);
+        ui.horizontal(|ui| {
+            ui.label(t!("input_settings.net_exact_name"));
+            ui.add(egui::TextEdit::singleline(source).desired_width(320.0));
+        });
+        let note = match found {
+            None => t!("input_settings.net_searching").to_string(),
+            Some(Err(missing)) => missing,
+            Some(Ok(list)) if list.is_empty() => {
+                t!("input_settings.net_none_yet", name = net.label())
+            }
+            Some(Ok(_)) => return,
+        };
+        ui.label(RichText::new(note).small().color(DIM));
     }
 
     fn tab_key(&mut self, ui: &mut egui::Ui, input: &mut Input, project: &Project) {

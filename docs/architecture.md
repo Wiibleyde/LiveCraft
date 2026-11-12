@@ -24,10 +24,11 @@ so a slow window cannot hold up the show.
 | `mixer.rs` | The video loop: what to compose, and reusing what has not changed |
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
 | `sets.rs` | Virtual sets: built-in decors and camera moves; the mixer composes them |
-| `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
+| `sources.rs`, `playback.rs`, `browser.rs`, `dvd.rs` | Where pictures and sound come from |
 | `slides.rs` | Presentations, turned into one picture per slide by PowerPoint or LibreOffice |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
+| `netvideo.rs`, `ndi.rs`, `omt.rs` | NDI and OMT in and out; runtimes loaded on first use, never shipped |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
 | `functions.rs`, `api.rs` | Named functions, and HTTP and TCP remote control |
 | `vmix_import.rs` | Reading `.vmix` projects |

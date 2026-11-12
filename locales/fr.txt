@@ -166,6 +166,15 @@ inputs.bars = Mire
 inputs.motion_bars = Mire animée
 inputs.clock = Horloge
 inputs.test_tone = Son de test
+inputs.dvd_menu = DVD
+inputs.dvd_drive = Lecteur {drive}
+inputs.dvd_folder = Dossier VIDEO_TS…
+inputs.dvd_image = Image ISO…
+inputs.dvd_image_filter = Image de DVD
+inputs.dvd_not_a_disc = Pas de DVD ici : il faut un dossier VIDEO_TS ou une image ISO
+inputs.dvd_previous_chapter = Chapitre précédent
+inputs.dvd_next_chapter = Chapitre suivant
+inputs.dvd_menu_chapter = Chapitre {n} ({start})
 
 # src/ui/switcher.rs
 switcher.go_live = Passer au direct
@@ -324,6 +333,14 @@ input_settings.audio.flatten = Remettre à plat
 input_settings.audio.bus_levels = Niveau vers chaque bus
 input_settings.audio.bus_master = Général
 input_settings.copy_from = Copier position, couleur, clé et effets depuis :
+input_settings.dvd_change_folder = Changer de dossier…
+input_settings.dvd_change_image = Changer d'image ISO…
+input_settings.dvd_folder_needed = Pas de DVD ici : il faut un dossier VIDEO_TS
+input_settings.dvd_title = Titre
+input_settings.dvd_title_n = Titre {n}
+input_settings.dvd_title_row = Titre {n} : {chapters} chapitre(s), {length}
+input_settings.dvd_title_combo = Titre du DVD
+input_settings.dvd_chapter_n = Chapitre {n}
 
 # src/ui/settings.rs
 settings.tab.format = Format
@@ -564,6 +581,7 @@ model.kind.audio_file = Fichier audio
 model.kind.list = Liste
 model.kind.photos = Photos
 model.kind.image_sequence = Séquence d'images
+model.kind.dvd = DVD
 model.kind.powerpoint = PowerPoint
 model.kind.camera = Caméra
 model.kind.network = Flux réseau
@@ -695,6 +713,9 @@ sources.mic_lost = Micro perdu, nouvel essai… {reason}
 # src/playback.rs
 playback.cannot_play = Lecture impossible : {reason}
 playback.empty_list = Liste vide
+playback.dvd_no_title = Ce disque n'a pas de titre {title}
+playback.dvd_titles_unreadable = Titres illisibles : {error}
+playback.dvd_unreadable = Aucun DVD lisible : {error}
 
 # src/browser.rs
 browser.needs_edge_or_chrome = Edge ou Chrome est nécessaire pour les pages web
@@ -724,6 +745,39 @@ outputs.srt_stopped = SRT arrêté : {reason}
 
 # src/audio.rs
 audio.default_output = Sortie par défaut
+
+# NDI and OMT (src/ndi.rs, src/omt.rs, src/netvideo.rs, src/outputs.rs, inputs and settings)
+ndi.missing = Runtime NDI introuvable : installez NDI Tools ou le runtime NDI (ndi.video/tools), puis relancez LiveCraft
+ndi.cpu = Le runtime NDI ne prend pas en charge ce processeur
+ndi.find_failed = La recherche NDI n'a pas pu démarrer
+ndi.bad_source_name = Nom de source NDI invalide
+ndi.receiver_failed = Le récepteur NDI n'a pas pu être créé
+ndi.bad_name = Nom de sortie NDI invalide
+ndi.sender_failed = La sortie NDI n'a pas pu être créée (nom déjà pris ?)
+omt.missing = Bibliothèque OMT introuvable : placez libomt.dll et libvmx.dll (github.com/openmediatransport) à côté de LiveCraft ou dans le PATH, puis relancez LiveCraft
+omt.bad_source_name = Nom de source OMT invalide
+omt.receiver_failed = Le récepteur OMT n'a pas pu être créé
+omt.bad_name = Nom de sortie OMT invalide
+omt.sender_failed = La sortie OMT n'a pas pu être créée (nom déjà pris ?)
+netvideo.symbol_missing = {name} manque : version trop ancienne de la bibliothèque
+netvideo.choose_source = Choisissez une source {label} dans les réglages de l'entrée
+netvideo.searching = Recherche de la source {label} « {source} »…
+netvideo.lost = Source {label} « {source} » perdue, en attente de son retour…
+outputs.net_none_ticked = Cochez d'abord NDI ou OMT dans les réglages des sorties
+inputs.net_searching = Recherche des sources…
+inputs.net_none = Aucune source {name} trouvée
+inputs.net_other = Autre source {name}…
+input_settings.net_source = Source
+input_settings.net_exact_name = Nom exact
+input_settings.net_searching = Recherche des sources…
+input_settings.net_none_yet = Aucune source {name} trouvée pour l'instant
+settings.net_title = Sorties NDI et OMT : le programme avec le son Général
+settings.net_name = Nom
+settings.net_connections = {net} « {name} » : {count} connexion(s)
+settings.net_stop = Arrêter NDI / OMT
+settings.net_start = Démarrer NDI / OMT
+settings.net_rename_note = Un nouveau nom s'applique au prochain démarrage
+settings.about_ndi = NDI® est une marque déposée de Vizrt NDI AB (ndi.video). Le runtime NDI et la bibliothèque OMT (Open Media Transport) s'installent séparément.
 
 # src/slides.rs
 slides.no_converter = Ni PowerPoint ni LibreOffice installé
@@ -778,3 +832,15 @@ set.cam_close = Gros plan
 set.cam_screen = Écran
 functions.not_a_set = Cette entrée n'est pas un plateau virtuel
 functions.camera_not_found = Caméra introuvable : {name}
+
+# src/dvd.rs
+dvd.not_video_ifo = VIDEO_TS.IFO n'est pas une table DVD-Video
+dvd.truncated = table DVD tronquée
+dvd.title_table = table de titre DVD illisible
+dvd.image_unreadable = image illisible : {error}
+dvd.no_video_ts_in_image = pas de dossier VIDEO_TS dans l'image
+dvd.no_video_ts = pas de dossier VIDEO_TS ici
+dvd.too_big = {name} est trop grand
+dvd.missing_in_image = {name} absent de l'image
+dvd.no_iso = image sans système de fichiers ISO 9660
+dvd.no_root = répertoire racine illisible

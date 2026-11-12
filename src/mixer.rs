@@ -866,6 +866,9 @@ impl Engine {
         for enc in self.streamers.lock().unwrap().iter() {
             enc.push_video(out.clone(), taken);
         }
+        for net in self.net.lock().unwrap().iter() {
+            net.push_video(out.clone());
+        }
         drop(out);
         for (id, enc) in self.multi.lock().unwrap().iter() {
             if let Some(f) = m.picture(*id, c, 0) {

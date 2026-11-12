@@ -4,6 +4,7 @@
 
 use crate::frame::Frame;
 use crate::model::{Input, Kind, ListItem, TitleObject, TitleStyle};
+use crate::netvideo::{self, Net};
 use crate::titles::{self, Stroke};
 use crate::{playback, text};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -35,6 +36,10 @@ impl Ring {
 
     pub fn room(&self) -> usize {
         self.cap.saturating_sub(self.q.lock().unwrap().len())
+    }
+
+    pub fn len(&self) -> usize {
+        self.q.lock().unwrap().len()
     }
 
     /// Adds samples, dropping the oldest if the reader fell behind.
@@ -121,6 +126,10 @@ pub struct InputRt {
     /// Processes started for this input. A source that keeps restarting
     /// shows here long before anyone notices a blink on air.
     pub launches: AtomicU64,
+    /// Where each chapter starts, as the decoder announced them.
+    pub chapters: Mutex<Vec<u64>>,
+    /// What a DVD holds, read from the disc as it opens.
+    pub titles: Mutex<Vec<crate::dvd::Title>>,
     children: Mutex<Vec<Child>>,
 }
 
@@ -147,6 +156,8 @@ impl InputRt {
             strokes: Mutex::new(Vec::new()),
             strokes_gen: AtomicU64::new(0),
             launches: AtomicU64::new(0),
+            chapters: Mutex::new(Vec::new()),
+            titles: Mutex::new(Vec::new()),
             children: Mutex::new(Vec::new()),
         })
     }
@@ -382,6 +393,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             }
         }
         Kind::AudioFile { path, looped } => playback::run_audio_file(&rt, &path, looped),
+        Kind::Dvd { path, title } => playback::run_dvd(&rt, &path, title, w, h, fps),
         Kind::List { items, auto_next, looped, shuffle, .. } => {
             let enabled: Vec<ListItem> = items.into_iter().filter(|i| i.enabled).collect();
             playback::run_list(&rt, enabled, auto_next, looped, shuffle, w, h, fps);
@@ -408,6 +420,8 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             args.extend(["-i".into(), url]);
             run_capture(&rt, args, w, h, fps);
         }
+        Kind::Ndi { source } => netvideo::run_input(&rt, Net::Ndi, &source, w, h),
+        Kind::Omt { source } => netvideo::run_input(&rt, Net::Omt, &source, w, h),
         Kind::Screen => {
             let args = vec![
                 "-f".into(),
@@ -702,21 +716,43 @@ fn run_telestrator(rt: &InputRt, w: usize, h: usize) {
     }
 }
 
-/// Reads ffmpeg's log on the side: keeps the file length and the last line.
+/// Reads ffmpeg's log on the side: keeps the file length, its chapters and
+/// the last line.
 pub(crate) fn watch_log(rt: &Arc<InputRt>, child: &mut Child) -> Arc<Mutex<String>> {
     let last = Arc::new(Mutex::new(String::new()));
     if let Some(err) = child.stderr.take() {
         let (rt, sink) = (rt.clone(), last.clone());
         thread::spawn(move || {
+            // The output is described too, with chapters shifted by any seek.
+            let mut in_output = false;
             for line in BufReader::new(err).lines().map_while(Result::ok) {
                 if let Some(ms) = parse_duration(&line) {
                     rt.dur_ms.store(ms, Ordering::Relaxed);
+                }
+                in_output |= line.starts_with("Output #");
+                if let (false, Some((n, ms))) = (in_output, parse_chapter(&line)) {
+                    let mut chapters = rt.chapters.lock().unwrap();
+                    if n == 0 {
+                        chapters.clear();
+                    }
+                    if n == chapters.len() {
+                        chapters.push(ms);
+                    }
                 }
                 *sink.lock().unwrap() = line;
             }
         });
     }
     last
+}
+
+/// `Chapter #0:2: start 3.800000, end 6.000000` gives (2, 3800).
+pub(crate) fn parse_chapter(line: &str) -> Option<(usize, u64)> {
+    let rest = line.trim_start().strip_prefix("Chapter #")?;
+    let (_, rest) = rest.split_once(':')?;
+    let (n, rest) = rest.split_once(':')?;
+    let start = rest.trim_start().strip_prefix("start ")?.split(',').next()?;
+    Some((n.parse().ok()?, (start.trim().parse::<f64>().ok()? * 1000.0).round() as u64))
 }
 
 pub(crate) fn parse_duration(line: &str) -> Option<u64> {
@@ -898,6 +934,13 @@ mod tests {
     fn reads_file_length_from_log() {
         assert_eq!(parse_duration("  Duration: 00:01:02.50, start: 0.000000, bitrate: 1 kb/s"), Some(62_500));
         assert_eq!(parse_duration("Stream #0:0: Video"), None);
+    }
+
+    #[test]
+    fn reads_chapter_starts_from_log() {
+        assert_eq!(parse_chapter("    Chapter #0:2: start 3.800000, end 6.000000"), Some((2, 3800)));
+        assert_eq!(parse_chapter("  Chapters:"), None);
+        assert_eq!(parse_chapter("Stream #0:0: Video"), None);
     }
 
     #[test]
