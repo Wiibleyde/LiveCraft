@@ -265,6 +265,7 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
         Kind::List { items: Vec::new(), auto_next: true, auto_first: false, looped: false, shuffle: false },
         Kind::Photos { folder: "x".into(), seconds: 0.0 },
         Kind::ImageSequence { first: "x0001.png".into(), fps: 30.0, looped: true },
+        Kind::PowerPoint { path: "x.pptx".into() },
         Kind::Camera { device: "x".into(), ptz_host: String::new() },
         Kind::Network { url: "srt://127.0.0.1:1".into(), buffer_ms: 0 },
         Kind::Browser { url: "about:blank".into(), alpha: false },
@@ -580,6 +581,61 @@ fn every_named_function_is_known_and_leaves_the_desk_working() {
     engine.call("RemoveInput", &Args::new().input("2")).unwrap();
     assert!(engine.state.lock().unwrap().input(2).is_none());
     end(h);
+}
+
+/// A presentation dropped on the desk becomes a PowerPoint input, and the
+/// card's buttons walk through its slides without going past either end.
+/// Needs PowerPoint or LibreOffice; skipped where neither is installed.
+#[test]
+fn a_presentation_is_added_and_its_card_buttons_turn_the_slides() {
+    if crate::slides::Converter::find().is_none() {
+        eprintln!("ni PowerPoint ni LibreOffice : essai sauté");
+        return;
+    }
+    const COLOURS: [[u8; 3]; 3] = [[230, 20, 20], [20, 200, 40], [30, 40, 220]];
+    let dir = std::env::temp_dir().join(format!("livecraft-ui-deck-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let deck = dir.join("Conférence.pptx");
+    crate::slides::write_test_deck(&deck, &COLOURS);
+    let mut p = Project::blank();
+    p.out_w = 320;
+    p.out_h = 180;
+    let mut h = desk(p);
+    h.state_mut().add_file(&deck);
+    h.run_steps(2);
+    let input = project(&h).inputs.last().cloned().unwrap();
+    assert!(matches!(&input.kind, Kind::PowerPoint { path } if path.ends_with("Conférence.pptx")));
+    let rt = h.state().engine.rt(input.id).unwrap();
+    let on_screen = |want: usize| {
+        let f = rt.latest()?;
+        let at = (f.h / 2 * f.w + f.w / 2) * 4;
+        let near = f.data[at..at + 3].iter().zip(COLOURS[want]).all(|(a, b)| a.abs_diff(b) < 12);
+        Some(near && rt.item.load(Ordering::Relaxed) as usize == want)
+    };
+    let until = |h: &mut Harness<'static, App>, what: &str, secs: u64, want: usize| {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while on_screen(want) != Some(true) || rt.items.load(Ordering::Relaxed) != 3 {
+            let failed = rt.status().filter(|s| s.contains("illisible") || s.contains("arrêté"));
+            assert!(failed.is_none(), "{what} : {failed:?}");
+            assert!(Instant::now() < deadline, "{what} : {:?}", rt.status());
+            wait(h, 50);
+        }
+    };
+    // A first start of the converter can take a while.
+    until(&mut h, "première diapositive", 180, 0);
+    assert!(h.query_by_label("1/3").is_some(), "the card counts the slides");
+    click(&mut h, "Diapositive suivante Conférence");
+    until(&mut h, "deuxième diapositive", 5, 1);
+    click(&mut h, "Diapositive suivante Conférence");
+    until(&mut h, "troisième diapositive", 5, 2);
+    click(&mut h, "Diapositive suivante Conférence");
+    wait(&mut h, 200);
+    until(&mut h, "toujours la dernière", 1, 2);
+    click(&mut h, "Diapositive précédente Conférence");
+    until(&mut h, "retour à la deuxième", 5, 1);
+    assert!(h.query_by_label("2/3").is_some());
+    end(h);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn preview_red_at(h: &Harness<'static, App>, x: f32, y: f32) -> Option<bool> {
