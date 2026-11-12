@@ -39,6 +39,20 @@ pub struct MixFade {
     pub ms: u32,
 }
 
+/// A virtual set's camera on its way to its chosen preset.
+#[derive(Clone, Copy)]
+pub struct SetMove {
+    pub from: SetView,
+    pub started: Instant,
+    pub ms: u32,
+}
+
+impl SetMove {
+    fn progress(&self, now: Instant) -> f32 {
+        (now.saturating_duration_since(self.started).as_secs_f32() * 1000.0 / self.ms.max(1) as f32).min(1.0)
+    }
+}
+
 /// The parts of the project the mixer reads, rebuilt only on change.
 pub struct Snapshot {
     pub version: u64,
@@ -76,6 +90,7 @@ pub struct State {
     pub playlist_index: usize,
     pub playlist_next: Option<Instant>,
     pub mix_fades: HashMap<u64, MixFade>,
+    pub set_moves: HashMap<u64, SetMove>,
     pub undo: Option<Closed>,
     /// Inputs that Pause Inputs stopped, the ones to start again.
     pub paused_by_desk: Vec<u64>,
@@ -105,6 +120,7 @@ impl State {
             playlist_index: 0,
             playlist_next: None,
             mix_fades: HashMap::new(),
+            set_moves: HashMap::new(),
             undo: None,
             paused_by_desk: Vec::new(),
             padlock: false,
@@ -453,6 +469,9 @@ impl State {
             (self.ftb_level - step).max(dark)
         };
         self.finish_mix_fades(now);
+        // The resting view is the chosen preset itself, so nothing else
+        // needs to change when a move ends.
+        self.set_moves.retain(|_, m| m.progress(now) < 1.0);
     }
 
     fn finish_mix_fades(&mut self, now: Instant) {
@@ -482,6 +501,36 @@ impl State {
         }
     }
 
+    /// Sends a virtual set's camera to one of its presets, from wherever it
+    /// stands now, even part way through another move. `ms` replaces the
+    /// set's own move time.
+    pub fn set_camera(&mut self, id: u64, n: usize, ms: Option<u32>, now: Instant) -> bool {
+        let from = self.set_view(id, now);
+        let Some(input) = self.input_mut(id) else { return false };
+        let Kind::VirtualSet { cameras, camera, move_ms, .. } = &mut input.kind else { return false };
+        let Some(to) = cameras.get(n).map(|c| c.view.clamped()) else { return false };
+        *camera = n;
+        let ms = ms.unwrap_or(*move_ms);
+        match from {
+            Some(from) if ms > 0 && from != to => {
+                self.set_moves.insert(id, SetMove { from, started: now, ms });
+            }
+            _ => {
+                self.set_moves.remove(&id);
+            }
+        }
+        true
+    }
+
+    /// Where a virtual set's camera looks at `now`.
+    pub fn set_view(&self, id: u64, now: Instant) -> Option<SetView> {
+        let target = crate::sets::resting_view(&self.input(id)?.kind)?;
+        Some(match self.set_moves.get(&id) {
+            Some(m) => m.from.toward(target, m.progress(now)),
+            None => target,
+        })
+    }
+
     pub fn on_air(&self) -> HashSet<u64> {
         let mut set: HashSet<u64> = self.overlay_shown.iter().flatten().copied().collect();
         set.extend(self.project.overlays.iter().flatten());
@@ -503,9 +552,16 @@ impl State {
         while let Some(id) = todo.pop() {
             let Some(input) = self.input(id) else { continue };
             let mut inner: Vec<u64> = input.layers.iter().filter(|l| l.visible).map(|l| l.input).collect();
-            if let Kind::Mix { preview, output, .. } = input.kind {
-                inner.extend(preview);
-                inner.extend(output);
+            match input.kind {
+                Kind::Mix { preview, output, .. } => {
+                    inner.extend(preview);
+                    inner.extend(output);
+                }
+                Kind::VirtualSet { background, foreground, .. } => {
+                    inner.extend(background);
+                    inner.extend(foreground);
+                }
+                _ => {}
             }
             for i in inner {
                 if set.insert(i) {
@@ -559,6 +615,10 @@ impl State {
                     forget(output);
                 }
                 Kind::Telestrator { background } => forget(background),
+                Kind::VirtualSet { background, foreground, .. } => {
+                    forget(background);
+                    forget(foreground);
+                }
                 _ => {}
             }
         }
@@ -595,6 +655,7 @@ impl State {
             }
         }
         self.mix_fades.remove(&id);
+        self.set_moves.remove(&id);
         self.undo = Some(closed);
         self.solo.remove(&id);
         self.version += 1;
@@ -976,5 +1037,63 @@ mod tests {
         assert!(s.mix_fades.contains_key(&id));
         s.mix_switch(id, false);
         assert!(!s.mix_fades.contains_key(&id));
+    }
+
+    fn with_set() -> (State, u64) {
+        let mut s = state();
+        let id = 98;
+        s.project.inputs.push(Input::new(id, "Plateau", crate::sets::new_set(SetLook::Studio)));
+        (s, id)
+    }
+
+    /// Asked for another preset mid-move, the camera turns from where it
+    /// stands instead of jumping back to where it started.
+    #[test]
+    fn a_set_camera_changes_course_without_a_jump() {
+        let (mut s, id) = with_set();
+        let t0 = Instant::now();
+        let wide = s.set_view(id, t0).unwrap();
+        assert!(s.set_camera(id, 2, Some(1000), t0));
+        assert_eq!(s.set_view(id, t0), Some(wide), "a move starts where the camera was");
+        let half = t0 + Duration::from_millis(500);
+        let there = s.set_view(id, half).unwrap();
+        assert!(there.zoom > wide.zoom && there.zoom < 2.4);
+        assert!(s.set_camera(id, 3, Some(1000), half));
+        assert_eq!(s.set_view(id, half), Some(there));
+        let end = half + Duration::from_millis(1000);
+        s.advance(end, 0.0);
+        assert!(s.set_moves.is_empty(), "the move is over");
+        let screen = s.set_view(id, end).unwrap();
+        assert!((screen.zoom - 2.0).abs() < 1e-5 && (screen.x - 0.73).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_set_camera_with_no_time_cuts_and_bad_presets_are_refused() {
+        let (mut s, id) = with_set();
+        let now = Instant::now();
+        assert!(s.set_camera(id, 1, Some(0), now));
+        assert!(s.set_moves.is_empty());
+        assert!((s.set_view(id, now).unwrap().zoom - 1.5).abs() < 1e-5);
+        assert!(!s.set_camera(id, 9, None, now), "no such preset");
+        assert!(!s.set_camera(1, 0, None, now), "not a set");
+        assert!(matches!(s.input(id).unwrap().kind, Kind::VirtualSet { camera: 1, .. }));
+    }
+
+    /// A video behind the presenters must play when the set goes on air.
+    #[test]
+    fn a_set_shows_its_own_pictures_and_forgets_closed_ones() {
+        let (mut s, id) = with_set();
+        if let Some(Kind::VirtualSet { background, foreground, .. }) = s.input_mut(id).map(|i| &mut i.kind) {
+            *background = Some(5);
+            *foreground = Some(6);
+        }
+        s.input_mut(id).unwrap().layers.push(Layer::new(1, crate::sets::presenter_spot(0)));
+        let shown = s.with_layers(HashSet::from([id]));
+        assert!([1, 5, 6].iter().all(|i| shown.contains(i)), "{shown:?}");
+        s.close_input(5);
+        assert!(matches!(
+            s.input(id).unwrap().kind,
+            Kind::VirtualSet { background: None, foreground: Some(6), .. }
+        ));
     }
 }

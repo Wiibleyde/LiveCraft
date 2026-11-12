@@ -12,6 +12,7 @@ mod switcher;
 #[cfg(test)]
 mod tests;
 mod tools;
+mod virtual_set;
 mod windows;
 
 use crate::api::ApiConfig;
