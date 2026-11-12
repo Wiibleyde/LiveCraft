@@ -58,3 +58,12 @@ fn a_new_setting_is_not_a_new_source() {
     let deck = |path: &str| Kind::PowerPoint { path: path.into() };
     assert!(!deck("a.pptx").same_source(&deck("b.pptx")));
 }
+
+/// Later versions will add to sets too: what is missing takes its default.
+#[test]
+fn a_virtual_set_with_missing_fields_still_opens() {
+    let kind: Kind = serde_json::from_str(r#"{"VirtualSet":{"cameras":[{"name":"Large"}]}}"#).unwrap();
+    let Kind::VirtualSet { look, background, cameras, camera, .. } = kind else { panic!("{kind:?}") };
+    assert_eq!((look, background, camera), (SetLook::Studio, None, 0));
+    assert_eq!(cameras[0].view, SetView::default());
+}
