@@ -799,7 +799,7 @@ fn soak(dir: &str, length: Duration) -> Result<String, String> {
     }
     let received = out.join("diffusion.flv").to_string_lossy().into_owned();
     // Started after the engine, so that it ends with this program however it stops.
-    let server = match receiver(dir, &stream_url, &received) {
+    let server = match receiver(dir, &stream_url, &received, RECEIVER_START) {
         Ok(s) => s,
         Err(e) => {
             engine.shutdown();
@@ -820,7 +820,7 @@ fn free_port() -> Result<u16, String> {
 /// The local RTMP server the stream goes to. What it says is kept in
 /// `recepteur.log`, and one that stops at once (port taken, ffmpeg without
 /// RTMP) fails the run before the show instead of as a missing file after it.
-fn receiver(dir: &str, url: &str, received: &str) -> Result<Child, String> {
+fn receiver(dir: &str, url: &str, received: &str, watch: Duration) -> Result<Child, String> {
     let log_path = Path::new(dir).join("recepteur.log");
     let log = File::create(&log_path).map_err(|e| format!("{} : {e}", log_path.display()))?;
     // It waits for the stream, which only starts once every source has shown
@@ -838,7 +838,7 @@ fn receiver(dir: &str, url: &str, received: &str) -> Result<Child, String> {
     // One that cannot listen stops at once, but on a loaded machine "at once"
     // can take seconds; one that listens never stops on its own.
     let watched = Instant::now();
-    while watched.elapsed() < RECEIVER_START {
+    while watched.elapsed() < watch {
         if let Ok(Some(status)) = server.try_wait() {
             let said = std::fs::read_to_string(&log_path).unwrap_or_default();
             let last: Vec<&str> = said.lines().rev().take(4).collect();
@@ -1303,10 +1303,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("livecraft-soak-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.to_string_lossy().into_owned();
-        let result = receiver(&dir, "rtmp://256.256.256.256:1935/live/soak", &format!("{dir}/x.flv"));
+        // A port out of range fails without a name lookup, which can be slow;
+        // a full test run can also slow ffmpeg's start past RECEIVER_START.
+        let url = "rtmp://127.0.0.1:99999/live/soak";
+        let result = receiver(&dir, url, &format!("{dir}/x.flv"), Duration::from_secs(60));
         let _ = std::fs::remove_dir_all(&dir);
         let e = result.expect_err("a receiver that cannot listen must fail the run");
-        assert!(e.contains("256.256.256.256"), "its own words are kept: {e}");
+        assert!(e.contains("127.0.0.1:99999"), "its own words are kept: {e}");
     }
 
     #[test]
