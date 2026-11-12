@@ -49,4 +49,6 @@ so a slow window cannot hold up the show.
 
 - Pixels are RGBA with premultiplied alpha.
 - Sizes in saved data are fractions of the frame, so projects survive a change of format.
+- Replay marks are moments of the show, not positions in a file. Every encoder logs when each picture it
+  wrote was taken, so a file that lost pictures still finds the right one.
 - The desk can be tested without a window, and the window with real clicks in `ui/tests.rs`.
