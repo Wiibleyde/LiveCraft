@@ -135,6 +135,25 @@ pub enum Kind {
     Telestrator {
         background: Option<u64>,
     },
+    /// Presenters standing in a decor, seen through a camera that moves
+    /// between presets. Its layers are the presenters, placed in the set.
+    VirtualSet {
+        #[serde(default)]
+        look: SetLook,
+        /// Replaces the built-in backdrop when chosen.
+        #[serde(default)]
+        background: Option<u64>,
+        /// Replaces the built-in desk, drawn in front of the presenters.
+        #[serde(default)]
+        foreground: Option<u64>,
+        #[serde(default)]
+        cameras: Vec<SetCamera>,
+        /// The preset the camera stands on, or is moving to.
+        #[serde(default)]
+        camera: usize,
+        #[serde(default)]
+        move_ms: u32,
+    },
 }
 
 impl Kind {
@@ -164,6 +183,7 @@ impl Kind {
             Kind::Mix { .. } => t!("model.kind.mix"),
             Kind::Replay => t!("model.kind.replay"),
             Kind::Telestrator { .. } => t!("model.kind.telestrator"),
+            Kind::VirtualSet { .. } => t!("model.kind.virtual_set"),
         }
     }
 
@@ -188,6 +208,7 @@ impl Kind {
             Kind::Mix { .. } => "Mix",
             Kind::Replay => "Replay",
             Kind::Telestrator { .. } => "Telestrator",
+            Kind::VirtualSet { .. } => "VirtualSet",
         }
     }
 
@@ -260,6 +281,40 @@ impl Placement {
         let m = |a: f32, b: f32| a + (b - a) * t;
         Placement { x: m(self.x, o.x), y: m(self.y, o.y), scale: m(self.scale, o.scale) }
     }
+}
+
+/// Decors drawn by LiveCraft itself, so a set works without any file.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum SetLook {
+    #[default]
+    Studio,
+    Evening,
+    /// Only the pictures chosen for the background and foreground.
+    Empty,
+}
+
+/// What a virtual set's camera shows: `zoom` 1 is the whole set, `x` and `y`
+/// the centre of the view as fractions of the set.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(default)]
+pub struct SetView {
+    pub zoom: f32,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Default for SetView {
+    fn default() -> Self {
+        Self { zoom: 1.0, x: 0.5, y: 0.5 }
+    }
+}
+
+/// A named camera preset of a virtual set.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct SetCamera {
+    pub name: String,
+    pub view: SetView,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]

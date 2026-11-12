@@ -334,6 +334,71 @@ impl Desk {
         until(6.0, "fin du titre", || done(&rt) == 1)?;
         Ok("DVD")
     }
+
+    /// A presenter filmed on green, keyed into a set on air, then the camera
+    /// sent to the close-up by name: the output glides there over many
+    /// frames, and the green never shows.
+    fn virtual_set(&self, dir: &str) -> Result<(), String> {
+        let args = [
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x00ff00:size=640x360:rate=30:duration=2",
+            "-vf",
+            "drawbox=x=256:y=72:w=128:h=288:color=0xC81E1E:t=fill",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ];
+        let path = make(&args, &format!("{dir}/fond-vert.mp4"))?;
+        let kind = Kind::Video { path, looped: true, mark_in: 0, mark_out: 0, rate: 1.0 };
+        let (person, _) = self.add("Présentateur", kind)?;
+        if let Some(i) = self.engine.state.lock().unwrap().input_mut(person) {
+            i.key.mode = KeyMode::Chroma;
+        }
+        let set = self.engine.new_id();
+        let layers = vec![Layer::new(person, crate::sets::presenter_spot(0))];
+        let input = Input::new(set, "Plateau", crate::sets::new_set(SetLook::Studio)).with_layers(layers);
+        self.engine.add_input(input);
+        self.call("CutDirect", "Plateau", "")?;
+        let at = |f: &crate::frame::Frame, x: f32, y: f32| {
+            let i = (((y * f.h as f32) as usize) * f.w + (x * f.w as f32) as usize) * 4;
+            [f.data[i], f.data[i + 1], f.data[i + 2]]
+        };
+        let red = |p: [u8; 3]| p[0] > 150 && p[1] < 90 && p[2] < 90;
+        let width = || {
+            let f = self.engine.program.lock().unwrap().clone();
+            (0..f.w).filter(|&x| red(at(&f, (x as f32 + 0.5) / f.w as f32, 0.5))).count()
+        };
+        // The overlay step before leaves a full-frame overlay on air.
+        self.call("OverlayInputAllOff", "", "")?;
+        until(5.0, "présentateur incrusté au direct", || (60..=90).contains(&width()))
+            .map_err(|e| format!("{e}, largeur {}", width()))?;
+        let f = self.engine.program.lock().unwrap().clone();
+        for x in [0.3, 0.4, 0.6, 0.7] {
+            let p = at(&f, x, 0.5);
+            if p[1] > 200 && p[0] < 80 {
+                return Err(format!("fond vert visible autour du présentateur : {p:?}"));
+            }
+        }
+        let wide = width();
+        self.call("VirtualSet", "Plateau", "Gros plan")?;
+        let mut seen = vec![wide];
+        until(4.0, "gros plan au direct", || {
+            let w = width();
+            if seen.last() != Some(&w) {
+                seen.push(w);
+            }
+            w >= wide * 2
+        })?;
+        if seen.len() < 8 {
+            return Err(format!("mouvement de caméra saccadé : {seen:?}"));
+        }
+        Ok(())
+    }
 }
 
 pub fn check(dir: &str) -> Result<String, String> {
@@ -353,11 +418,14 @@ pub fn check(dir: &str) -> Result<String, String> {
         let dvd = desk.dvd(dir)?;
         desk.countdown()?;
         desk.overlay()?;
+        desk.virtual_set(dir)?;
         desk.web_pages()?;
         Ok(dvd)
     })();
     desk.engine.shutdown();
     steps.map(|dvd| {
-        format!("marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, pages web")
+        format!(
+            "marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, plateau virtuel, pages web"
+        )
     })
 }
