@@ -219,6 +219,7 @@ impl App {
                 });
                 (format!("{left:04.1}"), white)
             }
+            ClockType::Show => (span(self.with(|s| s.clock.elapsed(Instant::now())).as_secs_f64()), white),
             ClockType::Event => event_clock(c),
         }
     }
