@@ -1,21 +1,26 @@
 //! `--selftest <folder>`: drives the real engine without a window. Plays a
 //! generated video, runs transitions, records, streams, replays and answers
-//! remote control, then checks the files it made.
+//! remote control, then checks the files it made. Last, it sends its program
+//! out over NDI and OMT and takes it back in, where those runtimes are installed.
 
 use crate::api::ApiConfig;
 use crate::engine::{Compositor, Engine};
 use crate::functions::Args;
 use crate::model::*;
+use crate::netvideo::Net;
 use crate::sources::ffmpeg;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub fn run(dir: &str) -> i32 {
-    match crate::playtest::check(dir).and_then(|media| Ok(format!("{media}\nOK: {}", check(dir)?))) {
+    let all = crate::playtest::check(dir)
+        .and_then(|media| Ok(format!("{media}\nOK: {}", check(dir)?)))
+        .and_then(|done| Ok(format!("{done}\nOK: {}", net_loopback()?)));
+    match all {
         Ok(msg) => {
             println!("OK: {msg}");
             0
@@ -43,6 +48,97 @@ fn http_get(path: &str) -> Result<String, String> {
     let mut text = String::new();
     s.read_to_string(&mut text).map_err(|e| format!("réponse HTTP {path} : {e}"))?;
     Ok(text)
+}
+
+/// NDI and OMT out of LiveCraft and back into it: a red program with a tone
+/// must come back red and audible. A runtime that is not installed is
+/// reported, not failed, as LiveCraft never ships one.
+fn net_loopback() -> Result<String, String> {
+    let mut notes = Vec::new();
+    for net in Net::ALL {
+        match net.available() {
+            Ok(()) => notes.push(loop_back(net)?),
+            Err(e) => notes.push(format!("{} NON TESTÉ : {e}", net.label())),
+        }
+    }
+    Ok(notes.join(" | "))
+}
+
+fn loop_back(net: Net) -> Result<String, String> {
+    let label = net.label();
+    let mut project = Project::blank();
+    project.out_w = 640;
+    project.out_h = 360;
+    project.inputs =
+        vec![Input::new(1, "Rouge", Kind::Solid { color: [220, 30, 30] }), Input::new(2, "Son", Kind::Tone)];
+    project.program = Some(1);
+    let name = format!("LiveCraft essai {}", std::process::id());
+    let cfg = NetOutCfg { enabled: true, name: name.clone() };
+    match net {
+        Net::Ndi => project.ndi_out = cfg,
+        Net::Omt => project.omt_out = cfg,
+    }
+    let engine = Engine::start(project);
+    let result = (|| {
+        engine.start_net()?;
+        let suffix = format!("({name})");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let source = loop {
+            if let Some(s) = net.sources()?.into_iter().find(|s| s.ends_with(&suffix)) {
+                break s;
+            }
+            if Instant::now() > deadline {
+                return Err(format!("{label} : la sortie « {name} » n'apparaît pas sur le réseau"));
+            }
+            sleep(Duration::from_millis(200));
+        };
+        let id = engine.new_id();
+        let mut input = Input::new(id, "Retour", net.input(source.clone()));
+        // Heard on the meter only: sent back out, it would loop forever.
+        input.audio.muted = true;
+        let asked = Instant::now();
+        engine.add_input(input);
+        let rt = engine.rt(id).ok_or("entrée absente")?;
+        let colour = |f: &crate::frame::Frame, x: usize, y: usize| {
+            let at = (y * f.w + x) * 4;
+            [f.data[at], f.data[at + 1], f.data[at + 2], f.data[at + 3]]
+        };
+        let is_red = |p: [u8; 4]| p[0] > 180 && p[1] < 80 && p[2] < 80 && p[3] == 255;
+        let mut seen_at = None;
+        loop {
+            let picture = rt.latest();
+            let red = picture.as_ref().is_some_and(|f| {
+                (f.w, f.h) == (640, 360) && is_red(colour(f, 320, 180)) && is_red(colour(f, 2, 2))
+            });
+            if red && seen_at.is_none() {
+                seen_at = Some(asked.elapsed());
+            }
+            if red && rt.peak() > 0.03 {
+                break;
+            }
+            if asked.elapsed() > Duration::from_secs(15) {
+                let middle = picture.as_ref().map(|f| colour(f, f.w / 2, f.h / 2));
+                return Err(format!(
+                    "{label} : retour de « {source} » incorrect, image {middle:?}, crête son {:.3}, état {:?}",
+                    rt.peak(),
+                    rt.status()
+                ));
+            }
+            sleep(Duration::from_millis(50));
+        }
+        sleep(Duration::from_millis(700));
+        let connections = engine.net.lock().unwrap().first().map_or(0, |o| o.connections());
+        if connections == 0 {
+            return Err(format!("{label} : la sortie ne compte aucune connexion"));
+        }
+        Ok(format!(
+            "{label} : « {source} » revient rouge en {} ms, crête son {:.2}, {connections} connexion(s)",
+            seen_at.unwrap_or_default().as_millis(),
+            rt.peak()
+        ))
+    })();
+    engine.shutdown();
+    result
 }
 
 fn check(dir: &str) -> Result<String, String> {
@@ -77,13 +173,23 @@ fn check(dir: &str) -> Result<String, String> {
     let id = engine.new_id();
     let video = Kind::Video { path: clip.clone(), looped: true, mark_in: 0, mark_out: 0, rate: 1.0 };
     engine.add_input(Input::new(id, "Test", video));
-    sleep(Duration::from_millis(800));
     let rt = engine.rt(id).ok_or("source absente")?;
+    // ffmpeg takes longer to start on a busy machine; once the first picture
+    // is up, a paused video must not show a second one.
+    let asked = Instant::now();
+    while rt.seq() == 0 && rt.status().is_none() && asked.elapsed() < Duration::from_secs(10) {
+        sleep(Duration::from_millis(20));
+    }
+    let first_ms = asked.elapsed().as_millis();
+    sleep(Duration::from_millis(500));
     if let Some(e) = rt.status() {
         return Err(e);
     }
     if rt.seq() != 1 {
-        return Err(format!("une vidéo en pause doit montrer une image, pas {}", rt.seq()));
+        return Err(format!(
+            "une vidéo en pause doit montrer une image, pas {} (après {first_ms} ms)",
+            rt.seq()
+        ));
     }
 
     // A web page draws through the windowless browser.

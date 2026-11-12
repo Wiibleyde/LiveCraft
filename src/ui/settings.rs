@@ -79,6 +79,8 @@ impl App {
                 d.fullscreen_route = p.fullscreen_route;
                 d.fullscreen_monitor = p.fullscreen_monitor;
                 d.srt = p.srt;
+                d.ndi_out = p.ndi_out;
+                d.omt_out = p.omt_out;
                 d.records = p.records;
                 d.streams = p.streams;
                 d.master_device = p.master_device;
@@ -110,7 +112,8 @@ impl App {
 
     fn tab_format(&mut self, ui: &mut egui::Ui, p: &Project) {
         let e = &self.engine;
-        let busy = e.is_recording() || e.is_streaming() || e.is_multi() || e.is_srt() || e.is_replay();
+        let busy =
+            e.is_recording() || e.is_streaming() || e.is_multi() || e.is_srt() || e.is_net() || e.is_replay();
         ui.label(RichText::new(t!("settings.output_format")).strong());
         ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -202,6 +205,42 @@ impl App {
                 let name = if running { "StopSRTOutput" } else { "StartSRTOutput" };
                 self.call(name, &Args::new());
             }
+        }
+        ui.separator();
+        ui.label(RichText::new(t!("settings.net_title")).strong());
+        egui::Grid::new("net_out").show(ui, |ui| {
+            for (label, cfg) in [("NDI", &mut p.ndi_out), ("OMT", &mut p.omt_out)] {
+                ui.checkbox(&mut cfg.enabled, label);
+                ui.label(t!("settings.net_name"));
+                ui.add_sized([220.0, 20.0], egui::TextEdit::singleline(&mut cfg.name).id_salt(label));
+                ui.end_row();
+            }
+        });
+        let running: Vec<String> = self
+            .engine
+            .net
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                t!("settings.net_connections", net = o.net.label(), name = o.name, count = o.connections())
+            })
+            .collect();
+        for line in &running {
+            ui.label(RichText::new(line).small().color(DIM));
+        }
+        let on = !running.is_empty();
+        if ui.button(if on { t!("settings.net_stop") } else { t!("settings.net_start") }).clicked() {
+            if on && self.with(|s| s.padlock) {
+                self.say(t!("settings.locked_unlock_to_stop"));
+            } else if on {
+                self.engine.stop_net();
+            } else if let Err(e) = self.engine.start_net() {
+                self.say(e);
+            }
+        }
+        if on {
+            ui.label(RichText::new(t!("settings.net_rename_note")).small().color(DIM));
         }
     }
 
@@ -442,4 +481,5 @@ fn tab_about(ui: &mut egui::Ui) {
     ui.label(RichText::new("LiveCraft").strong());
     ui.label(t!("settings.about_tagline"));
     ui.label(RichText::new(t!("settings.about_ffmpeg")).small().color(DIM));
+    ui.label(RichText::new(t!("settings.about_ndi")).small().color(DIM));
 }
