@@ -974,3 +974,17 @@ dvd.no_root = répertoire racine illisible
 
 # src/secret.rs
 secret.not_saved = Les clés et mots de passe n'ont pas pu être protégés : ils ne sont pas enregistrés et sont à ressaisir au prochain démarrage
+
+# src/delay.rs, src/ui/input_settings.rs (Video Delay)
+model.kind.video_delay = Retard vidéo
+inputs.add_video_delay = Retard vidéo
+inputs.add_video_delay_tip = Montre une autre entrée un peu plus tard, avec son son
+inputs.video_delay_name = Retard vidéo
+input_settings.delay.source = Entrée retardée
+input_settings.delay.source_combo = Source du retard
+input_settings.delay.time = Retard
+input_settings.delay.longest = Au plus {seconds} s en {w}×{h} à {fps} images/s : les images sont gardées en mémoire.
+input_settings.delay.memory = Ce retard garde jusqu'à {size} Go d'images.
+input_settings.delay.sound = Le son est celui de l'entrée retardée, après ses réglages et avant son fader. Le micro d'une caméra est une entrée à part : donnez-lui un retard aussi.
+functions.not_a_delay = Cette entrée n'est pas un retard vidéo
+functions.delay_loops = Ce retard se montrerait lui-même : choisissez une autre entrée

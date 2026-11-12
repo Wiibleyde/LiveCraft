@@ -281,6 +281,41 @@ fn every_transition_looks_the_same_on_the_card() {
     }
 }
 
+/// A delay keeps its source's finished picture: made on the card, it comes
+/// back to memory to be kept, and shows what the processor shows, as many
+/// ticks later.
+#[test]
+fn a_delay_of_a_scene_made_on_the_card_shows_what_the_processor_shows() {
+    let Some(painter) = card() else { return };
+    let (w, h) = (334, 190);
+    let mut d = desk(w, h);
+    const DELAY: u64 = 30;
+    let kind = Kind::VideoDelay { source: Some(ALL_SETTINGS), ms: 100 };
+    d.state.project.inputs.push(Input::new(DELAY, "Retard", kind));
+    let with_delay = || {
+        let mut r = d.rts.clone();
+        r.insert(DELAY, InputRt::new(false, true));
+        r
+    };
+    let (rts_cpu, rts_gpu) = (with_delay(), with_delay());
+    let (mut cpu, mut gpu) = (Mixer::default(), on_card(painter));
+    let mut made = Vec::new();
+    for n in 0..8u64 {
+        // A layer of the scene changes each tick.
+        d.rts[&11].publish(picture(w, h, 40 + n as u32, false));
+        let plan = d.state.plan(Instant::now(), Vec::new());
+        let at = 10 * clock::NS + n * clock::NS / 30;
+        let c = Ctx { plan: &plan, rts: &rts_cpu };
+        cpu.run_delays(&c, at);
+        made.push(cpu.picture(ALL_SETTINGS, &c, 0).unwrap());
+        gpu.run_delays(&Ctx { plan: &plan, rts: &rts_gpu }, at);
+        let (a, b) = (rts_cpu[&DELAY].latest().unwrap(), rts_gpu[&DELAY].latest().unwrap());
+        assert_close(&format!("retard au temps {n}"), &a, &b);
+        let then = &made[n.saturating_sub(3) as usize];
+        assert!(Arc::ptr_eq(&a, then), "three ticks later, the picture made then");
+    }
+}
+
 /// Opening the card takes up to a second, and the picture must not wait for
 /// it: the processor composes until it is open, then the card takes over.
 #[test]

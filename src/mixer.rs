@@ -3,6 +3,7 @@
 
 use crate::canvas::{Canvas, Cpu, Painter, Pic, processed};
 use crate::clock::{self, Pace};
+use crate::delay;
 use crate::engine::*;
 use crate::frame::Frame;
 use crate::gpu;
@@ -44,6 +45,8 @@ struct Plan {
     set_views: HashMap<u64, SetView>,
     /// Every input someone can see or hear right now, however deep.
     showing: HashSet<u64>,
+    /// Each Video Delay with its source and time, in the order to feed them.
+    delays: Vec<(u64, Option<u64>, u32)>,
 }
 
 impl State {
@@ -93,9 +96,11 @@ impl State {
         let mut seen = self.on_air();
         seen.extend(self.project.preview);
         seen.extend(watched);
+        seen.extend(self.delay_sources());
         let showing = self.with_layers(seen);
         Plan {
             showing,
+            delays: delays_in_order(&self.project.inputs),
             snap: self.snapshot(),
             base,
             stinger,
@@ -154,6 +159,8 @@ struct Mixer {
     thumb_sig: HashMap<u64, u64>,
     completions: HashMap<u64, u64>,
     positions: HashMap<u64, u64>,
+    /// What each Video Delay keeps of its source, by input.
+    delays: HashMap<u64, delay::Pictures>,
 }
 
 struct Ctx<'a> {
@@ -323,6 +330,41 @@ impl Mixer {
             self.pics.compose(&mut self.cpu, c, &mut out);
         }
         Some(out)
+    }
+
+    /// Gives each Video Delay its source's finished picture for the tick
+    /// stamped `at`, and shows on the delay's input what it gives back.
+    fn run_delays(&mut self, c: &Ctx, at: u64) {
+        let delays = &c.plan.delays;
+        if delays.is_empty() && self.delays.is_empty() {
+            return;
+        }
+        let (w, h, fps) = (c.plan.snap.w, c.plan.snap.h, c.plan.snap.fps);
+        let longest = delay::longest_ms(w, h, fps);
+        let most = delay::most_pictures(w, h);
+        let period = clock::NS / fps.max(1) as u64;
+        let mut let_go = Vec::new();
+        self.delays.retain(|id, kept| {
+            let open = delays.iter().any(|d| d.0 == *id);
+            if !open {
+                kept.fit(0, 0, &mut let_go);
+            }
+            open
+        });
+        for &(id, source, ms) in delays {
+            let shown = source.and_then(|s| self.picture(s, c, 0));
+            let kept = self.delays.entry(id).or_default();
+            kept.fit(w, h, &mut let_go);
+            let out = kept.step(at, shown, delay::nanos(ms.min(longest)), period, most, &mut let_go);
+            if let Some(rt) = c.rts.get(&id) {
+                rt.show(out);
+            }
+        }
+        // A delay made shorter or closed lets many pictures go at once, which
+        // would take longer to free than a tick lasts.
+        if let_go.len() > 2 {
+            thread::spawn(move || drop(let_go));
+        }
     }
 
     /// An input as its card shows it, made at card size: a scene off air costs
@@ -725,6 +767,8 @@ impl Engine {
             }
             let c = Ctx { plan: &plan, rts: &rts };
             let t0 = Instant::now();
+            // Before composing, so a delay shown on air is of this very tick.
+            m.run_delays(&c, pace.stamp());
             let started = self.compose(&mut m, &c);
             let compose_us = t0.elapsed().as_micros() as u64;
             self.update_preview(&mut m, &c);
@@ -1238,6 +1282,51 @@ mod tests {
         let rts = HashMap::new();
         let c = Ctx { plan: &plan, rts: &rts };
         assert!(Mixer::default().picture(1, &c, 0).is_some());
+    }
+
+    /// A tick's time on the shared clock, as the video loop's pace gives it.
+    fn tick(n: u64) -> u64 {
+        10 * clock::NS + n * clock::NS / 30
+    }
+
+    /// A delay of a scene shows the scene as composed, the set number of
+    /// ticks later; a delay of that delay, listed first, still adds its own
+    /// time to the same tick's picture of the first.
+    #[test]
+    fn a_delay_shows_its_source_as_composed_ticks_later() {
+        let mut p = Project::blank();
+        (p.out_w, p.out_h, p.fps) = (32, 18, 30);
+        p.inputs = vec![
+            Input::new(4, "Retard du retard", Kind::VideoDelay { source: Some(3), ms: 200 }),
+            Input::new(1, "Caméra", Kind::Bars),
+            Input::new(2, "Scène", Kind::Scene).with_layers(vec![Layer::new(1, Placement::FULL)]),
+            Input::new(3, "Retard", Kind::VideoDelay { source: Some(2), ms: 100 }),
+        ];
+        let plan = State::new(p).plan(Instant::now(), Vec::new());
+        assert!(plan.showing.contains(&1), "a delay watches its source, on air or not");
+        let camera = InputRt::new(false, true);
+        let rts = HashMap::from([
+            (1, camera.clone()),
+            (3, InputRt::new(false, true)),
+            (4, InputRt::new(false, true)),
+        ]);
+        let c = Ctx { plan: &plan, rts: &rts };
+        let mut m = Mixer::default();
+        let red = |id: u64| rts[&id].latest().map(|f| f.data[0] as u64);
+        for n in 0..30u64 {
+            camera.publish(Frame::solid(32, 18, [n as u8 * 8, 0, 0]));
+            m.run_delays(&c, tick(n));
+            assert_eq!(red(3), Some(n.saturating_sub(3) * 8), "tick {n}");
+            assert_eq!(red(4), Some(n.saturating_sub(9) * 8), "tick {n}");
+        }
+        let held = rts[&3].seq();
+        for n in 30..33 {
+            m.run_delays(&c, tick(n));
+        }
+        let seq = rts[&3].seq();
+        assert!(seq > held, "what it held plays out");
+        m.run_delays(&c, tick(33));
+        assert_eq!(rts[&3].seq(), seq, "a still source changes nothing once it has played out");
     }
 
     #[test]

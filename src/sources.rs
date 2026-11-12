@@ -217,6 +217,21 @@ impl InputRt {
         self.stop.load(Ordering::Relaxed)
     }
 
+    /// Shows a picture made elsewhere, as a Video Delay's: nothing changes,
+    /// and nothing is composed again, while it is the same one.
+    pub fn show(&self, f: Option<Arc<Frame>>) {
+        let mut slot = self.frame.lock().unwrap();
+        let same = match (&*slot, &f) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            *slot = f;
+            self.seq.fetch_add(1, Ordering::Release);
+        }
+    }
+
     /// Returns the buffer it replaced when nobody else still uses it.
     pub fn publish(&self, f: Frame) -> Option<Frame> {
         let old = self.frame.lock().unwrap().replace(Arc::new(f));
@@ -333,7 +348,8 @@ pub fn start_seeded(
     seed: Option<Arc<Frame>>,
     resume: Option<Resume>,
 ) -> Arc<InputRt> {
-    let has_audio = input.kind.has_audio();
+    // A delay's sound is made in the sound loop, from its source's.
+    let has_audio = input.kind.has_audio() && !matches!(input.kind, Kind::VideoDelay { .. });
     // Files and countdowns wait until something starts them.
     let countdown = matches!(input.kind, Kind::Title { style: TitleStyle::Countdown, .. });
     let waits = input.kind.has_timeline() || countdown;
@@ -371,7 +387,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32, hardware: boo
             rt.publish(Frame::solid(w, h, color));
         }
         // These are built by the mixer, which sees all the inputs.
-        Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. } => {}
+        Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. } | Kind::VideoDelay { .. } => {}
         Kind::Tone => run_tone(&rt),
         Kind::SystemAudio => run_system_audio(&rt),
         Kind::Motion => run_motion(&rt, w, h, fps),

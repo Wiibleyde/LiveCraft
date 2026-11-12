@@ -353,6 +353,7 @@ impl Engine {
                     renumber(output);
                 }
                 Kind::Telestrator { background } => renumber(background),
+                Kind::VideoDelay { source, .. } => renumber(source),
                 Kind::VirtualSet { background, foreground, .. } => {
                     renumber(background);
                     renumber(foreground);

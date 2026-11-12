@@ -187,6 +187,13 @@ pub enum Kind {
         #[serde(default)]
         return_sound: ReturnSound,
     },
+    /// Another input shown again a set time later, picture and sound.
+    VideoDelay {
+        #[serde(default)]
+        source: Option<u64>,
+        #[serde(default)]
+        ms: u32,
+    },
 }
 
 /// What a video call guest hears back, along with the program picture.
@@ -252,6 +259,7 @@ impl Kind {
             Kind::Telestrator { .. } => t!("model.kind.telestrator"),
             Kind::VirtualSet { .. } => t!("model.kind.virtual_set"),
             Kind::VideoCall { .. } => t!("model.kind.video_call"),
+            Kind::VideoDelay { .. } => t!("model.kind.video_delay"),
         }
     }
 
@@ -281,6 +289,7 @@ impl Kind {
             Kind::Telestrator { .. } => "Telestrator",
             Kind::VirtualSet { .. } => "VirtualSet",
             Kind::VideoCall { .. } => "VideoCall",
+            Kind::VideoDelay { .. } => "VideoDelay",
         }
     }
 
@@ -298,6 +307,7 @@ impl Kind {
                 | Kind::SystemAudio
                 | Kind::Tone
                 | Kind::VideoCall { .. }
+                | Kind::VideoDelay { .. }
         )
     }
 
@@ -340,6 +350,9 @@ impl Kind {
                 Kind::VideoCall { token, stun, turn, turn_user, turn_password, .. },
                 Kind::VideoCall { token: t, stun: s, turn: u, turn_user: n, turn_password: p, .. },
             ) => (token, stun, turn, turn_user, turn_password) != (t, s, u, n, p),
+            // Nothing runs for a delay: the picture and sound loops follow its
+            // settings, and what it already holds keeps playing.
+            (Kind::VideoDelay { .. }, Kind::VideoDelay { .. }) => false,
             _ => self != before,
         }
     }

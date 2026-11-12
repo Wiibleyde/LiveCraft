@@ -546,30 +546,47 @@ impl State {
         self.with_layers(set)
     }
 
-    /// Adds whatever the inputs in `set` show, however deep.
-    pub fn with_layers(&self, mut set: HashSet<u64>) -> HashSet<u64> {
-        let mut todo: Vec<u64> = set.iter().copied().collect();
-        while let Some(id) = todo.pop() {
-            let Some(input) = self.input(id) else { continue };
-            let mut inner: Vec<u64> = input.layers.iter().filter(|l| l.visible).map(|l| l.input).collect();
-            match input.kind {
-                Kind::Mix { preview, output, .. } => {
-                    inner.extend(preview);
-                    inner.extend(output);
-                }
-                Kind::VirtualSet { background, foreground, .. } => {
-                    inner.extend(background);
-                    inner.extend(foreground);
-                }
-                _ => {}
-            }
-            for i in inner {
-                if set.insert(i) {
-                    todo.push(i);
-                }
-            }
+    /// Adds whatever the inputs in `set` show, however deep. A Video Delay
+    /// shows its source later, not now: that source is not on air with it.
+    pub fn with_layers(&self, set: HashSet<u64>) -> HashSet<u64> {
+        shown_by(set, Reach::Now, |id| self.input(id))
+    }
+
+    /// The sources of every Video Delay: a delay records whether anyone
+    /// watches it or not, so its source is always being watched.
+    pub fn delay_sources(&self) -> HashSet<u64> {
+        let sources = self.project.inputs.iter().filter_map(|i| match i.kind {
+            Kind::VideoDelay { source, .. } => source,
+            _ => None,
+        });
+        self.with_layers(sources.collect())
+    }
+
+    /// Points a Video Delay at another input, or at nothing. An input that
+    /// would bring the delay back into its own picture is refused.
+    pub fn set_delay_source(&mut self, id: u64, source: Option<u64>) -> Result<(), String> {
+        if let Some(s) = source
+            && (self.input(s).is_none() || delay_loops(id, s, |i| self.input(i)))
+        {
+            return Err(t!("functions.delay_loops").into());
         }
-        set
+        let Some(Kind::VideoDelay { source: slot, .. }) = self.input_mut(id).map(|i| &mut i.kind) else {
+            return Err(t!("functions.not_a_delay").into());
+        };
+        *slot = source;
+        Ok(())
+    }
+
+    /// Sets how late a Video Delay shows its source, held to what memory
+    /// allows at the project's size and frame rate. Returns what was set.
+    pub fn set_delay_ms(&mut self, id: u64, ms: u32) -> Result<u32, String> {
+        let p = &self.project;
+        let ms = ms.min(crate::delay::longest_ms(p.out_w, p.out_h, p.fps));
+        let Some(Kind::VideoDelay { ms: slot, .. }) = self.input_mut(id).map(|i| &mut i.kind) else {
+            return Err(t!("functions.not_a_delay").into());
+        };
+        *slot = ms;
+        Ok(ms)
     }
 
     pub fn close_input(&mut self, id: u64) {
@@ -619,6 +636,8 @@ impl State {
                     forget(background);
                     forget(foreground);
                 }
+                // What it holds still plays out, then the delay shows nothing.
+                Kind::VideoDelay { source, .. } => forget(source),
                 _ => {}
             }
         }
@@ -692,6 +711,90 @@ impl State {
         }
         self.version += 1;
     }
+}
+
+/// How far `shown_by` looks.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Reach {
+    /// What is on screen with an input now: its visible layers, a Mix's two
+    /// pictures, a set's backdrop and desk.
+    Now,
+    /// All it can ever bring on screen: hidden layers, which a button shows
+    /// at any moment, and what a Video Delay shows later.
+    Ever,
+}
+
+/// `set` with every input its members show, however deep.
+pub fn shown_by<'a>(
+    mut set: HashSet<u64>,
+    reach: Reach,
+    input: impl Fn(u64) -> Option<&'a Input>,
+) -> HashSet<u64> {
+    let ever = reach == Reach::Ever;
+    let mut todo: Vec<u64> = set.iter().copied().collect();
+    while let Some(id) = todo.pop() {
+        let Some(input) = input(id) else { continue };
+        let mut inner: Vec<u64> =
+            input.layers.iter().filter(|l| ever || l.visible).map(|l| l.input).collect();
+        match input.kind {
+            Kind::Mix { preview, output, .. } => {
+                inner.extend(preview);
+                inner.extend(output);
+            }
+            Kind::VirtualSet { background, foreground, .. } => {
+                inner.extend(background);
+                inner.extend(foreground);
+            }
+            Kind::VideoDelay { source, .. } if ever => inner.extend(source),
+            _ => {}
+        }
+        for i in inner {
+            if set.insert(i) {
+                todo.push(i);
+            }
+        }
+    }
+    set
+}
+
+/// Whether Video Delay `delay` showing `source` would show itself again: its
+/// own input, or one able to show it however deep, through other delays too.
+pub fn delay_loops<'a>(delay: u64, source: u64, input: impl Fn(u64) -> Option<&'a Input>) -> bool {
+    shown_by(HashSet::from([source]), Reach::Ever, input).contains(&delay)
+}
+
+/// Every Video Delay with its source and time, in the order to feed them: a
+/// delay that shows another one, even inside a scene, comes after it, so it
+/// gets that one's picture of the same tick. A loop, which the desk refuses
+/// but a file might hold, is broken anywhere.
+pub fn delays_in_order(inputs: &[Input]) -> Vec<(u64, Option<u64>, u32)> {
+    let find = |id: u64| inputs.iter().find(|i| i.id == id);
+    let mut waiting: Vec<(u64, Option<u64>, u32, HashSet<u64>)> = inputs
+        .iter()
+        .filter_map(|i| match i.kind {
+            Kind::VideoDelay { source, ms } => {
+                let shown =
+                    source.map_or_else(HashSet::new, |s| shown_by(HashSet::from([s]), Reach::Now, find));
+                let before = shown
+                    .into_iter()
+                    .filter(|o| {
+                        *o != i.id && find(*o).is_some_and(|o| matches!(o.kind, Kind::VideoDelay { .. }))
+                    })
+                    .collect();
+                Some((i.id, source, ms, before))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut order: Vec<(u64, Option<u64>, u32)> = Vec::with_capacity(waiting.len());
+    while !waiting.is_empty() {
+        let ready = waiting
+            .iter()
+            .position(|(_, _, _, before)| before.iter().all(|b| order.iter().any(|(done, _, _)| done == b)));
+        let (id, source, ms, _) = waiting.remove(ready.unwrap_or(0));
+        order.push((id, source, ms));
+    }
+    order
 }
 
 #[cfg(test)]
@@ -1095,5 +1198,77 @@ mod tests {
             s.input(id).unwrap().kind,
             Kind::VirtualSet { background: None, foreground: Some(6), .. }
         ));
+    }
+
+    fn delay(id: u64, source: Option<u64>) -> Input {
+        Input::new(id, "Retard", Kind::VideoDelay { source, ms: 1000 })
+    }
+
+    #[test]
+    fn a_delay_never_ends_up_showing_itself() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(1)));
+        s.project.inputs.push(delay(51, Some(50)));
+        assert!(s.set_delay_source(50, Some(50)).is_err(), "itself");
+        assert!(s.set_delay_source(50, Some(51)).is_err(), "through the delay that shows it");
+        let mut hidden = Layer::new(51, Placement::FULL);
+        hidden.visible = false;
+        s.input_mut(9).unwrap().layers.push(hidden);
+        assert!(s.set_delay_source(50, Some(9)).is_err(), "through a scene that can show that delay");
+        assert!(s.set_delay_source(50, Some(999)).is_err(), "no such input");
+        assert!(s.set_delay_source(1, Some(2)).is_err(), "not a delay");
+        assert!(matches!(s.input(50).unwrap().kind, Kind::VideoDelay { source: Some(1), .. }), "unchanged");
+        assert!(s.set_delay_source(50, Some(2)).is_ok());
+        assert!(matches!(s.input(50).unwrap().kind, Kind::VideoDelay { source: Some(2), .. }));
+        assert!(s.set_delay_source(50, None).is_ok());
+    }
+
+    #[test]
+    fn a_delay_is_held_to_what_memory_allows() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(1)));
+        assert_eq!(s.set_delay_ms(50, 2500), Ok(2500));
+        assert_eq!(s.set_delay_ms(50, 60_000), Ok(8566), "1080p at 30 frames a second");
+        (s.project.out_w, s.project.out_h) = (1280, 720);
+        assert_eq!(s.set_delay_ms(50, 60_000), Ok(10_000));
+        assert!(s.set_delay_ms(1, 100).is_err(), "not a delay");
+    }
+
+    #[test]
+    fn delays_are_fed_after_the_delays_they_show() {
+        let mut s = state();
+        // 52 shows a scene holding 51, which shows 50.
+        s.project.inputs.push(delay(52, Some(60)));
+        let scene = Input::new(60, "Scène", Kind::Scene).with_layers(vec![Layer::new(51, Placement::FULL)]);
+        s.project.inputs.push(scene);
+        s.project.inputs.push(delay(51, Some(50)));
+        s.project.inputs.push(delay(50, Some(1)));
+        let order: Vec<u64> = delays_in_order(&s.project.inputs).iter().map(|d| d.0).collect();
+        assert_eq!(order, [50, 51, 52]);
+        // A loop read from a file is broken somewhere, not followed forever.
+        s.project.inputs.push(delay(53, Some(54)));
+        s.project.inputs.push(delay(54, Some(53)));
+        assert_eq!(delays_in_order(&s.project.inputs).len(), 5);
+    }
+
+    /// A delay records whether shown or not, so its source is watched; but
+    /// on air, it plays its source later, and the source itself stays off.
+    #[test]
+    fn a_delays_source_is_watched_but_not_on_air_with_it() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(9)));
+        let watched = s.delay_sources();
+        assert!([9, 1, 2].iter().all(|i| watched.contains(i)), "{watched:?}");
+        s.cut_to(50);
+        let air = s.on_air();
+        assert!(air.contains(&50) && !air.contains(&9) && !air.contains(&1), "{air:?}");
+    }
+
+    #[test]
+    fn closing_a_delays_source_leaves_it_pointing_at_nothing() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(1)));
+        s.close_input(1);
+        assert!(matches!(s.input(50).unwrap().kind, Kind::VideoDelay { source: None, ms: 1000 }));
     }
 }
