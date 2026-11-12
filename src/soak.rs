@@ -10,13 +10,13 @@ use crate::engine::{Engine, TICK_BUCKETS, TICK_STEP_US};
 use crate::model::*;
 use crate::playtest::{make, until};
 use crate::selftest::http_get;
-use crate::sources::{AUDIO_RATE, ffmpeg};
+use crate::sources::{AUDIO_RATE, end_process_tree, ffmpeg};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -27,7 +27,6 @@ use std::time::{Duration, Instant};
 const SAMPLE_EVERY: Duration = Duration::from_secs(5);
 const STEP_EVERY: Duration = Duration::from_secs(6);
 const STEPS: usize = 12;
-const STREAM_URL: &str = "rtmp://127.0.0.1:19350/live/soak";
 const DEFAULT_LENGTH: Duration = Duration::from_secs(30 * 60);
 /// The weekly run must end, report included, within its job's time limit.
 const MAX_LENGTH: Duration = Duration::from_secs(2 * 3600);
@@ -740,6 +739,8 @@ fn soak(dir: &str, length: Duration) -> Result<String, String> {
     let music =
         make(&["-f", "lavfi", "-i", "sine=frequency=330:duration=15"], &format!("{dir}/musique.wav"))?;
 
+    // A port of its own, so that a selftest or another run cannot take the stream.
+    let stream_url = format!("rtmp://127.0.0.1:{}/live/soak", free_port()?);
     let mut project = Project::sample();
     project.out_w = 1280;
     project.out_h = 720;
@@ -749,7 +750,7 @@ fn soak(dir: &str, length: Duration) -> Result<String, String> {
     project.records[0].split_minutes = split_minutes;
     project.records[1].enabled = false;
     project.streams[0].enabled = true;
-    project.streams[0].url = STREAM_URL.into();
+    project.streams[0].url = stream_url.clone();
     project.streams[0].kbps = 2500;
     let next = project.inputs.iter().map(|i| i.id).max().unwrap_or(0) + 1;
     let ids = Ids { cam_a: next, cam_b: next + 1, list: next + 2, music: next + 3, page: next + 4 };
@@ -795,19 +796,8 @@ fn soak(dir: &str, length: Duration) -> Result<String, String> {
         return Err(e);
     }
     let received = out.join("diffusion.flv").to_string_lossy().into_owned();
-    // It waits for the stream, which only starts once every source has shown
-    // a picture: minutes on a loaded machine. Should the run stop before
-    // that, `finish` ends it.
-    let listen = ((4.0 * SOURCE_START_S + PAGE_START_S) as u32 + 60).to_string();
-    let server = ffmpeg()
-        .args(["-y", "-listen", "1", "-timeout", &listen, "-f", "flv", "-i", STREAM_URL, "-c", "copy"])
-        .arg(&received)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string());
-    let server = match server {
+    // Started after the engine, so that it ends with this program however it stops.
+    let server = match receiver(dir, &stream_url, &received) {
         Ok(s) => s,
         Err(e) => {
             engine.shutdown();
@@ -816,6 +806,41 @@ fn soak(dir: &str, length: Duration) -> Result<String, String> {
     };
     let result = show(&engine, dir, ids, length, &mut csv);
     finish(engine, server, &received, result, dir, length)
+}
+
+/// A port nobody listens on now. Should another program take it first, the
+/// receiver stops at once, which `receiver` reports.
+fn free_port() -> Result<u16, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("port libre : {e}"))?;
+    listener.local_addr().map(|a| a.port()).map_err(|e| format!("port libre : {e}"))
+}
+
+/// The local RTMP server the stream goes to. What it says is kept in
+/// `recepteur.log`, and one that stops at once (port taken, ffmpeg without
+/// RTMP) fails the run before the show instead of as a missing file after it.
+fn receiver(dir: &str, url: &str, received: &str) -> Result<Child, String> {
+    let log_path = Path::new(dir).join("recepteur.log");
+    let log = File::create(&log_path).map_err(|e| format!("{} : {e}", log_path.display()))?;
+    // It waits for the stream, which only starts once every source has shown
+    // a picture: minutes on a loaded machine. Should the run stop before
+    // that, `finish` ends it.
+    let listen = ((4.0 * SOURCE_START_S + PAGE_START_S) as u32 + 60).to_string();
+    let mut server = ffmpeg()
+        .args(["-y", "-listen", "1", "-timeout", &listen, "-f", "flv", "-i", url, "-c", "copy"])
+        .arg(received)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .spawn()
+        .map_err(|e| format!("récepteur RTMP : {e}"))?;
+    sleep(Duration::from_secs(1));
+    if let Ok(Some(status)) = server.try_wait() {
+        let said = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let last: Vec<&str> = said.lines().rev().take(4).collect();
+        let last: Vec<&str> = last.into_iter().rev().collect();
+        return Err(format!("le récepteur RTMP s'est arrêté au départ ({status}) : {}", last.join(" | ")));
+    }
+    Ok(server)
 }
 
 struct Run {
@@ -1002,7 +1027,8 @@ fn finish(
     while matches!(server.try_wait(), Ok(None)) && Instant::now() < deadline {
         sleep(Duration::from_millis(100));
     }
-    let _ = server.kill();
+    // ffmpeg may be a launcher in front of the real one.
+    end_process_tree(&mut server);
     let _ = server.wait();
     // Replay files only matter while the show runs, and are large: gone even
     // when the show failed.
@@ -1256,6 +1282,21 @@ mod tests {
         assert_eq!(percentile(&counts, 0.98), 1.0);
         assert_eq!(percentile(&counts, 0.99), 50.25);
         assert_eq!(percentile(&[0; 4], 0.99), 0.0);
+    }
+
+    #[test]
+    fn a_receiver_that_cannot_listen_stops_the_run_with_what_it_said() {
+        // CI has no ffmpeg.
+        if ffmpeg().arg("-version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("livecraft-soak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.to_string_lossy().into_owned();
+        let result = receiver(&dir, "rtmp://256.256.256.256:1935/live/soak", &format!("{dir}/x.flv"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let e = result.err().expect("a receiver that cannot listen must fail the run");
+        assert!(e.contains("256.256.256.256"), "its own words are kept: {e}");
     }
 
     #[test]
