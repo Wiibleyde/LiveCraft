@@ -50,10 +50,13 @@ fn clip(dir: &str, name: &str, seconds: u32) -> Result<String, String> {
 
 /// A small DVD-Video made from generated media: title 1 is three two-second
 /// chapters, red, green then blue, over a tone; title 2 is two seconds of
-/// white. None when dvdauthor or ffmpeg's dvdvideo demuxer is missing, as
+/// white. None when ffmpeg, dvdauthor or ffmpeg's dvdvideo demuxer is missing, as
 /// neither comes with LiveCraft.
 pub(crate) fn dvd_fixture(dir: &str) -> Result<Option<String>, String> {
-    let demuxers = ffmpeg().arg("-demuxers").stderr(Stdio::null()).output().map_err(|e| e.to_string())?;
+    // A missing program is a reason to skip, not a failure: CI has no ffmpeg.
+    let Ok(demuxers) = ffmpeg().arg("-demuxers").stderr(Stdio::null()).output() else {
+        return Ok(None);
+    };
     let has_dvdauthor =
         Command::new("dvdauthor").arg("-h").stdout(Stdio::null()).stderr(Stdio::null()).status();
     if !String::from_utf8_lossy(&demuxers.stdout).contains(" dvdvideo ") || has_dvdauthor.is_err() {
