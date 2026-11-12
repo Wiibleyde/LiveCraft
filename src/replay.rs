@@ -49,13 +49,28 @@ pub struct Event {
 
 /// When each picture of a recording was taken. Pictures normally follow at
 /// the frame rate, so only breaks in that beat are kept: a steady hour is one
-/// entry, and each lost or late picture adds one.
+/// entry, and each lost or late picture adds one. The copies the mixer makes
+/// to fill a late tick share its instant and are counted on one entry.
 #[derive(Clone, Debug)]
 pub struct FrameLog {
     period: Duration,
     count: u64,
-    /// From picture `.0`, taken at `.1`, pictures follow one per period.
-    breaks: Vec<(u64, Instant)>,
+    breaks: Vec<Break>,
+}
+
+/// `same` pictures from pictures `first`, all taken at `at`, then one per period.
+#[derive(Clone, Copy, Debug)]
+struct Break {
+    first: u64,
+    at: Instant,
+    same: u64,
+}
+
+impl Break {
+    /// The last picture taken at `at`: the beat goes on from it.
+    fn anchor(&self) -> u64 {
+        self.first + self.same - 1
+    }
 }
 
 fn apart(a: Instant, b: Instant) -> Duration {
@@ -72,34 +87,42 @@ impl FrameLog {
     pub fn push(&mut self, taken: Instant) {
         let n = self.count;
         self.count += 1;
-        // A quarter period absorbs the scheduler's jitter, and still leaves
-        // every picture found inside its own slot.
-        if self.taken(n).is_none_or(|beat| apart(beat, taken) > self.period / 4) {
-            self.breaks.push((n, taken));
+        if let Some(last) = self.breaks.last_mut()
+            && last.anchor() == n - 1
+            && last.at == taken
+        {
+            last.same += 1;
+            return;
+        }
+        // An eighth of a period absorbs the scheduler's jitter. More would let
+        // a small phase shift after a late tick stay unnoticed, and every later
+        // picture would be taken to be that much off.
+        if self.taken(n).is_none_or(|beat| apart(beat, taken) > self.period / 8) {
+            self.breaks.push(Break { first: n, at: taken, same: 1 });
         }
     }
 
     /// Where the file begins on the show's clock.
     pub fn first(&self) -> Option<Instant> {
-        self.breaks.first().map(|b| b.1)
+        self.breaks.first().map(|b| b.at)
     }
 
     /// When picture `n` was taken. Pictures still on their way to the file are
     /// expected on the beat.
     pub fn taken(&self, n: u64) -> Option<Instant> {
-        let k = self.breaks.partition_point(|b| b.0 <= n).checked_sub(1)?;
-        let (first, at) = self.breaks[k];
-        Some(at + self.period * (n - first) as u32)
+        let k = self.breaks.partition_point(|b| b.first <= n).checked_sub(1)?;
+        let b = self.breaks[k];
+        Some(b.at + self.period * n.saturating_sub(b.anchor()) as u32)
     }
 
     /// The picture on screen at `at`: the last one taken by then.
     pub fn picture_at(&self, at: Instant) -> u64 {
-        let k = self.breaks.partition_point(|b| b.1 <= at);
-        let Some(&(first, start)) = k.checked_sub(1).and_then(|k| self.breaks.get(k)) else { return 0 };
-        let beats = (at - start).as_nanos() / self.period.as_nanos().max(1);
-        let n = first + beats as u64;
+        let k = self.breaks.partition_point(|b| b.at <= at);
+        let Some(b) = k.checked_sub(1).and_then(|k| self.breaks.get(k)) else { return 0 };
+        let beats = (at - b.at).as_nanos() / self.period.as_nanos().max(1);
+        let n = b.anchor() + beats as u64;
         // A run of pictures ends where the next break begins.
-        self.breaks.get(k).map_or(n, |next| n.min(next.0 - 1))
+        self.breaks.get(k).map_or(n, |next| n.min(next.first - 1))
     }
 
     /// Where picture `n` is in the file, in seconds from its first picture.
@@ -123,6 +146,8 @@ pub struct ReplayState {
     pub quad: bool,
     pub input: Option<u64>,
     pub folder: Option<PathBuf>,
+    /// The show's frame rate while recording, 0 before any session.
+    fps: u32,
     /// Picture logs by file, kept after a session ends for the events on it.
     logs: HashMap<String, Arc<Mutex<FrameLog>>>,
 }
@@ -182,10 +207,13 @@ impl ReplayState {
             let (Some(origin), Some(log)) = (origin, self.logs.get(file)) else {
                 // Without a log, marks are positions in the files, as they
                 // were before logs.
+                // Half a picture either side, as with a log, since the decoder
+                // keeps the pictures stamped inside the bounds.
+                let half = 0.5 / if self.fps == 0 { 30 } else { self.fps } as f64;
                 clips.push(ReplayClip {
                     file: file.clone(),
-                    from_s: e.start_s,
-                    to_s: e.end_s,
+                    from_s: (e.start_s - half).max(0.0),
+                    to_s: e.end_s + half,
                     times: Vec::new(),
                 });
                 continue;
@@ -280,6 +308,7 @@ impl Engine {
         });
         let mut r = self.replay.lock().unwrap();
         r.begin(cams);
+        r.fps = fps;
         r.input = Some(id);
         r.folder = Some(folder);
         if r.speed <= 0.0 {
@@ -435,7 +464,9 @@ mod tests {
         let r = ReplayState { events: vec![e], ..ReplayState::default() };
         let play = r.clip_of(0).unwrap();
         let clip = &play.clips[0];
-        assert_eq!((clip.from_s, clip.to_s, play.span_s, play.speed), (2.0, 5.0, 3.0, 0.5));
+        let half = 0.5 / FPS as f64;
+        assert_eq!((clip.from_s, clip.to_s), (2.0 - half, 5.0 + half), "half a picture either side");
+        assert_eq!((play.span_s, play.speed), (3.0, 0.5));
         assert_eq!(clip.due(30, FPS), Some(1.0), "pictures follow at the frame rate");
     }
 
@@ -446,11 +477,54 @@ mod tests {
         let hour = 3600 * FPS;
         for n in 0..hour {
             // A scheduler wakes a little late, never on the dot.
-            log.push(t0 + beat() * n + Duration::from_millis((n % 7) as u64));
+            log.push(t0 + beat() * n + Duration::from_millis((n % 4) as u64));
         }
         assert_eq!(log.breaks.len(), 1);
         let last = (hour - 1) as u64;
         assert_eq!(log.picture_at(log.taken(last).unwrap() + beat() / 2), last, "no drift over an hour");
+    }
+
+    #[test]
+    fn many_late_ticks_keep_the_log_small() {
+        let t0 = Instant::now();
+        let mut log = FrameLog::new(FPS);
+        let mut at = t0;
+        // Every tenth tick runs 0.2 s late and is repeated for the ticks it missed.
+        for n in 0..10_000u32 {
+            at += if n % 10 == 9 { beat() * 7 } else { beat() };
+            let copies = if n % 10 == 9 { 7 } else { 1 };
+            (0..copies).for_each(|_| log.push(at));
+        }
+        assert_eq!(log.count, 10_000 - 1000 + 7000);
+        assert!(log.breaks.len() <= 2000, "one entry per late tick, not per copy: {}", log.breaks.len());
+        assert_eq!(log.taken(log.count - 1), Some(at), "the last copy is on its tick");
+    }
+
+    #[test]
+    fn a_small_phase_shift_does_not_move_later_marks() {
+        let t0 = Instant::now();
+        let mut log = FrameLog::new(FPS);
+        // Tick 50 runs 6 ms late, and the beat goes on from there.
+        let at = |n: u32| t0 + beat() * n + if n >= 50 { Duration::from_millis(6) } else { Duration::ZERO };
+        (0..100).for_each(|n| log.push(at(n)));
+        for n in 50..100u32 {
+            let t = log.taken(n as u64).unwrap();
+            assert!(apart(t, at(n)) < Duration::from_micros(500), "picture {n} is {:?} off", apart(t, at(n)));
+        }
+        let before = at(60) - Duration::from_millis(1);
+        assert_eq!(log.picture_at(before), 59, "just before picture 60 is still on 59");
+        assert_eq!(log.picture_at(at(60)), 60);
+    }
+
+    #[test]
+    fn moments_without_a_log_keep_half_a_picture_either_side() {
+        let mut r = ReplayState { speed: 1.0, fps: FPS, ..ReplayState::default() };
+        r.events.push(Event { start_s: 2.0, end_s: 3.0, files: vec!["old.ts".into()], ..Event::default() });
+        let clip = &r.clip_of(0).unwrap().clips[0];
+        let half = 0.5 / FPS as f64;
+        assert!((clip.from_s - (2.0 - half)).abs() < 1e-9 && (clip.to_s - (3.0 + half)).abs() < 1e-9);
+        r.events[0].start_s = 0.0;
+        assert_eq!(r.clip_of(0).unwrap().clips[0].from_s, 0.0, "never before the file");
     }
 
     #[test]

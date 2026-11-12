@@ -510,6 +510,12 @@ fn play_clip(
     let (cw, ch) = if quad { (w / 2, h / 2) } else { (w, h) };
     let mut tiles = Vec::new();
     for clip in play.clips.iter().take(4) {
+        // Probing a file takes a while: give up if the show is closing or
+        // another moment was asked for meanwhile.
+        if rt.stopped() || rt.replay.lock().unwrap().is_some() {
+            rt.kill_children();
+            return;
+        }
         let first = match starts.get(&clip.file) {
             Some(s) => Ok(Some(*s)),
             None => first_picture_s(&clip.file),
