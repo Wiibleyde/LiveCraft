@@ -2,6 +2,7 @@
 //! recomposes only if something in it changed, so a still desk costs nothing.
 
 use crate::canvas::{Canvas, Cpu, Painter, Pic, processed};
+use crate::clock::{self, Pace};
 use crate::engine::*;
 use crate::frame::Frame;
 use crate::gpu;
@@ -692,7 +693,7 @@ impl Engine {
     pub(crate) fn video_loop(self: Arc<Self>) {
         let mut m = Mixer::default();
         let mut last = Instant::now();
-        let mut next = Instant::now();
+        let mut pace = Pace::new(clock::now(), self.state.lock().unwrap().project.fps);
         let mut tick_n: u32 = 0;
         let mut window = Instant::now();
         let (mut ticks, mut composed) = (0u32, 0u32);
@@ -709,6 +710,7 @@ impl Engine {
                 (s.plan(now, watched), notes)
             };
             let fps = plan.snap.fps;
+            pace.set_rate(fps);
             let rts: HashMap<u64, Arc<InputRt>> = self.rts.lock().unwrap().clone();
             for (id, rt) in &rts {
                 rt.showing.store(everything || plan.showing.contains(id), Ordering::Relaxed);
@@ -737,7 +739,7 @@ impl Engine {
             self.show_program_to_guests(&rts);
             let refresh_all = tick_n.is_multiple_of((fps / 6).max(1));
             self.update_routes(&mut m, &c, refresh_all);
-            self.feed_outputs(&mut m, &c, now);
+            self.feed_outputs(&mut m, &c, pace.stamp());
             if refresh_all {
                 self.update_thumbs(&mut m, &c);
             }
@@ -757,21 +759,13 @@ impl Engine {
             }
 
             self.stats.tick_times.record(now.elapsed());
-            let period = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
-            next += period;
-            let now = Instant::now();
-            if next > now {
-                thread::sleep(next - now);
-            } else {
+            // A late tick gives up the ticks it overran: encoders repeat the
+            // picture they have for those, as their sound goes on meanwhile.
+            let step = pace.advance(clock::now(), 0);
+            if step.wait.is_zero() {
                 self.stats.late_ticks.fetch_add(1, Ordering::Relaxed);
-                // Fell behind. The picture skips ticks, but a recording must
-                // stay as long as its sound, so it repeats the frame it missed.
-                // The copies keep the moment of the tick whose picture they show.
-                let missed = (now - next).as_secs_f64() / period.as_secs_f64();
-                for _ in 0..(missed as u32).min(fps) {
-                    self.feed_outputs(&mut m, &c, last);
-                }
-                next = now;
+            } else {
+                thread::sleep(step.wait);
             }
         }
     }
@@ -1009,14 +1003,15 @@ impl Engine {
         }
     }
 
-    /// `taken` is the tick's moment: replays find pictures by it.
-    fn feed_outputs(&self, m: &mut Mixer, c: &Ctx, taken: Instant) {
+    /// `at` is the time on the shared clock this tick stands for: encoders
+    /// place the picture by it, and replays find pictures by it.
+    fn feed_outputs(&self, m: &mut Mixer, c: &Ctx, at: u64) {
         let out = self.program.lock().unwrap().clone();
         for enc in self.recorders.lock().unwrap().iter() {
-            enc.push_video(out.clone(), taken);
+            enc.push_video(out.clone(), at);
         }
         for enc in self.streamers.lock().unwrap().iter() {
-            enc.push_video(out.clone(), taken);
+            enc.push_video(out.clone(), at);
         }
         for net in self.net.lock().unwrap().iter() {
             net.push_video(out.clone());
@@ -1024,7 +1019,7 @@ impl Engine {
         drop(out);
         for (id, enc) in self.multi.lock().unwrap().iter() {
             if let Some(f) = m.picture(*id, c, 0) {
-                enc.push_video(f, taken);
+                enc.push_video(f, at);
             }
         }
         let srt: Vec<Route> = self.srt.lock().unwrap().iter().map(|(r, _)| *r).collect();
@@ -1032,7 +1027,7 @@ impl Engine {
             if let Some(f) = self.route_frame(route, m, c)
                 && let Some((_, enc)) = self.srt.lock().unwrap().get(n)
             {
-                enc.push_video(f, taken);
+                enc.push_video(f, at);
             }
         }
         let cams: Vec<u64> = self.replay.lock().unwrap().cams.iter().map(|c| c.input).collect();
@@ -1040,7 +1035,7 @@ impl Engine {
             if let Some(f) = m.picture(id, c, 0)
                 && let Some(cam) = self.replay.lock().unwrap().cams.get(n)
             {
-                cam.encoder.push_video(f, taken);
+                cam.encoder.push_video(f, at);
             }
         }
     }

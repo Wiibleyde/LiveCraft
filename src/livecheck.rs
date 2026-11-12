@@ -355,7 +355,7 @@ fn judge_pictures(frames: &[u8], w: usize, h: usize) -> Result<String, String> {
 }
 
 /// The tone must be there, loud enough and mostly alone.
-fn judge_tone(samples: &[f32], rate: usize) -> Result<String, String> {
+pub(crate) fn judge_tone(samples: &[f32], rate: usize) -> Result<String, String> {
     // The first half second may still hold what the encoder started with.
     let samples = samples.get(rate / 2..).unwrap_or_default();
     if samples.len() < rate {
