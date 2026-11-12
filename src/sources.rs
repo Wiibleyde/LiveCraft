@@ -17,7 +17,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const AUDIO_RATE: usize = 48_000;
-pub(crate) const FFMPEG_MISSING: &str = "ffmpeg est introuvable : installez-le pour cette source";
+pub(crate) fn ffmpeg_missing() -> &'static str {
+    t!("sources.ffmpeg_missing")
+}
 
 /// Bounded queue of interleaved stereo samples.
 pub struct Ring {
@@ -268,7 +270,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             Ok(f) => {
                 rt.publish(f);
             }
-            Err(e) => rt.set_status(format!("Image illisible : {e}")),
+            Err(e) => rt.set_status(t!("sources.unreadable_image", error = e)),
         },
         Kind::Photos { folder, seconds } => run_photos(&rt, &folder, seconds, w, h),
         Kind::Title { text, sub, style, color, accent, ticker_speed, countdown_ms, font, size, .. } => {
@@ -292,7 +294,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
         Kind::ImageSequence { first, fps: seq_fps, looped } => {
             match playback::Spec::sequence(&first, seq_fps, looped) {
                 Some(spec) => playback::run_file(&rt, spec, w, h, fps),
-                None => rt.set_status("Le nom du fichier doit finir par un numéro"),
+                None => rt.set_status(t!("sources.sequence_needs_number")),
             }
         }
         Kind::AudioFile { path, looped } => playback::run_audio_file(&rt, &path, looped),
@@ -316,9 +318,11 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             Ok(args) => run_capture(&rt, args, w, h, fps),
             Err(why) => rt.set_status(why),
         },
-        Kind::Microphone { device } => {
-            run_audio_capture(&rt, || crate::platform::microphone_input(&device), "Micro perdu")
-        }
+        Kind::Microphone { device } => run_audio_capture(
+            &rt,
+            || crate::platform::microphone_input(&device),
+            |why| t!("sources.mic_lost", reason = why),
+        ),
         Kind::Replay => playback::run_replay(&rt, w, h, fps),
         Kind::Browser { url, alpha } => crate::browser::run_browser(&rt, &url, alpha, w, h, fps),
         Kind::Telestrator { .. } => run_telestrator(&rt, w, h),
@@ -350,7 +354,7 @@ fn run_tone(rt: &InputRt) {
 /// the system offers one, else from the default output device.
 fn run_system_audio(rt: &Arc<InputRt>) {
     if let Some(args) = crate::platform::system_audio_input() {
-        return run_audio_capture(rt, || args.clone(), "Audio système perdu");
+        return run_audio_capture(rt, || args.clone(), |why| t!("sources.system_audio_lost", reason = why));
     }
     let opened = cpal::default_host().default_output_device().and_then(|device| {
         let config: cpal::StreamConfig = device.default_output_config().ok()?.into();
@@ -381,7 +385,7 @@ fn run_system_audio(rt: &Arc<InputRt>) {
         Some(stream)
     });
     if opened.is_none() {
-        rt.set_status("Audio système indisponible");
+        rt.set_status(t!("sources.system_audio_unavailable"));
     }
     while !rt.stopped() {
         thread::sleep(Duration::from_millis(100));
@@ -478,7 +482,7 @@ fn run_photos(rt: &InputRt, folder: &str, seconds: f32, w: usize, h: usize) {
     });
     files.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
     if files.is_empty() {
-        rt.set_status("Aucune photo dans ce dossier");
+        rt.set_status(t!("sources.no_photos"));
         return;
     }
     rt.items.store(files.len() as u64, Ordering::Relaxed);
@@ -502,7 +506,7 @@ fn run_photos(rt: &InputRt, folder: &str, seconds: f32, w: usize, h: usize) {
                 Ok(f) => {
                     rt.publish(f);
                 }
-                Err(e) => rt.set_status(format!("Photo illisible : {e}")),
+                Err(e) => rt.set_status(t!("sources.unreadable_photo", error = e)),
             }
         }
         thread::sleep(Duration::from_millis(50));
@@ -649,7 +653,7 @@ fn run_capture(rt: &Arc<InputRt>, input_args: Vec<String>, w: usize, h: usize, f
         let mut child = match spawned {
             Ok(c) => c,
             Err(_) => {
-                rt.set_status(FFMPEG_MISSING);
+                rt.set_status(ffmpeg_missing());
                 return;
             }
         };
@@ -690,14 +694,14 @@ fn run_capture(rt: &Arc<InputRt>, input_args: Vec<String>, w: usize, h: usize, f
             return;
         }
         let why = log.lock().unwrap().clone();
-        rt.set_status(format!("Source perdue, nouvel essai… {why}"));
+        rt.set_status(t!("sources.source_lost", reason = why));
         thread::sleep(Duration::from_secs(2));
     }
 }
 
 /// Sound from a device through ffmpeg, started again when it is lost. The
 /// arguments are asked for at each start, as the device may have moved.
-fn run_audio_capture(rt: &Arc<InputRt>, input: impl Fn() -> Vec<String>, lost: &str) {
+fn run_audio_capture(rt: &Arc<InputRt>, input: impl Fn() -> Vec<String>, lost: impl Fn(String) -> String) {
     while !rt.stopped() {
         let spawned = ffmpeg()
             .args(input())
@@ -709,7 +713,7 @@ fn run_audio_capture(rt: &Arc<InputRt>, input: impl Fn() -> Vec<String>, lost: &
         let mut child = match spawned {
             Ok(c) => c,
             Err(_) => {
-                rt.set_status(FFMPEG_MISSING);
+                rt.set_status(ffmpeg_missing());
                 return;
             }
         };
@@ -721,7 +725,7 @@ fn run_audio_capture(rt: &Arc<InputRt>, input: impl Fn() -> Vec<String>, lost: &
         if rt.stopped() {
             return;
         }
-        rt.set_status(format!("{lost}, nouvel essai… {}", log.lock().unwrap()));
+        rt.set_status(lost(log.lock().unwrap().to_string()));
         thread::sleep(Duration::from_secs(2));
     }
 }

@@ -67,18 +67,18 @@ impl App {
         let btn_h = ((ui.available_height() - fixed) / 7.0 - 5.0).clamp(20.0, 30.0);
         ui.spacing_mut().item_spacing = vec2(3.0, 5.0);
         ui.add_space(2.0);
-        let quick = column_button(ui, "Passer au direct", width, btn_h, false);
-        if quick.on_hover_text("Envoie l'aperçu à la sortie avec la transition rapide").clicked() {
+        let quick = column_button(ui, t!("switcher.go_live"), width, btn_h, false);
+        if quick.on_hover_text(t!("switcher.go_live_tip")).clicked() {
             self.with(State::quick_play_preview);
         }
-        if column_button(ui, "Coupe", width, btn_h, false).clicked() {
+        if column_button(ui, t!("switcher.cut"), width, btn_h, false).clicked() {
             self.with(State::cut);
         }
         for slot in 0..4 {
             self.transition_button(ui, project, slot, width, btn_h);
         }
         let ftb = self.with(|s| s.ftb);
-        if column_button(ui, "Fondu au noir", width, btn_h, ftb).clicked() {
+        if column_button(ui, t!("switcher.fade_to_black"), width, btn_h, ftb).clicked() {
             self.with(|s| s.ftb = !s.ftb);
         }
         // Overlay channels: 1 to 8, on with the input in Preview, or off.
@@ -94,7 +94,7 @@ impl App {
         let mut t = self.with(|s| s.tbar);
         ui.spacing_mut().slider_width = width - 6.0;
         let bar = egui::Slider::new(&mut t, 0.0..=1.0).show_value(false);
-        let r = ui.add(bar).on_hover_text("Transition à la main, avec l'effet du premier bouton");
+        let r = ui.add(bar).on_hover_text(t!("switcher.tbar_tip"));
         if r.drag_stopped() && t >= 0.98 {
             self.with(|s| s.set_tbar(1.0));
         } else if r.changed() {
@@ -152,10 +152,10 @@ impl App {
             id.and_then(|id| project.inputs.iter().find(|i| i.id == id)).map(|i| i.name.clone())
         };
         let shown = name(project.overlays[slot])
-            .or_else(|| name(project.overlay_last[slot]).map(|n| format!("Dernière : {n}")))
-            .unwrap_or_else(|| "Prendra l'entrée en aperçu".to_string());
+            .or_else(|| name(project.overlay_last[slot]).map(|n| t!("switcher.overlay_last", name = n)))
+            .unwrap_or_else(|| t!("switcher.overlay_takes_preview").to_string());
         let r = ui.add(b).on_hover_text(shown);
-        let r = named(r, format!("Canal {}", slot + 1));
+        let r = named(r, t!("switcher.channel", n = slot + 1));
         if r.clicked() {
             self.with(|s| s.overlay_button(slot));
         }
@@ -164,7 +164,7 @@ impl App {
     /// The panel of two clocks below the T-bar.
     fn production_clocks(&mut self, ui: &mut egui::Ui, project: &Project, width: f32) {
         let (rect, resp) = ui.allocate_exact_size(vec2(width - 6.0, 62.0), Sense::click());
-        if resp.on_hover_text("Double-clic : réglages des horloges").double_clicked() {
+        if resp.on_hover_text(t!("switcher.clocks_tip")).double_clicked() {
             self.clocks_open = true;
         }
         let half = rect.height() / 2.0;

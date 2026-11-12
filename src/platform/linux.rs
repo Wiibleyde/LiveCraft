@@ -105,10 +105,8 @@ pub fn system_audio_input() -> Option<Vec<String>> {
 /// Every screen of the X display at once. Under Wayland this goes through
 /// XWayland, which only sees windows of X programs.
 pub fn screen_input(fps: u32) -> Result<Vec<String>, String> {
-    let display = std::env::var("DISPLAY")
-        .ok()
-        .filter(|d| !d.is_empty())
-        .ok_or("La capture d'écran demande une session X11 ou XWayland")?;
+    let display =
+        std::env::var("DISPLAY").ok().filter(|d| !d.is_empty()).ok_or_else(|| t!("platform.x11_needed"))?;
     Ok(["-f", "x11grab", "-framerate", &fps.to_string(), "-draw_mouse", "1", "-i", &display]
         .map(String::from)
         .to_vec())

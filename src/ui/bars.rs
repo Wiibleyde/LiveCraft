@@ -11,28 +11,28 @@ impl App {
             let shown = match (&self.current_file, &self.imported) {
                 (Some(f), _) => file_name(std::path::Path::new(f)),
                 (None, Some(name)) => name.clone(),
-                _ => "Préréglage".to_string(),
+                _ => t!("bars.preset").to_string(),
             };
             ui.label(RichText::new(shown).strong().color(TEXT));
             ui.add_space(8.0);
-            if ui.add_enabled_ui(!locked, |ui| bar_button(ui, "Nouveau", false)).inner.clicked() {
+            if ui.add_enabled_ui(!locked, |ui| bar_button(ui, t!("bars.new"), false)).inner.clicked() {
                 self.confirm_new = true;
             }
             let open = ui.add_enabled_ui(!locked, |ui| {
-                let b = egui::Button::new(RichText::new("Ouvrir").size(12.0).color(TEXT))
+                let b = egui::Button::new(RichText::new(t!("bars.open")).size(12.0).color(TEXT))
                     .fill(BTN)
                     .min_size(vec2(0.0, 22.0));
                 egui::containers::menu::MenuButton::from_button(b).ui(ui, |ui| {
                     ui.set_min_width(180.0);
-                    if ui.button("Ouvrir…").clicked() {
+                    if ui.button(t!("bars.open_ellipsis")).clicked() {
                         self.open_project(false);
                         ui.close();
                     }
-                    if ui.button("Ajouter les entrées d'un projet…").clicked() {
+                    if ui.button(t!("bars.append_project")).clicked() {
                         self.open_project(true);
                         ui.close();
                     }
-                    if ui.button("Ouvrir le projet d'exemple").clicked() {
+                    if ui.button(t!("bars.open_sample")).clicked() {
                         self.engine.load_project(Project::sample());
                         self.after_load(None, None);
                         ui.close();
@@ -40,19 +40,19 @@ impl App {
                 });
             });
             drop(open);
-            if bar_button(ui, "Enregistrer", false).clicked() {
+            if bar_button(ui, t!("bars.save"), false).clicked() {
                 self.save_project(false);
             }
-            if bar_button(ui, "Enregistrer sous", false).clicked() {
+            if bar_button(ui, t!("bars.save_as"), false).clicked() {
                 self.save_project(true);
             }
-            if ui.add_enabled_ui(!locked, |ui| bar_button(ui, "Dernier", false)).inner.clicked() {
+            if ui.add_enabled_ui(!locked, |ui| bar_button(ui, t!("bars.last"), false)).inner.clicked() {
                 self.open_last();
             }
             let undo = self.with(|s| s.undo.as_ref().map(|c| c.input.name.clone()));
             if let Some(name) = undo {
-                let b = bar_button(ui, "Annuler", false);
-                if b.on_hover_text(format!("Rouvrir « {name} »")).clicked() {
+                let b = bar_button(ui, t!("bars.undo"), false);
+                if b.on_hover_text(t!("bars.undo_tip", name = name)).clicked() {
                     self.engine.undo();
                 }
             }
@@ -61,16 +61,16 @@ impl App {
                 if bar_button(ui, "?", self.help_open).clicked() {
                     self.help_open = !self.help_open;
                 }
-                if bar_button(ui, "Réglages", self.settings_open).clicked() {
+                if bar_button(ui, t!("bars.settings"), self.settings_open).clicked() {
                     self.settings_open = !self.settings_open;
                 }
-                let label = if self.basic { "Avancé" } else { "Simple" };
-                let tip = "Masque ou montre les boutons des entrées et le mixeur";
+                let label = if self.basic { t!("bars.advanced") } else { t!("bars.simple") };
+                let tip = t!("bars.simple_tip");
                 if bar_button(ui, label, false).on_hover_text(tip).clicked() {
                     self.basic = !self.basic;
                 }
                 let paused = self.with(|s| s.inputs_paused);
-                if bar_button(ui, "Pause entrées", paused).clicked() {
+                if bar_button(ui, t!("bars.pause_inputs"), paused).clicked() {
                     self.engine.set_inputs_paused(!paused);
                 }
             });
@@ -82,7 +82,7 @@ impl App {
             .layout(egui::Layout::left_to_right(egui::Align::Center));
         let mut mid = ui.new_child(builder);
         mid.spacing_mut().item_spacing.x = 1.0;
-        if bar_button(&mut mid, "Plein écran", self.windows_on[0]).clicked() {
+        if bar_button(&mut mid, t!("bars.fullscreen"), self.windows_on[0]).clicked() {
             self.windows_on[0] = !self.windows_on[0];
             self.screens = crate::platform::list_screens();
         }
@@ -101,10 +101,10 @@ impl App {
     }
 
     pub(super) fn route_list(&self, ui: &mut egui::Ui, route: &mut Route, project: &Project) {
-        ui.selectable_value(route, Route::Output, "Sortie");
-        ui.selectable_value(route, Route::Preview, "Aperçu");
+        ui.selectable_value(route, Route::Output, t!("bars.route_output"));
+        ui.selectable_value(route, Route::Preview, t!("bars.route_preview"));
         ui.selectable_value(route, Route::MultiView, "MultiView");
-        ui.selectable_value(route, Route::MultiView2, "MultiView 2 (entrées)");
+        ui.selectable_value(route, Route::MultiView2, t!("bars.route_multiview2"));
         ui.separator();
         for i in project.inputs.iter().filter(|i| i.kind.has_picture()) {
             ui.selectable_value(route, Route::Input(i.id), &i.name);
@@ -112,14 +112,15 @@ impl App {
     }
 
     fn open_project(&mut self, append: bool) {
-        let picked =
-            rfd::FileDialog::new().add_filter("Projets", &["livecraft", "regie", "vmix"]).pick_file();
+        let picked = rfd::FileDialog::new()
+            .add_filter(t!("bars.projects_filter"), &["livecraft", "regie", "vmix"])
+            .pick_file();
         let Some(path) = picked else { return };
         let path = path.to_string_lossy().into_owned();
         if append {
             match read_any(&path) {
                 Ok(p) => self.engine.append_project(p),
-                Err(e) => self.say(format!("Projet illisible : {e}")),
+                Err(e) => self.say(t!("bars.unreadable_project", error = e)),
             }
         } else {
             self.open_path(path);
@@ -137,7 +138,7 @@ impl App {
                 self.saved.last_file = Some(path.clone());
                 self.after_load(Some(path), None);
             }
-            Err(e) => self.say(format!("Projet illisible : {e}")),
+            Err(e) => self.say(t!("bars.unreadable_project", error = e)),
         }
     }
 
@@ -176,7 +177,7 @@ impl App {
     fn open_last(&mut self) {
         match self.saved.last_file.clone() {
             Some(p) => self.open_path(p),
-            None => self.say("Aucun projet récent"),
+            None => self.say(t!("bars.no_recent")),
         }
     }
 
@@ -184,7 +185,7 @@ impl App {
         let target = match (&self.current_file, ask) {
             (Some(p), false) => Some(p.clone()),
             _ => rfd::FileDialog::new()
-                .add_filter("Projet LiveCraft", &["livecraft"])
+                .add_filter(t!("bars.project_filter"), &["livecraft"])
                 .set_file_name("production.livecraft")
                 .save_file()
                 .map(|p| p.to_string_lossy().into_owned()),
@@ -198,9 +199,9 @@ impl App {
             Ok(()) => {
                 self.saved.last_file = Some(path.clone());
                 self.current_file = Some(path);
-                self.say("Projet enregistré");
+                self.say(t!("bars.project_saved"));
             }
-            Err(e) => self.say(format!("Échec de l'enregistrement : {e}")),
+            Err(e) => self.say(t!("bars.save_failed", error = e)),
         }
     }
 
@@ -222,40 +223,40 @@ impl App {
                 }
                 None => name.to_string(),
             };
-            let (g, m) = gear_button(ui, &timed("Enregistrer", rec), recording);
+            let (g, m) = gear_button(ui, &timed(t!("bars.record"), rec), recording);
             if g {
                 self.open_settings(3);
             }
             if m {
                 if recording {
                     if locked {
-                        self.say("Verrouillé : ouvrez le cadenas pour arrêter");
+                        self.say(t!("bars.locked_stop"));
                     } else {
                         self.engine.stop_recording();
-                        self.say("Enregistrement terminé");
+                        self.say(t!("bars.recording_done"));
                     }
                 } else {
                     match self.engine.start_recording(&self.saved.record_dir.clone()) {
-                        Ok(p) => self.say(format!("Enregistrement vers {p}")),
+                        Ok(p) => self.say(t!("bars.recording_to", path = p)),
                         Err(e) => self.say(e),
                     }
                 }
             }
-            let (g, m) = gear_button(ui, "Externe", self.windows_on[2]);
+            let (g, m) = gear_button(ui, t!("bars.external"), self.windows_on[2]);
             if g {
                 self.open_settings(2);
             }
             if m {
                 self.windows_on[2] = !self.windows_on[2];
             }
-            let (g, m) = gear_button(ui, &timed("Diffuser", stream), streaming);
+            let (g, m) = gear_button(ui, &timed(t!("bars.stream"), stream), streaming);
             if g {
                 self.open_settings(4);
             }
             if m {
                 if streaming {
                     if locked {
-                        self.say("Verrouillé : ouvrez le cadenas pour arrêter");
+                        self.say(t!("bars.locked_stop"));
                     } else {
                         self.engine.stop_streaming();
                     }
@@ -264,22 +265,22 @@ impl App {
                     self.say(e);
                 }
             }
-            let (g, m) = gear_button(ui, "Multi-enregistrement", multi);
+            let (g, m) = gear_button(ui, t!("bars.multi_record"), multi);
             self.multi_open |= g;
             if m {
                 if multi {
                     if locked {
-                        self.say("Verrouillé : ouvrez le cadenas pour arrêter");
+                        self.say(t!("bars.locked_stop"));
                     } else {
                         self.engine.stop_multi();
-                        self.say("Multi-enregistrement terminé");
+                        self.say(t!("bars.multi_record_done"));
                     }
                 } else {
                     self.multi_open = true;
                 }
             }
             let playlist_on = self.with(|s| s.playlist_on);
-            let (g, m) = gear_button(ui, "Playlist", playlist_on);
+            let (g, m) = gear_button(ui, t!("bars.playlist"), playlist_on);
             self.playlist_open |= g;
             if m {
                 let name = if playlist_on { "StopPlayList" } else { "StartPlayList" };
@@ -288,18 +289,19 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let locked_icon = Icon::Lock(locked);
-                let lock = named(icon_button(ui, locked_icon, None), "Cadenas");
-                let lock = lock.on_hover_text("Cadenas : protège les boutons sensibles");
+                let lock = named(icon_button(ui, locked_icon, None), t!("bars.padlock"));
+                let lock = lock.on_hover_text(t!("bars.padlock_tip"));
                 if lock.clicked() {
                     self.with(|s| s.padlock = !s.padlock);
                 }
-                if icon_button(ui, Icon::Camera, None).on_hover_text("Instantané de la sortie").clicked() {
+                let snapshot = icon_button(ui, Icon::Camera, None).on_hover_text(t!("bars.snapshot_tip"));
+                if snapshot.clicked() {
                     self.take_snapshot(None);
                 }
-                if named(icon_button(ui, Icon::Stats, None), "Statistiques").clicked() {
+                if named(icon_button(ui, Icon::Stats, None), t!("bars.statistics")).clicked() {
                     self.stats_open = !self.stats_open;
                 }
-                if bar_button(ui, "Incrustations", self.overlays_open).clicked() {
+                if bar_button(ui, t!("bars.overlays"), self.overlays_open).clicked() {
                     self.overlays_open = !self.overlays_open;
                 }
             });
@@ -329,22 +331,22 @@ impl App {
             let total = st.cpu_total.load(Ordering::Relaxed);
             let mode = Color32::from_rgb(90, 200, 90);
             let name = match (w, h) {
-                (1080, 1920) => format!("Vertical {fps}"),
+                (1080, 1920) => t!("bars.format_vertical", fps = fps),
                 (3840, 2160) => format!("UHD {fps}"),
                 (4096, 2160) => format!("4K {fps}"),
                 _ => format!("{h}p{fps}"),
             };
             ui.label(RichText::new(name).size(11.0).color(mode));
             let line = if ticks == 0 {
-                "  Démarrage…".to_string()
+                format!("  {}", t!("bars.starting"))
             } else {
-                format!(
-                    "  i/s : {ticks}   Rendu : {render:.1} ms   Processeur LiveCraft : {me} %   Total : {total} %"
-                )
+                let render = format!("{render:.1}");
+                let line = t!("bars.stats_line", ticks = ticks, render = render, me = me, total = total);
+                format!("  {line}")
             };
             ui.label(RichText::new(line).size(11.0).color(DIM));
             if st.struggling.load(Ordering::Relaxed) {
-                ui.label(RichText::new("  Machine chargée").size(11.0).color(ORANGE));
+                ui.label(RichText::new(format!("  {}", t!("bars.machine_busy"))).size(11.0).color(ORANGE));
             }
             if let Some((msg, at)) = &self.message
                 && at.elapsed() < Duration::from_secs(12)
@@ -362,7 +364,7 @@ impl App {
             Some(id) => self.engine.rt(id).and_then(|r| r.latest()),
         };
         let Some(frame) = frame else {
-            self.say("Rien à capturer");
+            self.say(t!("bars.nothing_to_capture"));
             return;
         };
         let dir = user_dir(crate::platform::pictures_dir());
@@ -376,8 +378,8 @@ impl App {
         let Some(path) = picked else { return };
         let path = path.to_string_lossy().into_owned();
         match self.engine.snapshot_to(&path, &frame) {
-            Ok(()) => self.say(format!("Image enregistrée : {path}")),
-            Err(e) => self.say(format!("Échec de l'instantané : {e}")),
+            Ok(()) => self.say(t!("bars.image_saved", path = path)),
+            Err(e) => self.say(t!("bars.snapshot_failed", error = e)),
         }
     }
 }

@@ -73,7 +73,7 @@ pub fn system_audio_input() -> Option<Vec<String>> {
 /// The main screen, which macOS lists first.
 pub fn screen_input(fps: u32) -> Result<Vec<String>, String> {
     let screen = devices().0.into_iter().find(|(_, n)| is_screen(n));
-    let (number, _) = screen.ok_or("Aucun écran à capturer : autorisez l'enregistrement de l'écran")?;
+    let (number, _) = screen.ok_or_else(|| t!("platform.no_screen_access"))?;
     let input = format!("{number}:none");
     let rate = fps.to_string();
     Ok(["-f", "avfoundation", "-capture_cursor", "1", "-framerate", &rate, "-i", &input]

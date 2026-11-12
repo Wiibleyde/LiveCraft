@@ -32,6 +32,7 @@ so a slow window cannot hold up the show.
 | `secret.rs` | Sealing secrets in the session file |
 | `platform.rs`, `platform/` | What differs between Windows, Linux and macOS: capture devices, ending child processes, screens, browser, folders, the key that seals secrets |
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
+| `i18n.rs`, `locales/` | Interface text: `t!("key")` reads it from one catalog per language |
 | `selftest.rs`, `playtest.rs` | `--selftest`: real end-to-end checks |
 
 ## Doing less

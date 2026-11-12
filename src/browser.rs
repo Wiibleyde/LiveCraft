@@ -163,13 +163,13 @@ fn frame_from(data: &str, w: usize, h: usize) -> Option<Frame> {
 
 pub fn run_browser(rt: &Arc<InputRt>, url: &str, alpha: bool, w: usize, h: usize, fps: u32) {
     let Some(exe) = crate::platform::find_browser() else {
-        rt.set_status("Chrome, Chromium ou Edge est nécessaire pour les pages web");
+        rt.set_status(t!("browser.needs_edge_or_chrome"));
         return;
     };
     clear_old_profiles();
     while !rt.stopped() {
         let Some(port) = join_host(&exe) else {
-            rt.set_status("Impossible de lancer le navigateur");
+            rt.set_status(t!("browser.cannot_launch"));
             return;
         };
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -189,7 +189,7 @@ pub fn run_browser(rt: &Arc<InputRt>, url: &str, alpha: bool, w: usize, h: usize
             return;
         }
         if rt.status().is_none() {
-            rt.set_status("Page web perdue, nouvel essai…");
+            rt.set_status(t!("browser.page_lost_retrying"));
         }
         thread::sleep(Duration::from_secs(2));
     }
@@ -243,7 +243,7 @@ fn stream_page(rt: &InputRt, address: &str, url: &str, alpha: bool, size: (usize
     let mut ws = match tungstenite::connect(address) {
         Ok((ws, _)) => ws,
         Err(e) => {
-            rt.set_status(format!("Connexion au navigateur impossible : {e}"));
+            rt.set_status(t!("browser.cannot_connect", error = e));
             return;
         }
     };
@@ -264,7 +264,7 @@ fn stream_page(rt: &InputRt, address: &str, url: &str, alpha: bool, size: (usize
     ok &= send(&mut ws, 5, "Page.startScreencast", cast);
     ok &= send(&mut ws, 6, "Page.navigate", json!({"url": url}));
     if !ok {
-        rt.set_status("Commande refusée par le navigateur");
+        rt.set_status(t!("browser.command_refused"));
         return;
     }
     // A page that stops changing sends nothing, so ask for a picture now and
@@ -307,7 +307,7 @@ fn stream_page(rt: &InputRt, address: &str, url: &str, alpha: bool, size: (usize
             Err(tungstenite::Error::Io(e))
                 if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(e) => {
-                rt.set_status(format!("Page web perdue : {e}"));
+                rt.set_status(t!("browser.page_lost", error = e));
                 return;
             }
         }

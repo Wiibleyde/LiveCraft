@@ -232,7 +232,7 @@ fn effects(input: Node, notes: &mut Vec<String>, title: &str) -> Vec<Effect> {
             Some("LUT") => EffectKind::Lut,
             Some("Multi Effect") | None => continue,
             Some(other) => {
-                notes.push(format!("{title} : effet « {other} » non repris"));
+                notes.push(t!("import.effect_skipped", title = title, effect = other));
                 continue;
             }
         };
@@ -246,7 +246,7 @@ fn effects(input: Node, notes: &mut Vec<String>, title: &str) -> Vec<Effect> {
         let embedded = e.descendants().find(|n| n.has_tag_name("dataValue")).and_then(|n| n.text());
         let path = lut_file(original, embedded);
         if kind == EffectKind::Lut && path.is_empty() {
-            notes.push(format!("{title} : LUT intégrée non reprise"));
+            notes.push(t!("import.embedded_lut_skipped", title = title));
             continue;
         }
         let mut crop = [0.0; 4];
@@ -351,7 +351,7 @@ fn kind_of(n: Node, title: &str, r: &mut Report) -> Kind {
         },
         "1" => Kind::Image { path: text },
         "6" => {
-            r.notes.push(format!("{title} : capture de tout l'écran, pas d'une seule fenêtre"));
+            r.notes.push(t!("import.whole_screen", title = title));
             Kind::Screen
         }
         "7" => {
@@ -382,7 +382,7 @@ fn kind_of(n: Node, title: &str, r: &mut Report) -> Kind {
             } else {
                 TitleStyle::LowerThird
             };
-            r.notes.push(format!("{title} : titre refait, sans le modèle graphique d'origine"));
+            r.notes.push(t!("import.title_rebuilt", title = title));
             Kind::Title {
                 text: t.texts.first().cloned().unwrap_or_default(),
                 sub: t.texts.get(1).cloned().unwrap_or_default(),
@@ -398,7 +398,7 @@ fn kind_of(n: Node, title: &str, r: &mut Report) -> Kind {
             }
         }
         other => {
-            r.placeholders.push(format!("{title} (type {other})"));
+            r.placeholders.push(t!("import.unknown_type", title = title, kind = other));
             Kind::Scene
         }
     }
@@ -463,10 +463,10 @@ fn clocks(root: Node, p: &mut Project) {
 }
 
 pub fn parse(xml: &str) -> Result<(Project, Report), String> {
-    let doc = Document::parse(xml).map_err(|_| "Ce fichier n'est pas un projet lisible".to_string())?;
+    let doc = Document::parse(xml).map_err(|_| t!("import.unreadable").to_string())?;
     let root = doc.root_element();
     if !root.has_tag_name("XML") {
-        return Err("Ce fichier n'est pas un projet vMix".into());
+        return Err(t!("import.not_vmix").into());
     }
     let nodes: Vec<Node> = root.children().filter(|n| n.has_tag_name("Input")).collect();
     let mut r = Report { inputs: nodes.len(), ..Report::default() };
@@ -484,7 +484,7 @@ pub fn parse(xml: &str) -> Result<(Project, Report), String> {
             .attribute("Title")
             .filter(|t| !t.is_empty())
             .or(node.attribute("OriginalTitle"))
-            .unwrap_or("Entrée")
+            .unwrap_or(t!("import.default_input_name"))
             .to_string();
         let kind = kind_of(*node, &title, &mut r);
         if let Kind::Video { path, .. } | Kind::Image { path } = &kind
@@ -535,7 +535,7 @@ pub fn parse(xml: &str) -> Result<(Project, Report), String> {
             }
         }
         if node.attribute("Triggers").is_some_and(|t| t.contains("<InputTrigger>")) {
-            r.notes.push(format!("{title} : déclencheurs non repris"));
+            r.notes.push(t!("import.triggers_skipped", title = title));
         }
         p.inputs.push(input);
     }
@@ -556,7 +556,7 @@ pub fn parse(xml: &str) -> Result<(Project, Report), String> {
             p.records[0].folder = dir.to_string_lossy().into_owned();
         }
     }
-    r.notes.push("Destinations de diffusion non reprises : à saisir dans les réglages".into());
+    r.notes.push(t!("import.stream_destinations_skipped").into());
     Ok((p, r))
 }
 
