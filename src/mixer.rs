@@ -587,6 +587,7 @@ impl Engine {
                 m.forget_closed(&plan.snap);
             }
 
+            self.stats.tick_times.record(now.elapsed());
             // A late tick gives up the ticks it overran: encoders repeat the
             // picture they have for those, as their sound goes on meanwhile.
             let step = pace.advance(clock::now(), 0);

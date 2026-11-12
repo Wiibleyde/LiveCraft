@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 /// What an ffmpeg built without the card's accelerator is asked for.
 const MISSING_CARD: Hardware = &["-hwaccel", "absent"];
 
-fn make(args: &[&str], out: &str) -> Result<String, String> {
+pub(crate) fn make(args: &[&str], out: &str) -> Result<String, String> {
     let done = ffmpeg()
         .arg("-y")
         .args(args)
@@ -120,7 +120,7 @@ pub(crate) const RED: [u8; 3] = [255, 0, 0];
 pub(crate) const GREEN: [u8; 3] = [0, 255, 0];
 pub(crate) const BLUE: [u8; 3] = [0, 0, 255];
 
-fn until(seconds: f32, what: &str, mut done: impl FnMut() -> bool) -> Result<(), String> {
+pub(crate) fn until(seconds: f32, what: &str, mut done: impl FnMut() -> bool) -> Result<(), String> {
     let end = Instant::now() + Duration::from_secs_f32(seconds);
     while !done() {
         if Instant::now() > end {

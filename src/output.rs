@@ -53,6 +53,10 @@ pub struct Encoder {
     pub pick: AudioPick,
     pub dropped: AtomicU64,
     pub sent: AtomicU64,
+    /// Sound per channel, in samples, taken in and refused for lack of room:
+    /// set against `sent`, they show picture and sound drifting apart.
+    pub audio_sent: AtomicU64,
+    pub audio_dropped: AtomicU64,
     /// Pictures written again for periods no new one arrived in time for.
     pub repeated: Arc<AtomicU64>,
     /// Pictures of a stream cut after a long stall, with as much sound.
@@ -385,6 +389,8 @@ impl Encoder {
             pick: s.audio,
             dropped: AtomicU64::new(0),
             sent: AtomicU64::new(0),
+            audio_sent: AtomicU64::new(0),
+            audio_dropped: AtomicU64::new(0),
             repeated,
             cut,
             padded: Arc::new(Mutex::new(None)),
@@ -425,7 +431,9 @@ impl Encoder {
     /// `at` is the time on the shared clock of the block's first frame.
     pub fn push_audio(&self, s: Vec<i16>, at: u64) {
         if let Some(tx) = &self.audio {
-            let _ = tx.try_send((at, s));
+            let samples = (s.len() / (self.pick.count.max(1) as usize * 2)) as u64;
+            let counter = if tx.try_send((at, s)).is_ok() { &self.audio_sent } else { &self.audio_dropped };
+            counter.fetch_add(samples, Ordering::Relaxed);
         }
     }
 
@@ -567,6 +575,8 @@ mod tests {
             pick: AudioPick::MASTER,
             dropped: AtomicU64::new(0),
             sent: AtomicU64::new(0),
+            audio_sent: AtomicU64::new(0),
+            audio_dropped: AtomicU64::new(0),
             repeated: Arc::default(),
             cut: Arc::default(),
             padded: Arc::default(),
