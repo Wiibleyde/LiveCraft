@@ -93,6 +93,9 @@ impl App {
                 d.scripts = p.scripts;
                 d.data_sources = p.data_sources;
             });
+            if p.hardware_decoding != project.hardware_decoding {
+                self.engine.set_hardware_decoding(p.hardware_decoding);
+            }
         }
     }
 
@@ -413,6 +416,9 @@ fn tab_options(ui: &mut egui::Ui, p: &mut Project) {
     });
     ui.separator();
     ui.checkbox(&mut p.show_clocks, t!("settings.production_clocks"));
+    ui.separator();
+    ui.checkbox(&mut p.hardware_decoding, t!("settings.hardware_decoding"))
+        .on_hover_text(t!("settings.hardware_decoding_hint"));
 }
 
 fn tab_shortcuts(ui: &mut egui::Ui, p: &mut Project) {

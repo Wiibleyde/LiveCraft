@@ -11,6 +11,7 @@ mod call;
 mod calltest;
 mod canvas;
 mod clap;
+mod decode;
 mod desk;
 mod dsp;
 mod dvd;

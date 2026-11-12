@@ -1,18 +1,23 @@
 //! Second half of `--selftest`: everything with a timeline, on real files
 //! decoded by real ffmpeg. Each step states what a person would expect.
 
+use crate::decode::Hardware;
 use crate::engine::Engine;
 use crate::frame::Frame;
 use crate::functions::Args;
 use crate::model::*;
 use crate::output::{Encoder, Spec, Target};
+use crate::playback;
 use crate::replay::{Camera, ReplayState};
-use crate::sources::{InputRt, ffmpeg};
-use std::process::{Command, Stdio};
+use crate::sources::{self, InputRt, ffmpeg};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::thread::sleep;
+use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
+
+/// What an ffmpeg built without the card's accelerator is asked for.
+const MISSING_CARD: Hardware = &["-hwaccel", "absent"];
 
 fn make(args: &[&str], out: &str) -> Result<String, String> {
     let done = ffmpeg()
@@ -131,6 +136,43 @@ fn pos(rt: &InputRt) -> u64 {
 
 fn done(rt: &InputRt) -> u64 {
     rt.completions.load(Ordering::Relaxed)
+}
+
+fn on_card(rt: &InputRt) -> bool {
+    rt.hardware.load(Ordering::Relaxed)
+}
+
+/// Like a driver crash taking the decoder down with it.
+fn crash_decoders(rt: &InputRt) {
+    for pid in rt.child_ids() {
+        let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).output();
+    }
+}
+
+/// Sends a live stream over UDP, which a receiver can join and leave. It
+/// carries sound: a network input fails on a stream without any.
+fn udp_sender(port: u16) -> Result<Child, String> {
+    ffmpeg()
+        .args(["-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30"])
+        .args(["-re", "-f", "lavfi", "-i", "sine=frequency=440"])
+        .args(["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "15"])
+        .args(["-c:a", "aac", "-f", "mpegts"])
+        .arg(format!("udp://127.0.0.1:{port}?pkt_size=1316"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())
+}
+
+fn free_udp_port() -> Result<u16, String> {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    Ok(socket.local_addr().map_err(|e| e.to_string())?.port())
+}
+
+fn stop(mut child: Child) {
+    sources::end_process_tree(&mut child);
+    let _ = child.wait();
 }
 
 struct Desk {
@@ -303,6 +345,127 @@ impl Desk {
         until(2.0, "incrustation rappelée", || on() == Some(id))
     }
 
+    /// A heavy file shows at once in software, moves to the graphics card
+    /// while cued, and when the card's decoder dies mid-file, software carries
+    /// on from the same place to the end.
+    fn card_crash(&self, heavy: &str) -> Result<(), String> {
+        let kind = Kind::Video { path: heavy.into(), looped: false, mark_in: 0, mark_out: 0, rate: 1.0 };
+        let (id, rt) = self.add("Lourd", kind)?;
+        until(5.0, "première image du fichier lourd", || rt.seq() >= 1)?;
+        until(10.0, "un fichier 1440p60 passe sur la carte graphique", || on_card(&rt))?;
+        let cued = rt.seq();
+        until(10.0, "image venue de la carte", || rt.seq() > cued)?;
+        self.call("Play", "Lourd", "")?;
+        until(5.0, "lecture sur la carte", || pos(&rt) >= 1000)?;
+        let crashed_at = pos(&rt);
+        crash_decoders(&rt);
+        until(10.0, "fin du fichier malgré la panne", || done(&rt) == 1)?;
+        let (end, on) = (pos(&rt), on_card(&rt));
+        self.engine.close_input(id);
+        if on || end < 2700 {
+            return Err(format!(
+                "carte en panne à {crashed_at} ms : le logiciel doit finir le fichier, arrêt à {end} ms"
+            ));
+        }
+        Ok(())
+    }
+
+    /// An ffmpeg that cannot open the card still plays the file, in software.
+    fn card_missing_for_file(&self, heavy: &str) -> Result<(), String> {
+        until(10.0, "fichier lourd reconnu", || crate::decode::verdict(heavy) == Some(true))?;
+        let rt = InputRt::new(false, true);
+        let (worker, spec) = (rt.clone(), playback::Spec::file(heavy.into(), false, 0, 0, 1.0, false));
+        thread::spawn(move || playback::run_file(&worker, spec, 640, 360, 30, Some(MISSING_CARD)));
+        let played = until(10.0, "fichier lu sans la carte", || done(&rt) == 1);
+        let (on, status) = (on_card(&rt), rt.status());
+        rt.shutdown();
+        played?;
+        if on || status.is_some() {
+            return Err(format!(
+                "sans la carte, le logiciel doit prendre le relais sans erreur : {status:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// A card that fails on the damaged tail of a file, after showing all of
+    /// it, hands over to software at the very end: the file is finished, not
+    /// "cannot be played", so lists go on and loops loop.
+    fn card_tail(&self, short: &str) -> Result<(), String> {
+        let spec = playback::Spec::file(short.into(), false, 0, 0, 1.0, false);
+        let rt = InputRt::new(false, false);
+        let ended = playback::resumes_to_the_end(&rt, &spec, 60_000, 640, 360);
+        let status = rt.status();
+        if !ended || status.is_some() {
+            return Err(format!("fin de fichier après la carte : terminé attendu, état {status:?}"));
+        }
+        Ok(())
+    }
+
+    /// The same for a live stream.
+    fn card_missing_for_stream(&self) -> Result<(), String> {
+        let port = free_udp_port()?;
+        let sender = udp_sender(port)?;
+        let rt = InputRt::new(false, true);
+        let worker = rt.clone();
+        let args = vec!["-i".to_string(), format!("udp://127.0.0.1:{port}")];
+        thread::spawn(move || sources::run_capture(&worker, args, 640, 360, 30, Some(MISSING_CARD)));
+        // Each try listens for five seconds before it knows what the stream holds.
+        let shown = until(30.0, "flux reçu sans la carte", || rt.seq() >= 10);
+        let on = on_card(&rt);
+        rt.shutdown();
+        stop(sender);
+        shown?;
+        if on {
+            return Err("sans la carte, un flux doit passer en logiciel".into());
+        }
+        Ok(())
+    }
+
+    /// A stream on the card that goes quiet while ffmpeg still runs, as a
+    /// failing decoder can, is handed to software.
+    fn card_stall(&self) -> Result<(), String> {
+        let port = free_udp_port()?;
+        let sender = udp_sender(port)?;
+        let kind = Kind::Network { url: format!("udp://127.0.0.1:{port}"), buffer_ms: 0 };
+        let (id, rt) = self.add("Flux", kind)?;
+        let on_air = until(30.0, "flux sur la carte", || rt.seq() >= 10 && on_card(&rt));
+        stop(sender);
+        on_air?;
+        let at_stop = rt.seq();
+        let swapped = until(12.0, "passage en logiciel après le silence", || !on_card(&rt));
+        if swapped.is_err() {
+            eprintln!("card_stall: seq {at_stop} -> {}, status {:?}", rt.seq(), rt.status());
+        }
+        swapped?;
+        let seen = rt.seq();
+        let sender = udp_sender(port)?;
+        let back = until(30.0, "flux repris en logiciel", || rt.seq() >= seen + 10);
+        stop(sender);
+        let on = on_card(&rt);
+        self.engine.close_input(id);
+        back?;
+        if on {
+            return Err("un flux muet sur la carte doit rester en logiciel".into());
+        }
+        Ok(())
+    }
+
+    /// A stream that cannot be reached is not the card's fault: after one
+    /// try in software, the card gets it back.
+    fn card_not_blamed(&self) -> Result<(), String> {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map_err(|e| e.to_string())?;
+        let kind = Kind::Network { url: format!("tcp://{port}"), buffer_ms: 0 };
+        let (id, rt) = self.add("Injoignable", kind)?;
+        let steps = until(5.0, "essai sur la carte", || on_card(&rt))
+            .and_then(|()| until(15.0, "essai en logiciel", || !on_card(&rt)))
+            .and_then(|()| until(15.0, "retour à la carte", || on_card(&rt)));
+        self.engine.close_input(id);
+        steps
+    }
+
     /// A DVD plays with picture and sound, and its chapters answer the same
     /// functions as remote control.
     fn dvd(&self, dir: &str) -> Result<&'static str, String> {
@@ -456,7 +619,7 @@ fn replay_marks(dir: &str) -> Result<(), String> {
     let mut r = ReplayState::default();
     r.speed = 0.5;
     r.begin(vec![Camera { input: 0, name: "Pertes".into(), path, encoder }]);
-    let player = crate::sources::start(&Input::new(1, "Ralenti", Kind::Replay), w, h, fps);
+    let player = crate::sources::start(&Input::new(1, "Ralenti", Kind::Replay), w, h, fps, false);
     let steps = (|| {
         let cam = &r.cams[0].encoder;
         let beat = Duration::from_secs_f64(1.0 / fps as f64);
@@ -529,6 +692,13 @@ pub fn check(dir: &str) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let long = clip(dir, "long", 4)?;
     let short = clip(dir, "court", 1)?;
+    let heavy = make(
+        &["-f", "lavfi", "-i", "testsrc2=size=2560x1440:rate=60:duration=3"]
+            .into_iter()
+            .chain(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+            .collect::<Vec<_>>(),
+        &format!("{dir}/lourd.mp4"),
+    )?;
     let mut project = Project::blank();
     project.out_w = 640;
     project.out_h = 360;
@@ -542,6 +712,12 @@ pub fn check(dir: &str) -> Result<String, String> {
         let dvd = desk.dvd(dir)?;
         desk.countdown()?;
         desk.overlay()?;
+        desk.card_crash(&heavy)?;
+        desk.card_missing_for_file(&heavy)?;
+        desk.card_tail(&short)?;
+        desk.card_missing_for_stream()?;
+        desk.card_stall()?;
+        desk.card_not_blamed()?;
         desk.virtual_set(dir)?;
         desk.web_pages()?;
         replay_marks(dir).map(|()| dvd)
@@ -549,7 +725,7 @@ pub fn check(dir: &str) -> Result<String, String> {
     desk.engine.shutdown();
     steps.map(|dvd| {
         format!(
-            "marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, plateau virtuel, pages web, ralenti malgré les pertes"
+            "marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, carte graphique et repli logiciel, plateau virtuel, pages web, ralenti malgré les pertes"
         )
     })
 }
