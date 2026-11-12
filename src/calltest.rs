@@ -80,7 +80,9 @@ fn evaluate(ws: &mut browser::Socket, id: &mut u64, expression: &str) -> Result<
     if !browser::send(ws, *id, "Runtime.evaluate", params) {
         return Err("commande refusée par le navigateur de l'invité".into());
     }
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Longer than the desk waits for its own page to answer a guest (20 s),
+    // so a slow answer is told apart from none.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         let Ok(Message::Text(text)) = ws.read() else { continue };
         let Ok(v) = serde_json::from_str::<Value>(text.as_str()) else { continue };
@@ -126,6 +128,15 @@ pub fn check(engine: &Arc<Engine>) -> Result<String, String> {
     // In preview, as an operator checks a guest: a source nobody watches
     // draws only a couple of pictures a second.
     engine.call("PreviewInput", &Args::new().input("Invité"))?;
+    // The guest is sent the link once the input shows it waits for them, as
+    // an operator would; until then its browser may still be starting.
+    let shown = Instant::now();
+    while rt.seq() == 0 {
+        if shown.elapsed() > Duration::from_secs(30) {
+            return Err(format!("l'entrée d'appel ne montre rien : {:?}", rt.status()));
+        }
+        sleep(Duration::from_millis(100));
+    }
 
     let (_guest, port) = start_guest(&link)?;
     let mut ws = guest_page(port)?;

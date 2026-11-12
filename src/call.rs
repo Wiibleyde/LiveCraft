@@ -165,16 +165,7 @@ pub fn run_call(rt: &Arc<InputRt>, ice: &str, w: usize, h: usize, fps: u32) {
     let (rw, rh) = return_size(w, h);
     let page = receiver_html(ice, rw, rh);
     let url = format!("data:text/html;base64,{}", base64(page.as_bytes()));
-    let mut hook = CallPage {
-        rt: rt.clone(),
-        link: link.clone(),
-        answers: HashMap::new(),
-        size: (rw, rh),
-        sent_seq: 0,
-        last_picture: Instant::now(),
-        last_sound: Instant::now(),
-        pcm: Vec::new(),
-    };
+    let mut hook = CallPage::new(rt.clone(), link.clone(), (rw, rh));
     browser::run_page(rt, &url, false, (w, h), fps, &mut hook);
     link.set_connected(false);
 }
@@ -184,6 +175,9 @@ struct CallPage {
     rt: Arc<InputRt>,
     link: Arc<CallLink>,
     answers: HashMap<u64, Answer>,
+    /// The page has loaded and can answer. An offer taken before would run
+    /// on the blank page the tab opens with and be refused.
+    ready: bool,
     size: (usize, usize),
     sent_seq: u64,
     last_picture: Instant,
@@ -192,6 +186,29 @@ struct CallPage {
 }
 
 impl CallPage {
+    fn new(rt: Arc<InputRt>, link: Arc<CallLink>, size: (usize, usize)) -> Self {
+        Self {
+            rt,
+            link,
+            answers: HashMap::new(),
+            ready: false,
+            size,
+            sent_seq: 0,
+            last_picture: Instant::now(),
+            last_sound: Instant::now(),
+            pcm: Vec::new(),
+        }
+    }
+
+    /// Offers waiting for the page. Until it has loaded they stay queued,
+    /// and the guest's request waits for its answer.
+    fn take_offers(&mut self) -> Vec<(String, Answer)> {
+        if !self.ready {
+            return Vec::new();
+        }
+        std::mem::take(&mut *self.link.offers.lock().unwrap())
+    }
+
     fn evaluate(ws: &mut Socket, id: &mut u64, expression: String, wait: bool) -> Option<u64> {
         *id += 1;
         let params = json!({ "expression": expression, "awaitPromise": wait, "returnByValue": wait });
@@ -251,6 +268,7 @@ impl PageHook for CallPage {
     fn prepare(&mut self, ws: &mut Socket, id: &mut u64) -> bool {
         // A page lost and opened again has forgotten what it was asked.
         self.answers.clear();
+        self.ready = false;
         self.link.set_connected(false);
         let mut ok = true;
         for (method, params) in [
@@ -265,8 +283,7 @@ impl PageHook for CallPage {
     }
 
     fn turn(&mut self, ws: &mut Socket, id: &mut u64) {
-        let offers: Vec<(String, Answer)> = std::mem::take(&mut *self.link.offers.lock().unwrap());
-        for (offer, tx) in offers {
+        for (offer, tx) in self.take_offers() {
             match Self::evaluate(ws, id, format!("lcAnswer({})", Value::String(offer)), true) {
                 Some(n) => {
                     self.answers.insert(n, tx);
@@ -287,6 +304,7 @@ impl PageHook for CallPage {
             let payload = v["params"]["payload"].as_str().unwrap_or("");
             match v["params"]["name"].as_str() {
                 Some("lcAudio") => self.hear(payload),
+                Some("lcState") if payload == "ready" => self.ready = true,
                 Some("lcState") => self.state(payload),
                 _ => {}
             }
@@ -430,6 +448,7 @@ await me.setRemoteDescription({type:'offer',sdp});
 for(const t of back.getTracks())me.addTrack(t,back);
 await me.setLocalDescription(await me.createAnswer());
 await gathered(me);return me.localDescription.sdp}
+lcState('ready')
 </script></html>"#;
 
 /// What the guest opens. Served over https, without which their browser
@@ -538,6 +557,23 @@ mod tests {
         let hostile = script_text(&[("a", "</script><script>alert(1)")]);
         assert!(!hostile.contains('<'));
         assert_eq!(serde_json::from_str::<Value>(&hostile).unwrap()["a"], "</script><script>alert(1)");
+    }
+
+    /// A guest who joins while the receiving page is still loading waits
+    /// for it, rather than being turned away by the blank page before it.
+    #[test]
+    fn an_offer_waits_until_the_receiving_page_has_loaded() {
+        let link = Arc::new(CallLink::default());
+        let mut page = CallPage::new(InputRt::new(true, true), link.clone(), (640, 360));
+        let (tx, _rx) = mpsc::channel();
+        link.offers.lock().unwrap().push(("v=0".into(), tx));
+        assert!(page.take_offers().is_empty(), "nothing is asked of a page still loading");
+        assert_eq!(link.offers.lock().unwrap().len(), 1, "the offer stays queued");
+        let called = |name: &str, payload: &str| json!({ "method": "Runtime.bindingCalled", "params": { "name": name, "payload": payload } });
+        page.message(&called("lcState", "ready"));
+        assert!(!link.is_connected() && page.rt.status().is_none(), "loaded is not a guest yet");
+        assert_eq!(page.take_offers().len(), 1);
+        assert!(link.offers.lock().unwrap().is_empty());
     }
 
     #[test]
