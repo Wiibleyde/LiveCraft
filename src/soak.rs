@@ -227,12 +227,13 @@ impl Machine {
 /// The processes below `root`, from `(pid, parent, start in seconds)` rows.
 ///
 /// Windows only keeps the number of a process's parent, and gives that number
-/// to a new process once the parent is gone. When something that launched
-/// this program ends, one of the show's own ffmpeg can be handed its number:
-/// the launcher then reads as that ffmpeg's child, and this program as the
-/// launcher's, so the walk went round forever and a twenty-minute show died
-/// asking for 64 GB. A child cannot start before its parent (0 means the
-/// system would not say), and no process is counted twice.
+/// to a new process once the parent is gone. Every chain of parents ends at
+/// one that is gone (wininit's, for one), so when one of the show's own
+/// ffmpeg is handed that number, the whole chain down to this program reads
+/// as that ffmpeg's family: the walk went round forever and a twenty-minute
+/// show died asking for 64 GB. A child cannot start before its parent, and
+/// no process is counted twice. Start 0 means the system would not say, as
+/// for its own processes, which a show never starts.
 fn descendants<P: Copy + Eq + Hash>(root: P, rows: &[(P, Option<P>, u64)]) -> Vec<P> {
     let born: HashMap<P, u64> = rows.iter().map(|r| (r.0, r.2)).collect();
     let mut by_parent: HashMap<P, Vec<(P, u64)>> = HashMap::new();
@@ -246,7 +247,7 @@ fn descendants<P: Copy + Eq + Hash>(root: P, rows: &[(P, Option<P>, u64)]) -> Ve
     while let Some(pid) = todo.pop() {
         let parent_start = born.get(&pid).copied().unwrap_or(0);
         for &(child, start) in by_parent.get(&pid).into_iter().flatten() {
-            if (start == 0 || start >= parent_start) && seen.insert(child) {
+            if start != 0 && start >= parent_start && seen.insert(child) {
                 found.push(child);
                 todo.push(child);
             }
@@ -1219,26 +1220,29 @@ mod tests {
 
     #[test]
     fn a_reused_process_number_never_makes_the_family_go_round() {
-        // The host that launched the launcher (7) is gone and one of the
-        // show's ffmpeg got its number, so the launcher (3) now names that
-        // ffmpeg as its parent: 10 -> 7 -> 3 -> 10.
+        // As on Windows: wininit's parent (1424) is long gone, and the system
+        // will not say when its own processes started. Once one of the
+        // show's ffmpeg is handed 1424, wininit reads as its child and the
+        // chain of parents leads back down to this program.
         let rows = [
-            (3, Some(7), 100),   // launcher
-            (10, Some(3), 101),  // this program
-            (7, Some(10), 500),  // ffmpeg handed the gone host's number
-            (11, Some(10), 200), // browser
-            (12, Some(11), 201), // its renderer
-            (13, Some(11), 200), // started in the same second as the browser
-            (14, Some(12), 150), // older than its "parent": a stranger
+            (1536, Some(1424), 0), // wininit
+            (1624, Some(1536), 0), // services
+            (5788, Some(1624), 0), // the WMI host that started the launcher
+            (20, Some(5788), 300), // launcher
+            (10, Some(20), 301),   // this program
+            (1424, Some(10), 900), // ffmpeg handed the gone number
+            (11, Some(10), 400),   // browser
+            (12, Some(11), 400),   // its renderer, started in the same second
+            (13, Some(12), 350),   // older than its "parent": a stranger
+            (14, Some(11), 0),     // will not say when it started
         ];
         let mut family = descendants(10, &rows);
         family.sort();
-        assert_eq!(family, [7, 11, 12, 13]);
-        // When the system will not tell start times, the loop still ends.
-        let unknown = [(3, Some(7), 0), (10, Some(3), 0), (7, Some(10), 0)];
-        let mut family = descendants(10, &unknown);
-        family.sort();
-        assert_eq!(family, [3, 7]);
+        assert_eq!(family, [11, 12, 1424]);
+        // A launcher whose own parent's number went to an ffmpeg is older
+        // than that ffmpeg, so it is not taken for its child either.
+        let rows = [(20, Some(7), 300), (10, Some(20), 301), (7, Some(10), 900)];
+        assert_eq!(descendants(10, &rows), [7]);
     }
 
     #[test]
