@@ -1,6 +1,6 @@
 //! Everything with a timeline: video files, image sequences, audio files,
-//! lists and replay clips. A file is decoded by ffmpeg and read at the output
-//! rate, so a paused file simply stops being read and costs no decoding.
+//! lists, DVDs and replay clips. A file is decoded by ffmpeg and read at the
+//! output rate, so a paused file simply stops being read and costs no decoding.
 
 use crate::decode::{self, Hardware};
 use crate::frame::Frame;
@@ -22,13 +22,23 @@ pub struct Spec {
     pub mark_out: u64,
     pub rate: f32,
     pub with_audio: bool,
+    /// Chapters are the items: NextItem and SelectIndex move between them.
+    pub chapters: bool,
 }
 
 impl Spec {
     pub fn file(path: String, looped: bool, mark_in: u64, mark_out: u64, rate: f32, audio: bool) -> Self {
         // One limit for pictures and sound, or they would run at different speeds.
         let rate = if rate > 0.0 { rate.clamp(0.05, 8.0) } else { 1.0 };
-        Self { input_args: vec!["-i".into(), path], looped, mark_in, mark_out, rate, with_audio: audio }
+        Self {
+            input_args: vec!["-i".into(), path],
+            looped,
+            mark_in,
+            mark_out,
+            rate,
+            with_audio: audio,
+            chapters: false,
+        }
     }
 
     /// Turns the first file of a numbered series into ffmpeg's pattern.
@@ -49,7 +59,28 @@ impl Spec {
             "-i".into(),
             pattern,
         ];
-        Some(Self { input_args: args, looped, mark_in: 0, mark_out: 0, rate: 1.0, with_audio: false })
+        Some(Self {
+            input_args: args,
+            looped,
+            mark_in: 0,
+            mark_out: 0,
+            rate: 1.0,
+            with_audio: false,
+            chapters: false,
+        })
+    }
+
+    /// One title of a DVD, from a drive, a VIDEO_TS folder or an image.
+    pub fn dvd(path: &str, title: u32) -> Self {
+        Self {
+            input_args: crate::dvd::input_args(path, title),
+            looped: false,
+            mark_in: 0,
+            mark_out: 0,
+            rate: 1.0,
+            with_audio: true,
+            chapters: true,
+        }
     }
 
     /// Marks restart the file by hand; a plain file can let ffmpeg loop it
@@ -259,6 +290,9 @@ fn play_once(
         first_done = true;
         rt.clear_status();
         buf = rt.publish(buf).unwrap_or_else(|| Frame::new(w, h));
+        if spec.chapters {
+            follow_chapter(rt);
+        }
         if !rt.is_playing() {
             continue;
         }
@@ -340,7 +374,14 @@ pub fn run_file(rt: &Arc<InputRt>, spec: Spec, w: usize, h: usize, fps: u32, car
                 rt.pos_ms.store(start, Ordering::Relaxed);
             }
             End::Jump => {
-                rt.select.store(-1, Ordering::Relaxed);
+                let n = rt.select.swap(-1, Ordering::Relaxed);
+                if spec.chapters {
+                    // A chapter that does not exist leaves the title where it is.
+                    let chapter =
+                        usize::try_from(n).ok().and_then(|n| rt.chapters.lock().unwrap().get(n).copied());
+                    start = chapter.unwrap_or_else(|| rt.pos_ms.load(Ordering::Relaxed));
+                    rt.pos_ms.store(start, Ordering::Relaxed);
+                }
             }
             End::Finished => {
                 if spec.looped {
@@ -355,6 +396,58 @@ pub fn run_file(rt: &Arc<InputRt>, spec: Spec, w: usize, h: usize, fps: u32, car
             }
         }
     }
+}
+
+/// Keeps the current item on the chapter that holds the position.
+fn follow_chapter(rt: &InputRt) {
+    let chapters = rt.chapters.lock().unwrap();
+    let pos = rt.pos_ms.load(Ordering::Relaxed);
+    rt.items.store(chapters.len() as u64, Ordering::Relaxed);
+    let at = chapters.iter().rposition(|&start| start <= pos).unwrap_or(0);
+    rt.item.store(at as u64, Ordering::Relaxed);
+}
+
+/// Reads the disc's titles first: they are what the settings offer, and a
+/// drive with nothing in it is worth waiting on until a disc goes in.
+pub fn run_dvd(rt: &Arc<InputRt>, path: &str, title: u32, w: usize, h: usize, fps: u32) {
+    let image = std::path::Path::new(path).is_file();
+    // Waiting for a disc to go in starts at two seconds and backs off to ten.
+    let mut wait_ms = 2_000;
+    loop {
+        match crate::dvd::titles(path) {
+            Ok(titles) => {
+                let found = titles.iter().any(|t| t.number == title.max(1));
+                *rt.titles.lock().unwrap() = titles;
+                if !found {
+                    rt.set_status(t!("playback.dvd_no_title", title = title.max(1)));
+                    return;
+                }
+                break;
+            }
+            // ffmpeg reads images this listing cannot, such as UDF-only ones.
+            Err(e) if image => {
+                rt.set_status(t!("playback.dvd_titles_unreadable", error = e));
+                break;
+            }
+            // No VIDEO_TS.IFO: an empty drive, worth waiting on until a disc goes in.
+            Err(e) if crate::dvd::recognise(std::path::Path::new(path)).is_none() => {
+                rt.set_status(t!("playback.dvd_unreadable", error = e));
+                for _ in 0..wait_ms / 50 {
+                    if rt.stopped() {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                wait_ms = (wait_ms * 2).min(10_000);
+            }
+            // A disc is there but its tables did not parse: ffmpeg may still play it.
+            Err(e) => {
+                rt.set_status(t!("playback.dvd_titles_unreadable", error = e));
+                break;
+            }
+        }
+    }
+    run_file(rt, Spec::dvd(path, title), w, h, fps, None);
 }
 
 pub fn run_audio_file(rt: &Arc<InputRt>, path: &str, looped: bool) {

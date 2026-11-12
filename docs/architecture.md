@@ -24,7 +24,7 @@ so a slow window cannot hold up the show.
 | `mixer.rs` | The video loop: what to compose, and reusing what has not changed |
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
 | `sets.rs` | Virtual sets: built-in decors and camera moves; the mixer composes them |
-| `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
+| `sources.rs`, `playback.rs`, `browser.rs`, `dvd.rs` | Where pictures and sound come from |
 | `decode.rs` | Which files and streams the graphics card decodes |
 | `slides.rs` | Presentations, turned into one picture per slide by PowerPoint or LibreOffice |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |

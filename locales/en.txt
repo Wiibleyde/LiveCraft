@@ -166,6 +166,15 @@ inputs.bars = Colour bars
 inputs.motion_bars = Animated bars
 inputs.clock = Clock
 inputs.test_tone = Test tone
+inputs.dvd_menu = DVD
+inputs.dvd_drive = Drive {drive}
+inputs.dvd_folder = VIDEO_TS folder…
+inputs.dvd_image = ISO image…
+inputs.dvd_image_filter = DVD image
+inputs.dvd_not_a_disc = No DVD here: pick a VIDEO_TS folder or an ISO image
+inputs.dvd_previous_chapter = Previous chapter
+inputs.dvd_next_chapter = Next chapter
+inputs.dvd_menu_chapter = Chapter {n} ({start})
 
 # src/ui/switcher.rs
 switcher.go_live = Go live
@@ -324,6 +333,14 @@ input_settings.audio.flatten = Flatten
 input_settings.audio.bus_levels = Level to each bus
 input_settings.audio.bus_master = Master
 input_settings.copy_from = Copy position, colour, key and effects from:
+input_settings.dvd_change_folder = Change folder…
+input_settings.dvd_change_image = Change ISO image…
+input_settings.dvd_folder_needed = No DVD here: pick a VIDEO_TS folder
+input_settings.dvd_title = Title
+input_settings.dvd_title_n = Title {n}
+input_settings.dvd_title_row = Title {n}: {chapters} chapter(s), {length}
+input_settings.dvd_title_combo = DVD title
+input_settings.dvd_chapter_n = Chapter {n}
 
 # src/ui/settings.rs
 settings.tab.format = Format
@@ -566,6 +583,7 @@ model.kind.audio_file = Audio file
 model.kind.list = List
 model.kind.photos = Photos
 model.kind.image_sequence = Image sequence
+model.kind.dvd = DVD
 model.kind.powerpoint = PowerPoint
 model.kind.camera = Camera
 model.kind.network = Network stream
@@ -697,6 +715,9 @@ sources.mic_lost = Microphone lost, retrying… {reason}
 # src/playback.rs
 playback.cannot_play = Cannot play: {reason}
 playback.empty_list = Empty list
+playback.dvd_no_title = This disc has no title {title}
+playback.dvd_titles_unreadable = Titles unreadable: {error}
+playback.dvd_unreadable = No readable DVD: {error}
 
 # src/browser.rs
 browser.needs_edge_or_chrome = Edge or Chrome is needed for web pages
@@ -813,3 +834,15 @@ set.cam_close = Close-up
 set.cam_screen = Wall screen
 functions.not_a_set = This input is not a virtual set
 functions.camera_not_found = Camera not found: {name}
+
+# src/dvd.rs
+dvd.not_video_ifo = VIDEO_TS.IFO is not a DVD-Video table
+dvd.truncated = truncated DVD table
+dvd.title_table = unreadable DVD title table
+dvd.image_unreadable = unreadable image: {error}
+dvd.no_video_ts_in_image = no VIDEO_TS folder in the image
+dvd.no_video_ts = no VIDEO_TS folder here
+dvd.too_big = {name} is too big
+dvd.missing_in_image = {name} is not in the image
+dvd.no_iso = image without an ISO 9660 file system
+dvd.no_root = unreadable root directory

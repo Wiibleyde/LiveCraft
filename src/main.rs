@@ -10,6 +10,7 @@ mod browser;
 mod decode;
 mod desk;
 mod dsp;
+mod dvd;
 mod engine;
 mod extras;
 mod frame;

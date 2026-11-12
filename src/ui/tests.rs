@@ -265,6 +265,7 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
         Kind::List { items: Vec::new(), auto_next: true, auto_first: false, looped: false, shuffle: false },
         Kind::Photos { folder: "x".into(), seconds: 0.0 },
         Kind::ImageSequence { first: "x0001.png".into(), fps: 30.0, looped: true },
+        Kind::Dvd { path: "C:/introuvable/disque.iso".into(), title: 1 },
         Kind::PowerPoint { path: "x.pptx".into() },
         Kind::Camera { device: "x".into(), ptz_host: String::new() },
         Kind::Network { url: "srt://127.0.0.1:1".into(), buffer_ms: 0 },
@@ -812,6 +813,62 @@ fn a_virtual_set_is_made_from_the_menu_and_its_camera_glides_between_presets() {
         wait(&mut h, 20);
     }
     end(h);
+}
+
+/// Generous: other tests and builds share the machine, and a DVD title takes a moment to open.
+fn until(h: &mut Harness<'static, App>, what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !done() {
+        assert!(Instant::now() < deadline, "attendu sans succès : {what}");
+        wait(h, 30);
+    }
+}
+
+/// Dropping a disc's VIDEO_TS folder makes a DVD input, whose card and
+/// settings step through chapters and switch titles.
+#[test]
+fn a_dropped_dvd_folder_plays_and_steps_through_chapters() {
+    use crate::playtest::{BLUE, GREEN, RED, centre, near};
+    let dir = std::env::temp_dir().join(format!("livecraft-dvd-ui-{}", std::process::id()));
+    let Some(disc) = crate::playtest::dvd_fixture(&dir.to_string_lossy()).unwrap() else {
+        eprintln!("ignoré : dvdauthor ou le démultiplexeur dvdvideo manque");
+        return;
+    };
+    // An empty desk, so the new card is on screen to be clicked.
+    let mut p = Project::blank();
+    p.out_w = 320;
+    p.out_h = 180;
+    let mut h = desk(p);
+    h.state_mut().add_file(&std::path::Path::new(&disc).join("VIDEO_TS"));
+    h.run_steps(3);
+    let input = project(&h).inputs.last().cloned().unwrap();
+    assert_eq!(input.kind, Kind::Dvd { path: disc.clone(), title: 1 }, "the disc, not the VIDEO_TS folder");
+    assert_eq!(input.name, "disque");
+    let rt = h.state().engine.rt(input.id).unwrap();
+    until(&mut h, "trois chapitres en rouge", || {
+        rt.items.load(Ordering::Relaxed) == 3 && near(centre(&rt), RED)
+    });
+    let on = |rt: &sources::InputRt, n: u64, colour| {
+        rt.item.load(Ordering::Relaxed) == n && near(centre(rt), colour)
+    };
+    click(&mut h, "Chapitre suivant disque");
+    until(&mut h, "chapitre 2 en vert", || on(&rt, 1, GREEN));
+    click(&mut h, "Chapitre précédent disque");
+    until(&mut h, "retour au chapitre 1", || on(&rt, 0, RED));
+    h.state_mut().editing = Some(input.id);
+    h.state_mut().edit_tab = 0;
+    h.run_steps(3);
+    click(&mut h, "Chapitre 3");
+    until(&mut h, "chapitre 3 en bleu", || on(&rt, 2, BLUE));
+    click(&mut h, "Titre du DVD");
+    click(&mut h, "Titre 2 : 1 chapitre(s), 00:02");
+    let engine = h.state().engine.clone();
+    until(&mut h, "le titre 2 en blanc", || {
+        engine.rt(input.id).is_some_and(|rt| near(centre(&rt), [255, 255, 255]))
+    });
+    assert_eq!(project(&h).inputs.last().unwrap().kind, Kind::Dvd { path: disc, title: 2 });
+    end(h);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Text on screen that only the French catalog holds: after a switch to English, any of it
