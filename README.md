@@ -38,7 +38,8 @@ Get the installer or the portable zip from the
 **[latest release](https://github.com/Wiibleyde/LiveCraft/releases/latest)**. The installer needs no
 administrator rights.
 
-1. Install [FFmpeg](https://ffmpeg.org), which is not included: `winget install Gyan.FFmpeg`.
+1. Install [FFmpeg](https://ffmpeg.org), which is not included: `winget install Gyan.FFmpeg`. LiveCraft looks for it in the file named by the `LIVECRAFT_FFMPEG`
+   variable, then next to `livecraft.exe`, then on `PATH`; Settings → About shows which one it found.
 2. Run the `…-setup.exe` installer, or unzip the `…-portable.zip` and start `livecraft.exe`.
 3. Alpha builds are not signed yet, so Windows SmartScreen may warn: click **More info**, then
    **Run anyway**. Checksums are in `SHA256SUMS.txt` next to the files.

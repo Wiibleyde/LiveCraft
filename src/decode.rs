@@ -90,7 +90,7 @@ impl Picture {
 /// Runs a command and returns what it printed, or `None` when it could not
 /// start, failed, or did not finish within `limit` (its whole tree is then
 /// ended, so a dead share cannot leave probes behind).
-fn run_limited(mut cmd: Command, limit: Duration) -> Option<String> {
+pub(crate) fn run_limited(mut cmd: Command, limit: Duration) -> Option<String> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     {
@@ -112,13 +112,14 @@ fn run_limited(mut cmd: Command, limit: Duration) -> Option<String> {
     if text.is_none() {
         crate::platform::end_process_tree(&mut child);
     }
-    let status = child.wait().ok()?;
+    // Never wait without a limit: a process stuck in a driver call cannot exit.
+    let status = crate::ffmpeg::finish(&mut child, Duration::from_secs(3))?;
     if status.success() { text } else { None }
 }
 
 /// `Err` when ffprobe gave no answer, `Ok(None)` when the file has no picture.
 fn probe(path: &str) -> Result<Option<Picture>, ()> {
-    let mut cmd = Command::new("ffprobe");
+    let mut cmd = Command::new(crate::ffmpeg::program("ffprobe"));
     cmd.args(["-v", "error", "-select_streams", "v:0"])
         .args(["-show_entries", "stream=codec_name,width,height,avg_frame_rate", "-of", "csv=p=0"])
         .arg(path);

@@ -978,3 +978,26 @@ dvd.no_root = unreadable root directory
 
 # src/secret.rs
 secret.not_saved = Keys and passwords could not be protected: they are not saved and must be typed again at the next start
+settings.ffmpeg_how_variable = variable {name}
+settings.ffmpeg_how_beside = beside LiveCraft
+settings.ffmpeg_how_path = on the PATH
+settings.ffmpeg_path = Found: {path} ({how})
+settings.ffmpeg_asking = Checking what ffmpeg can do…
+settings.ffmpeg_version = Version: {version}
+settings.ffmpeg_yes = yes
+settings.ffmpeg_no = no
+settings.ffmpeg_srt = SRT: {answer}
+settings.ffmpeg_missing = ffmpeg was not found. Install it (winget install Gyan.FFmpeg), copy ffmpeg next to LiveCraft, or give its path in the {name} variable, then restart LiveCraft.
+settings.ffmpeg_no_srt = An SRT input or output is set up, but this ffmpeg cannot do SRT (an older ffmpeg may come first on the PATH). Install a recent ffmpeg with SRT, or give its path in the {name} variable, then restart LiveCraft.
+settings.ffmpeg_not_asked = Not checked in this mode.
+settings.ffmpeg_hw_none = Hardware encoders: none in this ffmpeg.
+settings.ffmpeg_hw_title = Hardware encoders (really tried on a small picture):
+settings.ffmpeg_hw_works = {name}: works
+settings.ffmpeg_hw_failed = {name}: failed ({why})
+settings.ffmpeg_hw_no_detail = no details
+settings.ffmpeg_hw_trying = {name}: trying…
+settings.ffmpeg_hw_unknown = {name}: not tried yet
+settings.ffmpeg_hw_note = A failure does not remove the encoder from the list: it may come from a busy card or a session limit.
+settings.ffmpeg_hw_recheck = Check again
+settings.ffmpeg_bad_variable = The {name} variable is set ({value}) but does not name a usable ffmpeg: give the full path of the ffmpeg file or of its folder, or remove the variable, then restart LiveCraft.
+settings.ffmpeg_no_answer = ffmpeg was found but does not answer: the file may be damaged or libraries (DLLs) may be missing. Reinstall it, or give another ffmpeg in the {name} variable, then restart LiveCraft.

@@ -147,7 +147,7 @@ fn slope_per_hour(points: &[(f64, f64)]) -> f64 {
 /// FLV carries no duration per stream, and a growing file none at all.
 /// AAC packs 1024 samples in each packet.
 fn av_seconds(path: &str) -> Result<(f64, f64), String> {
-    let out = Command::new("ffprobe")
+    let out = Command::new(crate::ffmpeg::program("ffprobe"))
         .args(["-v", "error", "-count_packets", "-of", "json", "-show_entries"])
         .arg("stream=codec_type,sample_rate,avg_frame_rate,nb_read_packets")
         .arg(path)
