@@ -423,6 +423,37 @@ impl App {
                 path_row(ui, folder);
                 ui.add(egui::Slider::new(seconds, 0.0..=60.0).text(t!("input_settings.seconds_per_photo")));
             }
+            Kind::PowerPoint { path } => {
+                path_row(ui, path);
+                if ui.button(t!("slides.change")).clicked()
+                    && let Some(p) = rfd::FileDialog::new()
+                        .add_filter(t!("inputs.presentation_filter"), &crate::slides::EXTENSIONS)
+                        .pick_file()
+                {
+                    *path = p.to_string_lossy().into_owned();
+                }
+                if let Some(rt) = &rt {
+                    let number = self.input_number(project, id);
+                    ui.horizontal(|ui| {
+                        if ui.button(t!("slides.previous")).clicked() {
+                            self.call("PreviousPicture", &Args::new().input(&number));
+                        }
+                        if ui.button(t!("slides.next")).clicked() {
+                            self.call("NextPicture", &Args::new().input(&number));
+                        }
+                        let count = rt.items.load(Ordering::Relaxed);
+                        if count > 0 {
+                            let at = rt.item.load(Ordering::Relaxed) + 1;
+                            ui.label(t!("slides.position", at = at, count = count));
+                        }
+                    });
+                    // The card has room for the start of it only.
+                    if let Some(msg) = rt.status() {
+                        ui.label(RichText::new(msg).color(ORANGE));
+                    }
+                }
+                ui.label(RichText::new(t!("slides.converted_by")).small().color(DIM));
+            }
             Kind::ImageSequence { first, fps, looped } => {
                 path_row(ui, first);
                 ui.add(egui::Slider::new(fps, 1.0..=120.0).text(t!("input_settings.frames_per_second")));

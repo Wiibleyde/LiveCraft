@@ -92,6 +92,7 @@ pub const NAMES: &[&str] = &[
     "MirrorOff",
     "MirrorOn",
     "NextItem",
+    "NextPicture",
     "NextPlayListEntry",
     "Pause",
     "PauseCountdown",
@@ -101,6 +102,7 @@ pub const NAMES: &[&str] = &[
     "PreviewInputNext",
     "PreviewInputPrevious",
     "PreviousItem",
+    "PreviousPicture",
     "QuickPlay",
     "RemoveInput",
     "Restart",
@@ -227,7 +229,7 @@ impl Engine {
                 self.state.lock().unwrap().cut_to(id);
             }
             "Play" | "Pause" | "PlayPause" | "Restart" | "Loop" | "LoopOn" | "LoopOff" | "SetPosition"
-            | "NextItem" | "PreviousItem" | "SelectIndex" => {
+            | "NextItem" | "PreviousItem" | "NextPicture" | "PreviousPicture" | "SelectIndex" => {
                 return self.playback_function(name, a);
             }
             "StartCountdown" | "StopCountdown" | "PauseCountdown" | "SetCountdown" => {
@@ -449,12 +451,18 @@ impl Engine {
             "Restart" => rt.seek_ms.store(0, Ordering::Relaxed),
             "SetPosition" => rt.seek_ms.store(a.number()? as i64, Ordering::Relaxed),
             "SelectIndex" => rt.select.store(a.number()? as i64 - 1, Ordering::Relaxed),
-            // The items of a list or photos input, or the chapters of a DVD.
-            "NextItem" | "PreviousItem" => {
-                let step = if name == "NextItem" { 1 } else { -1 };
+            "NextItem" | "PreviousItem" | "NextPicture" | "PreviousPicture" => {
+                let step = if name.starts_with("Next") { 1 } else { -1 };
                 let count = rt.items.load(Ordering::Relaxed).max(1) as i64;
-                let at = rt.item.load(Ordering::Relaxed) as i64;
-                rt.select.store((at + step + count) % count, Ordering::Relaxed);
+                let at = rt.item.load(Ordering::Relaxed) as i64 + step;
+                // A presentation stops at its ends, as in PowerPoint: one click
+                // too many must not put the title slide back on air.
+                let slides = matches!(
+                    self.state.lock().unwrap().input(id).map(|i| &i.kind),
+                    Some(Kind::PowerPoint { .. })
+                );
+                let to = if slides { at.clamp(0, count - 1) } else { (at + count) % count };
+                rt.select.store(to, Ordering::Relaxed);
             }
             _ => {
                 {

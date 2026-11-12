@@ -34,6 +34,7 @@ bars.route_preview = Preview
 bars.route_multiview2 = MultiView 2 (inputs)
 bars.projects_filter = Projects
 bars.unreadable_project = Unreadable project: {error}
+bars.session_backed_up = The previous desk is kept in session.prev.json
 bars.no_recent = No recent project
 bars.project_filter = LiveCraft project
 bars.project_saved = Project saved
@@ -119,6 +120,7 @@ inputs.countdown_start = Start
 inputs.countdown_pause = Pause
 inputs.countdown_reset = Reset
 inputs.menu_item = Item {n}
+inputs.menu_slide = Slide {n}
 inputs.locked_open_project = Locked: open the padlock to change project
 inputs.add_input = Add input
 inputs.add_video = Video…
@@ -135,6 +137,8 @@ inputs.screen_name = Screen
 inputs.add_image = Image…
 inputs.filter_image = Image
 inputs.add_photos = Photos (folder)…
+inputs.add_powerpoint = PowerPoint presentation…
+inputs.presentation_filter = Presentation
 inputs.add_image_sequence = Image sequence…
 inputs.add_audio_input = Audio input
 inputs.no_microphone = No microphone found
@@ -578,6 +582,7 @@ model.kind.list = List
 model.kind.photos = Photos
 model.kind.image_sequence = Image sequence
 model.kind.dvd = DVD
+model.kind.powerpoint = PowerPoint
 model.kind.camera = Camera
 model.kind.network = Network stream
 model.kind.browser = Web page
@@ -740,6 +745,29 @@ outputs.srt_stopped = SRT stopped: {reason}
 
 # src/audio.rs
 audio.default_output = Default output
+
+# src/slides.rs
+slides.no_converter = Neither PowerPoint nor LibreOffice is installed
+slides.no_python = LibreOffice is installed without its Python
+slides.wont_start = {program} does not start: {error}
+slides.unreadable = Unreadable presentation: {message}
+slides.silent = {program} is not responding
+slides.stopped = Conversion stopped
+slides.no_visible = This presentation has no visible slide
+slides.ended_early = {program} stopped before the end
+slides.not_found = Presentation not found
+slides.waiting = Waiting for another conversion…
+slides.folder = Slides folder: {error}
+slides.opening = Opening with {program}…
+slides.converting = Converting slides {done}/{total}
+slides.slide_unreadable = Unreadable slide: {error}
+slides.previous = Previous slide
+slides.next = Next slide
+slides.previous_named = Previous slide {name}
+slides.next_named = Next slide {name}
+slides.change = Change presentation…
+slides.position = Slide {at} of {count}
+slides.converted_by = Slides are converted by PowerPoint, otherwise by LibreOffice
 
 # src/sets.rs, src/ui/virtual_set.rs (virtual sets)
 model.kind.virtual_set = Virtual set

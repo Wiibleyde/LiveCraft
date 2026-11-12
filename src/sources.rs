@@ -81,7 +81,7 @@ pub struct InputRt {
     pub pos_ms: AtomicU64,
     pub dur_ms: AtomicU64,
     pub seek_ms: AtomicI64,
-    /// Asks a List or Photos input to jump to an item.
+    /// Asks a List, Photos or PowerPoint input to jump to an item.
     pub select: AtomicI64,
     pub item: AtomicU64,
     pub items: AtomicU64,
@@ -294,10 +294,15 @@ pub fn start_seeded(
     let waits = input.kind.has_timeline() || countdown;
     let rt = InputRt::new(has_audio, !waits);
     *rt.frame.lock().unwrap() = seed;
-    if let (Some(r), true) = (resume, waits) {
-        rt.playing.store(r.playing, Ordering::Relaxed);
-        rt.pos_ms.store(r.pos_ms, Ordering::Relaxed);
-        rt.item.store(r.item, Ordering::Relaxed);
+    if let Some(r) = resume {
+        if waits {
+            rt.playing.store(r.playing, Ordering::Relaxed);
+            rt.pos_ms.store(r.pos_ms, Ordering::Relaxed);
+        }
+        // A presentation stays on its slide when its source is started again.
+        if waits || matches!(input.kind, Kind::PowerPoint { .. }) {
+            rt.item.store(r.item, Ordering::Relaxed);
+        }
     }
     let kind = input.kind.clone();
     let worker = rt.clone();
@@ -326,6 +331,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             Err(e) => rt.set_status(t!("sources.unreadable_image", error = e)),
         },
         Kind::Photos { folder, seconds } => run_photos(&rt, &folder, seconds, w, h),
+        Kind::PowerPoint { path } => crate::slides::run(&rt, &path, w, h),
         Kind::Title { text, sub, style, color, accent, ticker_speed, countdown_ms, font, size, .. } => {
             match style {
                 TitleStyle::Ticker => run_ticker(&rt, &text, color, accent, ticker_speed, w, h, fps),

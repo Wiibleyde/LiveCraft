@@ -81,6 +81,11 @@ pub enum Kind {
         #[serde(default)]
         title: u32,
     },
+    /// A presentation; its slides are turned into pictures by PowerPoint or
+    /// LibreOffice, whichever the machine has.
+    PowerPoint {
+        path: String,
+    },
     Camera {
         device: String,
         ptz_host: String,
@@ -171,6 +176,7 @@ impl Kind {
             Kind::Photos { .. } => t!("model.kind.photos"),
             Kind::ImageSequence { .. } => t!("model.kind.image_sequence"),
             Kind::Dvd { .. } => t!("model.kind.dvd"),
+            Kind::PowerPoint { .. } => t!("model.kind.powerpoint"),
             Kind::Camera { .. } => t!("model.kind.camera"),
             Kind::Network { .. } => t!("model.kind.network"),
             Kind::Browser { .. } => t!("model.kind.browser"),
@@ -200,6 +206,7 @@ impl Kind {
             Kind::Photos { .. } => "Photos",
             Kind::ImageSequence { .. } => "ImageSequence",
             Kind::Dvd { .. } => "DVD",
+            Kind::PowerPoint { .. } => "PowerPoint",
             Kind::Camera { .. } => "Capture",
             Kind::Network { .. } => "Stream",
             Kind::Browser { .. } => "Browser",
@@ -248,7 +255,8 @@ impl Kind {
         match (self, other) {
             (Kind::Video { path: a, .. }, Kind::Video { path: b, .. })
             | (Kind::AudioFile { path: a, .. }, Kind::AudioFile { path: b, .. })
-            | (Kind::ImageSequence { first: a, .. }, Kind::ImageSequence { first: b, .. }) => a == b,
+            | (Kind::ImageSequence { first: a, .. }, Kind::ImageSequence { first: b, .. })
+            | (Kind::PowerPoint { path: a }, Kind::PowerPoint { path: b }) => a == b,
             (Kind::List { items: a, .. }, Kind::List { items: b, .. }) => a == b,
             // A position only means something within the same title.
             (Kind::Dvd { path: a, title: x }, Kind::Dvd { path: b, title: y }) => a == b && x == y,
