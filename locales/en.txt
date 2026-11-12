@@ -389,6 +389,11 @@ settings.add_source = Add a source
 settings.source_n = Source {n}
 settings.about_tagline = Live video mixer, rebuilt from the public documentation.
 settings.about_ffmpeg = Videos, cameras and outputs go through ffmpeg, installed separately.
+settings.compositing = Picture composition
+settings.compose_on_gpu = Compose on the graphics card
+settings.compositor_starting = Starting…
+settings.on_gpu = On the graphics card: {name}
+settings.on_cpu = On the processor: {reason}
 
 # src/ui/windows.rs
 windows.overlays_title = Overlays and stingers
@@ -719,3 +724,15 @@ outputs.srt_stopped = SRT stopped: {reason}
 
 # src/audio.rs
 audio.default_output = Default output
+
+# src/mixer.rs
+mixer.cpu_chosen = chosen in the settings
+
+# src/gpu.rs
+gpu.none = no suitable graphics card
+gpu.software_only = {name} is only a software emulation
+gpu.unusable = graphics card unusable: {error}
+gpu.error = graphics card error: {error}
+gpu.lost = graphics card lost: {reason}
+gpu.not_responding = the graphics card stopped responding: {error}
+gpu.picture_lost = picture lost on its way back from the graphics card

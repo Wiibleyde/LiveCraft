@@ -227,7 +227,7 @@ impl Mixer {
                 self.last_sig = 0;
                 self.preview_sig = 0;
             }
-            return Some(Compositor::Cpu("choisi dans les réglages".into()));
+            return Some(Compositor::Cpu(t!("mixer.cpu_chosen").into()));
         }
         if self.gpu.is_some() || self.gpu_refused {
             return None;

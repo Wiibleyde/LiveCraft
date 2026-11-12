@@ -132,11 +132,11 @@ impl Device {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
         };
-        let adapter = pollster::block_on(instance.request_adapter(&options))
-            .map_err(|_| "aucune carte graphique adaptée".to_string())?;
+        let adapter =
+            pollster::block_on(instance.request_adapter(&options)).map_err(|_| t!("gpu.none").to_string())?;
         let info = adapter.get_info();
         if info.device_type == wgpu::DeviceType::Cpu && !software {
-            return Err(format!("{} n'est qu'une émulation logicielle", info.name));
+            return Err(t!("gpu.software_only", name = info.name));
         }
         let limits = adapter.limits();
         let max_side = limits.max_texture_dimension_2d as usize;
@@ -145,16 +145,16 @@ impl Device {
             required_limits: limits,
             ..Default::default()
         };
-        let (device, queue) = pollster::block_on(adapter.request_device(&desc))
-            .map_err(|e| format!("carte graphique inutilisable : {e}"))?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&desc)).map_err(|e| t!("gpu.unusable", error = e))?;
         let broken = Arc::new(Mutex::new(None));
         let said = broken.clone();
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-            said.lock().unwrap().get_or_insert_with(|| format!("erreur de la carte graphique : {e}"));
+            said.lock().unwrap().get_or_insert_with(|| t!("gpu.error", error = e));
         }));
         let said = broken.clone();
         device.set_device_lost_callback(move |_, why| {
-            said.lock().unwrap().get_or_insert_with(|| format!("carte graphique perdue : {why}"));
+            said.lock().unwrap().get_or_insert_with(|| t!("gpu.lost", reason = why));
         });
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -684,11 +684,7 @@ impl Work {
     fn finish_readback(&self, back: Readback, out: &mut Frame) {
         let wait = wgpu::PollType::Wait { submission_index: Some(back.index), timeout: Some(PATIENCE) };
         if let Err(e) = self.dev.device.poll(wait) {
-            self.dev
-                .broken
-                .lock()
-                .unwrap()
-                .get_or_insert_with(|| format!("la carte graphique ne répond plus : {e}"));
+            self.dev.broken.lock().unwrap().get_or_insert_with(|| t!("gpu.not_responding", error = e));
         }
         let mut list = self.staging.borrow_mut();
         let staging = &mut list[back.slot];
@@ -708,11 +704,7 @@ impl Work {
             copied.is_ok()
         };
         if !copied {
-            self.dev
-                .broken
-                .lock()
-                .unwrap()
-                .get_or_insert_with(|| "image perdue en revenant de la carte graphique".into());
+            self.dev.broken.lock().unwrap().get_or_insert_with(|| t!("gpu.picture_lost").into());
         }
         staging.busy = false;
     }

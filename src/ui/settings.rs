@@ -137,15 +137,15 @@ impl App {
             ui.label(RichText::new(t!("settings.stop_outputs_to_change_format")).small().color(DIM));
         }
         ui.separator();
-        ui.label(RichText::new("Composition de l'image").strong());
+        ui.label(RichText::new(t!("settings.compositing")).strong());
         let mut on = e.use_gpu.load(Ordering::Relaxed);
-        if ui.checkbox(&mut on, "Composer sur la carte graphique").changed() {
+        if ui.checkbox(&mut on, t!("settings.compose_on_gpu")).changed() {
             e.use_gpu.store(on, Ordering::Relaxed);
         }
         let line = match e.compositor.lock().unwrap().clone() {
-            Compositor::Starting => "Démarrage…".to_string(),
-            Compositor::Gpu(name) => format!("Sur la carte graphique : {name}"),
-            Compositor::Cpu(why) => format!("Sur le processeur : {why}"),
+            Compositor::Starting => t!("settings.compositor_starting").to_string(),
+            Compositor::Gpu(name) => t!("settings.on_gpu", name = name),
+            Compositor::Cpu(why) => t!("settings.on_cpu", reason = why),
         };
         ui.label(RichText::new(line).small().color(DIM));
     }
