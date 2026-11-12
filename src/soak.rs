@@ -65,6 +65,8 @@ const SETTLE: Duration = Duration::from_secs(30);
 /// Seconds each source, then the web page, may take to show a first picture.
 const SOURCE_START_S: f32 = 30.0;
 const PAGE_START_S: f32 = 90.0;
+/// How long the stream receiver is watched for an early stop.
+const RECEIVER_START: Duration = Duration::from_secs(5);
 
 pub fn run(dir: &str, length: Option<&str>) -> i32 {
     let length = match length {
@@ -833,12 +835,20 @@ fn receiver(dir: &str, url: &str, received: &str) -> Result<Child, String> {
         .stderr(log)
         .spawn()
         .map_err(|e| format!("récepteur RTMP : {e}"))?;
-    sleep(Duration::from_secs(1));
-    if let Ok(Some(status)) = server.try_wait() {
-        let said = std::fs::read_to_string(&log_path).unwrap_or_default();
-        let last: Vec<&str> = said.lines().rev().take(4).collect();
-        let last: Vec<&str> = last.into_iter().rev().collect();
-        return Err(format!("le récepteur RTMP s'est arrêté au départ ({status}) : {}", last.join(" | ")));
+    // One that cannot listen stops at once, but on a loaded machine "at once"
+    // can take seconds; one that listens never stops on its own.
+    let watched = Instant::now();
+    while watched.elapsed() < RECEIVER_START {
+        if let Ok(Some(status)) = server.try_wait() {
+            let said = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let last: Vec<&str> = said.lines().rev().take(4).collect();
+            let last: Vec<&str> = last.into_iter().rev().collect();
+            return Err(format!(
+                "le récepteur RTMP s'est arrêté au départ ({status}) : {}",
+                last.join(" | ")
+            ));
+        }
+        sleep(Duration::from_millis(100));
     }
     Ok(server)
 }
