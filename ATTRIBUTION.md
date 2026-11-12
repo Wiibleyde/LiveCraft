@@ -9,6 +9,12 @@ LiveCraft stands on other people's work.
 | Ubuntu Light font, through `epaint_default_fonts` | Text in titles and the clock when no installed font is chosen | Ubuntu Font Licence 1.0 |
 | Other egui default fonts, through `eframe` | The interface | OFL 1.1 and Ubuntu Font Licence 1.0 |
 
+## In the Windows installer
+
+| Component | Used for | License |
+| --- | --- | --- |
+| [Inno Setup](https://jrsoftware.org/isinfo.php) setup and uninstaller programs, by Jordan Russell and Martijn Laan | Installing and removing LiveCraft | Inno Setup License (permissive) |
+
 ## Rust crates
 
 The direct dependencies are listed in `Cargo.toml`. All crates in `Cargo.lock`
