@@ -27,3 +27,96 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # A virtual camera and a virtual cable feed LiveCraft's real camera and
+  # microphone inputs; program goes to a local MediaMTX over RTMP and SRT, and
+  # both streams are read back. See "Live check" in the README.
+  livecheck:
+    # Not for pull requests from forks: this job installs a driver and trusts a certificate.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: livecheck-${{ hashFiles('Cargo.lock') }}
+      - name: Install FFmpeg
+        run: |
+          # A dated BtbN release, and the SHA-256 that release publishes in its checksums.sha256.
+          $release = 'autobuild-2026-11-09-12-42'
+          $name = 'ffmpeg-n9.0.2-48-gd4070a14ce-win64-gpl-shared-9.0.zip'
+          $sha256 = '391c241f4c940dd4cdc082282a2ea54b1b2673d1c14246517fda6d55403c2d11'
+          $zip = "$env:RUNNER_TEMP/ffmpeg.zip"
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/$release/$name" -OutFile $zip
+          $got = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($got -ne $sha256) { throw "FFmpeg zip has SHA-256 $got, expected $sha256" }
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP/ffmpeg"
+          (Get-ChildItem "$env:RUNNER_TEMP/ffmpeg" -Recurse -Filter ffmpeg.exe).DirectoryName | Out-File -Append $env:GITHUB_PATH
+      - name: Install the VB-CABLE virtual microphone
+        timeout-minutes: 5
+        run: |
+          # Server images keep the sound service off and have no sound device.
+          Set-Service audiosrv -StartupType Automatic
+          Start-Service audiosrv
+          $dir = "$env:RUNNER_TEMP/vbcable"
+          # VB-Audio publishes no checksum: both values below were taken from the download of
+          # 2026-11-12 (pinned at first use) and any difference fails the job.
+          $sha256 = 'b950e39f01af1d04ea623c8f6d8eb9b6ea5c477c637295fabf20631c85116bfb'
+          $thumbprint = '9A4A6CFEE73C6B65945FCAA083DFBCC1E9077E7E'  # the driver catalog's signer
+          Invoke-WebRequest https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip -OutFile "$dir.zip"
+          $got = (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash
+          if ($got -ne $sha256) { throw "VB-CABLE zip has SHA-256 $got, expected $sha256" }
+          Expand-Archive "$dir.zip" -DestinationPath $dir
+          # Trusting the driver's publisher lets it install without a prompt, but only this exact certificate.
+          $sig = Get-AuthenticodeSignature "$dir/vbaudio_cable64_win10.cat"
+          if ($sig.Status -ne 'Valid') { throw "VB-CABLE catalog signature is $($sig.Status)" }
+          if ($sig.SignerCertificate.Thumbprint -ne $thumbprint) {
+            throw "VB-CABLE catalog is signed by $($sig.SignerCertificate.Thumbprint), expected $thumbprint"
+          }
+          $sig.SignerCertificate | Export-Certificate -FilePath "$dir.cer" | Out-Null
+          Import-Certificate -FilePath "$dir.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
+          $setup = Start-Process "$dir/VBCABLE_Setup_x64.exe" -ArgumentList '-i', '-h' -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "VB-CABLE setup exited with $($setup.ExitCode)" }
+          # Desktop programs are refused any microphone until this is allowed.
+          foreach ($root in 'HKLM:', 'HKCU:') {
+            $key = "$root\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+            New-Item -Force "$key\NonPackaged" | Out-Null
+            Set-ItemProperty $key Value Allow
+            Set-ItemProperty "$key\NonPackaged" Value Allow
+          }
+          $devices = ffmpeg -hide_banner -list_devices true -f dshow -i dummy 2>&1 | Out-String
+          if (-not $devices.Contains('CABLE Output')) { throw "VB-CABLE did not install:`n$devices" }
+          exit 0
+      - name: Fetch MediaMTX and build Softcam
+        # Kept out of the cached target folder, so every run fetches and checks it again.
+        run: ./scripts/livecheck-tools.ps1 -Into "$env:RUNNER_TEMP/livecheck-tools"
+      - run: cargo build
+      - name: Live check
+        run: ./target/debug/livecraft.exe --livecheck target/livecheck
+      - name: A broken link must fail the check
+        run: |
+          # Plain ASCII parts of each expected message, whatever the console encoding.
+          $expected = @{ freeze = 'image fig'; silence = 'pas de son'; drop = 'flux illisible' }
+          foreach ($what in $expected.Keys) {
+            $out = ./target/debug/livecraft.exe --livecheck "target/livecheck-$what" --break $what | Out-String
+            Write-Host "--break $what -> $out"
+            if ($LASTEXITCODE -eq 0) { throw "--break $what passed" }
+            if (-not $out.Contains($expected[$what])) { throw "--break $what failed for another reason" }
+          }
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: livecheck-logs
+          path: target/livecheck*/mediamtx.log
