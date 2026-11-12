@@ -272,6 +272,7 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
         Kind::Designed { objects: Vec::new(), anim_ms: 500 },
         Kind::Mix { preview: Some(1), output: Some(2), ms: 500 },
         Kind::Telestrator { background: None },
+        crate::sets::new_set(SetLook::Evening),
         Kind::Replay,
     ];
     for (n, kind) in extra.into_iter().enumerate() {
@@ -499,6 +500,20 @@ fn loading_a_project_leaves_nothing_of_the_last_one() {
     end(h);
 }
 
+/// A scene added from the menu used to flash its settings and close them at
+/// once, as that frame's copy of the project did not have it yet.
+#[test]
+fn an_input_added_from_the_menu_keeps_its_settings_open() {
+    let mut h = desk(small_project());
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Scène (couches)");
+    let added = project(&h).inputs.last().map(|i| i.id);
+    assert!(added.is_some_and(|id| id > 16), "a scene was added");
+    h.run_steps(3);
+    assert_eq!(h.state().editing, added);
+    end(h);
+}
+
 /// Every function by name, on the real engine. What needs an output or writes
 /// files is left to the end-to-end run.
 #[test]
@@ -533,6 +548,55 @@ fn every_named_function_is_known_and_leaves_the_desk_working() {
     assert!(engine.call("OverlayInput9", &Args::new().input("2")).is_err());
     engine.call("RemoveInput", &Args::new().input("2")).unwrap();
     assert!(engine.state.lock().unwrap().input(2).is_none());
+    end(h);
+}
+
+fn preview_red_at(h: &Harness<'static, App>, x: f32, y: f32) -> Option<bool> {
+    let f = h.state().engine.preview.lock().unwrap().clone()?;
+    let i = (((y * f.h as f32) as usize) * f.w + (x * f.w as f32) as usize) * 4;
+    Some(f.data[i] > 150 && f.data[i + 1] < 80 && f.data[i + 2] < 80)
+}
+
+/// Made from the menu, given a presenter from its settings, then sent from
+/// the wide shot to the close-up with the card's button: the camera must
+/// move there over time, not cut, and the preview must show it.
+#[test]
+fn a_virtual_set_is_made_from_the_menu_and_its_camera_glides_between_presets() {
+    let mut p = Project::blank();
+    p.out_w = 320;
+    p.out_h = 180;
+    p.inputs = vec![Input::new(1, "Présentatrice", Kind::Solid { color: [200, 30, 30] })];
+    let mut h = desk(p);
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Plateau virtuel");
+    let set = project(&h).inputs.iter().find(|i| matches!(i.kind, Kind::VirtualSet { .. })).map(|i| i.id);
+    let set = set.expect("the menu adds a virtual set");
+    assert_eq!(h.state().editing, Some(set), "its settings open at once");
+    click(&mut h, "Ajouter un présentateur");
+    let layers = project(&h).inputs.iter().find(|i| i.id == set).unwrap().layers.clone();
+    assert_eq!(layers.iter().map(|l| l.input).collect::<Vec<_>>(), vec![1]);
+    h.state_mut().editing = None;
+    h.run_steps(2);
+
+    click(&mut h, "Entrée Plateau virtuel");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // Wide shot: the presenter stands in the middle, the decor beside her.
+    while preview_red_at(&h, 0.5, 0.5) != Some(true) {
+        assert!(Instant::now() < deadline, "the set never reached the preview");
+        wait(&mut h, 20);
+    }
+    assert_eq!(preview_red_at(&h, 0.1, 0.5), Some(false));
+
+    click(&mut h, "Caméra 3 Plateau virtuel");
+    let moving = h.state().with(|s| s.set_moves.contains_key(&set));
+    assert!(moving, "the camera moves rather than cuts");
+    let kind = project(&h).inputs.iter().find(|i| i.id == set).unwrap().kind.clone();
+    assert!(matches!(kind, Kind::VirtualSet { camera: 2, .. }));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.state().with(|s| s.set_moves.contains_key(&set)) || preview_red_at(&h, 0.1, 0.5) != Some(true) {
+        assert!(Instant::now() < deadline, "the close-up never arrived");
+        wait(&mut h, 20);
+    }
     end(h);
 }
 

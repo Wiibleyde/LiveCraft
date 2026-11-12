@@ -341,7 +341,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32, hardware: boo
             rt.publish(Frame::solid(w, h, color));
         }
         // These are built by the mixer, which sees all the inputs.
-        Kind::Scene | Kind::Mix { .. } => {}
+        Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. } => {}
         Kind::Tone => run_tone(&rt),
         Kind::SystemAudio => run_system_audio(&rt),
         Kind::Motion => run_motion(&rt, w, h, fps),

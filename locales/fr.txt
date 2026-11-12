@@ -721,3 +721,34 @@ outputs.srt_stopped = SRT arrêté : {reason}
 
 # src/audio.rs
 audio.default_output = Sortie par défaut
+
+# src/sets.rs, src/ui/virtual_set.rs (virtual sets)
+model.kind.virtual_set = Plateau virtuel
+inputs.add_set = Plateau virtuel
+inputs.set_name = Plateau virtuel
+inputs.set_camera_named = Caméra {n} {name}
+inputs.set_camera_menu = Caméra {n} : {name}
+set.decor = Décor
+set.studio = Studio
+set.evening = Soirée
+set.none = Aucun
+set.built_in = Décor intégré
+set.background = Fond
+set.foreground = Premier plan
+set.replace_note = Une image ou une vidéo choisie remplace le décor intégré ; le premier plan doit être transparent.
+set.presenters = Présentateurs
+set.presenters_note = La clé (fond vert) se règle dans les réglages de chaque présentateur, sa place dans l'onglet Couches.
+set.remove = Retirer
+set.add_presenter = Ajouter un présentateur
+set.cameras = Caméras
+set.move_time = durée d'un mouvement (ms)
+set.go_to_camera = Aller à la caméra {n}
+set.go_smoothly = Y aller en douceur
+set.add_camera = Ajouter une caméra (vue actuelle)
+set.new_camera_name = Caméra {n}
+set.cam_wide = Plan large
+set.cam_medium = Plan moyen
+set.cam_close = Gros plan
+set.cam_screen = Écran
+functions.not_a_set = Cette entrée n'est pas un plateau virtuel
+functions.camera_not_found = Caméra introuvable : {name}
