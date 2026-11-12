@@ -159,7 +159,7 @@ fn play_once(rt: &Arc<InputRt>, spec: &Spec, start_ms: u64, w: usize, h: usize, 
     let mut child = match spawned {
         Ok(c) => c,
         Err(_) => {
-            rt.set_status(FFMPEG_MISSING);
+            rt.set_status(ffmpeg_missing());
             return End::Stopped;
         }
     };
@@ -221,7 +221,7 @@ fn play_once(rt: &Arc<InputRt>, spec: &Spec, start_ms: u64, w: usize, h: usize, 
         ring.clear();
     }
     if matches!(end, End::Failed) {
-        rt.set_status(format!("Lecture impossible : {}", log.lock().unwrap()));
+        rt.set_status(t!("playback.cannot_play", reason = log.lock().unwrap()));
     }
     end
 }
@@ -285,7 +285,7 @@ pub fn run_audio_file(rt: &Arc<InputRt>, path: &str, looped: bool) {
         let mut child = match spawned {
             Ok(c) => c,
             Err(_) => {
-                rt.set_status(FFMPEG_MISSING);
+                rt.set_status(ffmpeg_missing());
                 return;
             }
         };
@@ -353,7 +353,7 @@ pub fn run_list(
     fps: u32,
 ) {
     if items.is_empty() {
-        rt.set_status("Liste vide");
+        rt.set_status(t!("playback.empty_list"));
         return;
     }
     if shuffle {
@@ -523,7 +523,7 @@ fn play_clip(
         };
         let out = match decoder {
             Err(_) => {
-                rt.set_status(FFMPEG_MISSING);
+                rt.set_status(ffmpeg_missing());
                 return;
             }
             Ok(None) => None,

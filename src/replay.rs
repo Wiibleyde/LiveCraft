@@ -246,7 +246,7 @@ impl Engine {
         for (n, input) in inputs.into_iter().enumerate() {
             let path = folder.join(format!("ralenti-{stamp}-cam{}.ts", n + 1)).to_string_lossy().into_owned();
             let opened = Encoder::start(Spec {
-                label: format!("Ralenti : {}", input.name),
+                label: t!("replay.encoder_label", name = &input.name),
                 target: Target::Growing(path.clone()),
                 codec: "libx264".into(),
                 w,
@@ -267,7 +267,7 @@ impl Engine {
         }
         let count = cams.len();
         if count == 0 {
-            return Err("Choisissez au moins une caméra".into());
+            return Err(t!("replay.choose_camera").into());
         }
         let existing = {
             let s = self.state.lock().unwrap();
@@ -275,7 +275,7 @@ impl Engine {
         };
         let id = existing.unwrap_or_else(|| {
             let id = self.new_id();
-            self.add_input(Input::new(id, "Ralenti", Kind::Replay));
+            self.add_input(Input::new(id, t!("replay.input_name"), Kind::Replay));
             id
         });
         let mut r = self.replay.lock().unwrap();
