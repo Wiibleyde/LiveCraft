@@ -829,6 +829,36 @@ fn an_input_added_from_the_menu_keeps_its_settings_open() {
     end(h);
 }
 
+/// Made from the menu, pointed at a camera and given its time in the settings
+/// that open with it: the delay then shows that camera. Its list of sources
+/// never offers the delay itself.
+#[test]
+fn a_video_delay_is_added_from_the_menu_and_shows_its_source() {
+    let mut h = desk(small_project());
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Retard vidéo");
+    let added = project(&h).inputs.iter().find(|i| matches!(i.kind, Kind::VideoDelay { .. })).map(|i| i.id);
+    let delay = added.expect("the menu adds a video delay");
+    h.run_steps(3);
+    assert_eq!(h.state().editing, Some(delay), "its settings open at once");
+    let named_delay = |h: &Harness<'static, App>| h.query_all_by_label("Retard vidéo").count();
+    let before = named_delay(&h);
+    click(&mut h, "Source du retard");
+    assert_eq!(named_delay(&h), before, "not offered as its own source");
+    click(&mut h, "CAM 2");
+    h.get_by_role_and_label(egui::accesskit::Role::Slider, "Retard").set_value_accesskit(250.0);
+    h.run_steps(3);
+    let kind = project(&h).inputs.iter().find(|i| i.id == delay).unwrap().kind.clone();
+    assert_eq!(kind, Kind::VideoDelay { source: Some(2), ms: 250 });
+    let (engine, camera) = (h.state().engine.clone(), h.state().engine.rt(2).unwrap());
+    settle(&mut h, "the delay shows the moving camera", |_| {
+        let shown = engine.rt(delay).and_then(|r| r.latest());
+        shown.is_some_and(|f| !Arc::ptr_eq(&f, &camera.latest().unwrap()))
+            && engine.rt(delay).is_some_and(|r| r.seq() > 10)
+    });
+    end(h);
+}
+
 /// Every function by name, on the real engine. What needs an output or writes
 /// files is left to the end-to-end run.
 #[test]

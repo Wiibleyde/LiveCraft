@@ -88,7 +88,10 @@ impl App {
         }
         if input != before {
             let source_changed = input.kind.restarts_source(&before.kind);
-            let live = !matches!(input.kind, Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. });
+            let live = !matches!(
+                input.kind,
+                Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. } | Kind::VideoDelay { .. }
+            );
             let keep = input.kind.same_source(&before.kind);
             self.with(|s| {
                 if let Some(slot) = s.input_mut(id) {
@@ -520,6 +523,7 @@ impl App {
                     self.telestrator_for = Some(id);
                 }
             }
+            Kind::VideoDelay { source, ms } => delay_editor(ui, id, source, ms, project),
             Kind::VideoCall { token, address, stun, turn, turn_user, turn_password, return_sound } => {
                 let connected = rt.as_ref().and_then(|r| r.call.as_ref()).is_some_and(|c| c.is_connected());
                 call_editor(ui, token, address, self.api_lan, connected);
@@ -745,6 +749,35 @@ impl App {
 
 fn path_row(ui: &mut egui::Ui, path: &str) {
     ui.add(egui::Label::new(RichText::new(path).small()).truncate());
+}
+
+/// A Video Delay's source and time. Only inputs that would not bring the
+/// delay back into its own picture are offered, and the time stops at what
+/// memory allows at the project's size and frame rate.
+fn delay_editor(ui: &mut egui::Ui, id: u64, source: &mut Option<u64>, ms: &mut u32, project: &Project) {
+    let find = |i: u64| project.inputs.iter().find(|x| x.id == i);
+    ui.horizontal(|ui| {
+        ui.label(t!("input_settings.delay.source"));
+        let shown = source.and_then(find).map_or(t!("widgets.none").to_string(), |i| i.name.clone());
+        let combo = egui::ComboBox::from_id_salt("retard-source").selected_text(shown).show_ui(ui, |ui| {
+            ui.selectable_value(source, None, t!("widgets.none"));
+            for i in project.inputs.iter().filter(|i| !crate::desk::delay_loops(id, i.id, find)) {
+                ui.selectable_value(source, Some(i.id), &i.name);
+            }
+        });
+        named(combo.response, t!("input_settings.delay.source_combo"));
+    });
+    let (w, h, fps) = (project.out_w, project.out_h, project.fps);
+    let longest = crate::delay::longest_ms(w, h, fps);
+    ui.add(egui::Slider::new(ms, 0..=longest).suffix(" ms").text(t!("input_settings.delay.time")));
+    let note = |ui: &mut egui::Ui, text: &str| {
+        ui.label(RichText::new(text).small().color(DIM));
+    };
+    let seconds = format!("{:.1}", longest as f32 / 1000.0);
+    note(ui, &t!("input_settings.delay.longest", seconds = seconds, w = w, h = h, fps = fps));
+    let size = format!("{:.1}", crate::delay::bytes_held(*ms, w, h, fps) as f64 / 1e9);
+    note(ui, &t!("input_settings.delay.memory", size = size));
+    note(ui, t!("input_settings.delay.sound"));
 }
 
 /// Labels of the four crop sliders: left, right, top, bottom.
