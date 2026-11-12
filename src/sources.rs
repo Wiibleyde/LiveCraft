@@ -126,6 +126,8 @@ pub struct InputRt {
     /// Processes started for this input. A source that keeps restarting
     /// shows here long before anyone notices a blink on air.
     pub launches: AtomicU64,
+    /// Only on a video call: what passes between the call and the desk.
+    pub call: Option<Arc<crate::call::CallLink>>,
     /// Where each chapter starts, as the decoder announced them.
     pub chapters: Mutex<Vec<u64>>,
     /// What a DVD holds, read from the disc as it opens.
@@ -135,6 +137,10 @@ pub struct InputRt {
 
 impl InputRt {
     pub(crate) fn new(with_audio: bool, playing: bool) -> Arc<Self> {
+        Self::build(with_audio.then(|| Ring::new(1.0)), playing, None)
+    }
+
+    fn build(audio: Option<Ring>, playing: bool, call: Option<Arc<crate::call::CallLink>>) -> Arc<Self> {
         Arc::new(Self {
             frame: Mutex::new(None),
             seq: AtomicU64::new(0),
@@ -150,12 +156,13 @@ impl InputRt {
             showing: AtomicBool::new(true),
             end_ms: AtomicU64::new(0),
             completions: AtomicU64::new(0),
-            audio: with_audio.then(|| Arc::new(Ring::new(1.0))),
+            audio: audio.map(Arc::new),
             peak: AtomicU32::new(0),
             replay: Mutex::new(None),
             strokes: Mutex::new(Vec::new()),
             strokes_gen: AtomicU64::new(0),
             launches: AtomicU64::new(0),
+            call,
             chapters: Mutex::new(Vec::new()),
             titles: Mutex::new(Vec::new()),
             children: Mutex::new(Vec::new()),
@@ -328,7 +335,13 @@ pub fn start_seeded(
     // Files and countdowns wait until something starts them.
     let countdown = matches!(input.kind, Kind::Title { style: TitleStyle::Countdown, .. });
     let waits = input.kind.has_timeline() || countdown;
-    let rt = InputRt::new(has_audio, !waits);
+    let rt = if let Kind::VideoCall { .. } = input.kind {
+        // A conversation cannot wait: sound that falls behind is dropped
+        // rather than heard late.
+        InputRt::build(Some(Ring::new(0.3)), true, Some(Arc::default()))
+    } else {
+        InputRt::new(has_audio, !waits)
+    };
     *rt.frame.lock().unwrap() = seed;
     if let Some(r) = resume {
         if waits {
@@ -437,6 +450,10 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
         Kind::Replay => playback::run_replay(&rt, w, h, fps),
         Kind::Browser { url, alpha } => crate::browser::run_browser(&rt, &url, alpha, w, h, fps),
         Kind::Telestrator { .. } => run_telestrator(&rt, w, h),
+        Kind::VideoCall { stun, turn, turn_user, turn_password, .. } => {
+            let ice = crate::call::ice_servers(&stun, &turn, &turn_user, &turn_password);
+            crate::call::run_call(&rt, &ice, w, h, fps);
+        }
     }
 }
 

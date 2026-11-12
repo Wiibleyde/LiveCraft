@@ -50,8 +50,8 @@ The HTTP and TCP interfaces use the published function names, so existing contro
 **Inputs.** Video files, image sequences, photo folders, lists, images, audio files, PowerPoint
 presentations, DVDs (a drive, a `VIDEO_TS` folder or an `.iso`, with titles and chapters), cameras and
 microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP, TS), NDI and OMT sources, web
-pages, solid colours, test cards, clocks, and titles with presets, tickers, countdowns and a simple
-designer.
+pages, video calls from a guest's browser with the program sent back, solid colours, test cards, clocks,
+and titles with presets, tickers, countdowns and a simple designer.
 
 **Virtual sets.** Keyed presenters stand in a decor, behind a desk, and a virtual camera glides
 between presets from a card button, a named function or remote control. Two decors are drawn by
@@ -122,7 +122,6 @@ livecraft --lang en                       # start in English (or fr), and keep t
 
 - **Windows only.** The code uses Windows APIs for capture, screens and secrets.
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
-- **No video calls.**
 - **DVDs need FFmpeg's `dvdvideo` demuxer**, as in the gyan.dev full builds. Copy-protected discs only
   open if that FFmpeg can load libdvdcss.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
@@ -171,7 +170,8 @@ process for each source and output. See [docs/architecture.md](docs/architecture
 
 ## Security
 
-The remote control only listens on this computer unless you turn network access on. To report a
+The remote control only listens on this computer unless you turn network access on. A video call
+guest's link opens that guest's page and call only, never the controls. To report a
 vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License and credits

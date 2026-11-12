@@ -25,18 +25,19 @@ so a slow window cannot hold up the show.
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
 | `sets.rs` | Virtual sets: built-in decors and camera moves; the mixer composes them |
 | `sources.rs`, `playback.rs`, `browser.rs`, `dvd.rs` | Where pictures and sound come from |
+| `call.rs` | Video calls: the guest's link and page, and the call received in the windowless browser |
 | `slides.rs` | Presentations, turned into one picture per slide by PowerPoint or LibreOffice |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `plugins.rs`, `clap.rs` | CLAP plug-ins: finding, running and saving them. Their own thread starts, saves and shows them; the sound thread only runs blocks, without waiting on a lock. Tests build `fixtures/clap-test-gain` |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
 | `netvideo.rs`, `ndi.rs`, `omt.rs` | NDI and OMT in and out; runtimes loaded on first use, never shipped |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
-| `functions.rs`, `api.rs` | Named functions, and HTTP and TCP remote control |
+| `functions.rs`, `api.rs` | Named functions, and HTTP and TCP remote control, also https for guests |
 | `vmix_import.rs` | Reading `.vmix` projects |
 | `secret.rs` | Sealing secrets in the session file |
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
 | `i18n.rs`, `locales/` | Interface text: `t!("key")` reads it from one catalog per language |
-| `selftest.rs`, `playtest.rs` | `--selftest`: real end-to-end checks |
+| `selftest.rs`, `playtest.rs`, `calltest.rs` | `--selftest`: real end-to-end checks |
 | `soak.rs` | `--soak`: a whole show left running, with memory, timing and outputs watched |
 | `livecheck.rs` | `--livecheck`: a virtual camera and microphone streamed to a local server and read back |
 

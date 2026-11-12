@@ -562,6 +562,7 @@ impl Engine {
                 self.stats.mix_us.store(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
                 self.ping();
             }
+            self.show_program_to_guests(&rts);
             self.update_preview(&mut m, &c);
             let refresh_all = tick_n.is_multiple_of((fps / 6).max(1));
             self.update_routes(&mut m, &c, refresh_all);
