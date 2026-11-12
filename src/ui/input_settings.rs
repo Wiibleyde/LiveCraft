@@ -22,7 +22,11 @@ impl App {
     pub(super) fn input_settings_window(&mut self, ctx: &egui::Context, project: &Project) {
         let Some(id) = self.editing else { return };
         let Some(before) = project.inputs.iter().find(|i| i.id == id).cloned() else {
-            self.editing = None;
+            // An input added from a menu earlier in this frame is not in this
+            // frame's copy of the project yet; only a closed one ends editing.
+            if self.with(|s| s.input(id).is_none()) {
+                self.editing = None;
+            }
             return;
         };
         let mut input = before.clone();
@@ -77,7 +81,7 @@ impl App {
         }
         if input != before {
             let source_changed = input.kind != before.kind;
-            let live = !matches!(input.kind, Kind::Scene | Kind::Mix { .. });
+            let live = !matches!(input.kind, Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. });
             let keep = input.kind.same_source(&before.kind);
             self.with(|s| {
                 if let Some(slot) = s.input_mut(id) {
@@ -142,6 +146,10 @@ impl App {
     }
 
     fn source_editor(&mut self, ui: &mut egui::Ui, input: &mut Input, project: &Project) {
+        if matches!(input.kind, Kind::VirtualSet { .. }) {
+            self.set_editor(ui, input, project);
+            return;
+        }
         let rt = self.engine.rt(input.id);
         let (cams, mics) = self.devices.lock().unwrap().clone();
         let id = input.id;
@@ -345,6 +353,37 @@ impl App {
             Kind::Photos { folder, seconds } => {
                 path_row(ui, folder);
                 ui.add(egui::Slider::new(seconds, 0.0..=60.0).text(t!("input_settings.seconds_per_photo")));
+            }
+            Kind::PowerPoint { path } => {
+                path_row(ui, path);
+                if ui.button(t!("slides.change")).clicked()
+                    && let Some(p) = rfd::FileDialog::new()
+                        .add_filter(t!("inputs.presentation_filter"), &crate::slides::EXTENSIONS)
+                        .pick_file()
+                {
+                    *path = p.to_string_lossy().into_owned();
+                }
+                if let Some(rt) = &rt {
+                    let number = self.input_number(project, id);
+                    ui.horizontal(|ui| {
+                        if ui.button(t!("slides.previous")).clicked() {
+                            self.call("PreviousPicture", &Args::new().input(&number));
+                        }
+                        if ui.button(t!("slides.next")).clicked() {
+                            self.call("NextPicture", &Args::new().input(&number));
+                        }
+                        let count = rt.items.load(Ordering::Relaxed);
+                        if count > 0 {
+                            let at = rt.item.load(Ordering::Relaxed) + 1;
+                            ui.label(t!("slides.position", at = at, count = count));
+                        }
+                    });
+                    // The card has room for the start of it only.
+                    if let Some(msg) = rt.status() {
+                        ui.label(RichText::new(msg).color(ORANGE));
+                    }
+                }
+                ui.label(RichText::new(t!("slides.converted_by")).small().color(DIM));
             }
             Kind::ImageSequence { first, fps, looped } => {
                 path_row(ui, first);

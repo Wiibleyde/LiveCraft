@@ -35,7 +35,9 @@ stops, the shorter of sound and picture is padded to the other, so both end toge
 | `engine.rs` | Starts the threads, owns sources and outputs |
 | `mixer.rs` | The video loop: what to compose, and reusing what has not changed |
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
+| `sets.rs` | Virtual sets: built-in decors and camera moves; the mixer composes them |
 | `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
+| `slides.rs` | Presentations, turned into one picture per slide by PowerPoint or LibreOffice |
 | `clock.rs` | The shared clock: pacing the loops, placing pictures and sound in encoders |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
@@ -60,4 +62,6 @@ stops, the shorter of sound and picture is padded to the other, so both end toge
 
 - Pixels are RGBA with premultiplied alpha.
 - Sizes in saved data are fractions of the frame, so projects survive a change of format.
+- Replay marks are moments of the show, not positions in a file. Every encoder logs when each picture it
+  wrote was taken, so a file that lost pictures still finds the right one.
 - The desk can be tested without a window, and the window with real clicks in `ui/tests.rs`.

@@ -77,10 +77,31 @@ impl Ring {
 /// A replay clip to play, set by the engine and read by the Replay input.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplayPlay {
-    pub files: Vec<String>,
-    pub start_s: f64,
-    pub end_s: f64,
+    /// One per camera shown, up to four.
+    pub clips: Vec<ReplayClip>,
+    /// Seconds of the show from the first picture to the out mark.
+    pub span_s: f64,
     pub speed: f32,
+}
+
+/// Part of one recording, and when each of its pictures was taken.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplayClip {
+    pub file: String,
+    /// Where reading starts and stops, in seconds from the file's first picture.
+    pub from_s: f64,
+    pub to_s: f64,
+    /// When each picture read was taken, in seconds from the start of the
+    /// moment. Empty when the recording kept no log: pictures then follow at
+    /// the frame rate, as they did in the file.
+    pub times: Vec<f64>,
+}
+
+impl ReplayClip {
+    /// When picture `n` of the clip is due, or None past its last one.
+    pub fn due(&self, n: usize, fps: u32) -> Option<f64> {
+        if self.times.is_empty() { Some(n as f64 / fps.max(1) as f64) } else { self.times.get(n).copied() }
+    }
 }
 
 /// Running state of one input, shared with the mixer and the UI.
@@ -93,7 +114,7 @@ pub struct InputRt {
     pub pos_ms: AtomicU64,
     pub dur_ms: AtomicU64,
     pub seek_ms: AtomicI64,
-    /// Asks a List or Photos input to jump to an item.
+    /// Asks a List, Photos or PowerPoint input to jump to an item.
     pub select: AtomicI64,
     pub item: AtomicU64,
     pub items: AtomicU64,
@@ -274,8 +295,13 @@ pub fn ffmpeg() -> Command {
 }
 
 pub(crate) fn fit_filter(w: usize, h: usize, fps: u32) -> String {
+    format!("fps={fps},{}", fit_scale(w, h))
+}
+
+/// Fits a picture into `w`×`h` without touching its timing.
+pub(crate) fn fit_scale(w: usize, h: usize) -> String {
     format!(
-        "fps={fps},scale={w}:{h}:force_original_aspect_ratio=decrease:flags=fast_bilinear,\
+        "scale={w}:{h}:force_original_aspect_ratio=decrease:flags=fast_bilinear,\
          format=rgba,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
     )
 }
@@ -300,10 +326,15 @@ pub fn start_seeded(
     let waits = input.kind.has_timeline() || countdown;
     let rt = InputRt::new(has_audio, !waits);
     *rt.frame.lock().unwrap() = seed;
-    if let (Some(r), true) = (resume, waits) {
-        rt.playing.store(r.playing, Ordering::Relaxed);
-        rt.pos_ms.store(r.pos_ms, Ordering::Relaxed);
-        rt.item.store(r.item, Ordering::Relaxed);
+    if let Some(r) = resume {
+        if waits {
+            rt.playing.store(r.playing, Ordering::Relaxed);
+            rt.pos_ms.store(r.pos_ms, Ordering::Relaxed);
+        }
+        // A presentation stays on its slide when its source is started again.
+        if waits || matches!(input.kind, Kind::PowerPoint { .. }) {
+            rt.item.store(r.item, Ordering::Relaxed);
+        }
     }
     let kind = input.kind.clone();
     let worker = rt.clone();
@@ -320,7 +351,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             rt.publish(Frame::solid(w, h, color));
         }
         // These are built by the mixer, which sees all the inputs.
-        Kind::Scene | Kind::Mix { .. } => {}
+        Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. } => {}
         Kind::Tone => run_tone(&rt),
         Kind::SystemAudio => run_system_audio(&rt),
         Kind::Motion => run_motion(&rt, w, h, fps),
@@ -332,6 +363,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             Err(e) => rt.set_status(t!("sources.unreadable_image", error = e)),
         },
         Kind::Photos { folder, seconds } => run_photos(&rt, &folder, seconds, w, h),
+        Kind::PowerPoint { path } => crate::slides::run(&rt, &path, w, h),
         Kind::Title { text, sub, style, color, accent, ticker_speed, countdown_ms, font, size, .. } => {
             match style {
                 TitleStyle::Ticker => run_ticker(&rt, &text, color, accent, ticker_speed, w, h, fps),

@@ -298,6 +298,18 @@ impl App {
                 self.call("Loop", &Args::new().input(&(self.input_number(project, id))));
             }
         }
+        if let Kind::VirtualSet { cameras, camera, .. } = &input.kind {
+            for (n, cam) in cameras.iter().enumerate().take(6) {
+                let on = (*camera == n).then_some(GREEN);
+                let r = named(
+                    tiny(&mut top, &format!("C{}", n + 1), on),
+                    t!("inputs.set_camera_named", n = n + 1, name = input.name),
+                );
+                if r.on_hover_text(crate::sets::camera_label(&cam.name)).clicked() {
+                    self.with(|s| s.set_camera(id, n, None, Instant::now()));
+                }
+            }
+        }
         if let (true, Some(rt)) = (input.kind.has_timeline(), &rt) {
             let playing = rt.is_playing();
             let icon = if playing { Icon::Pause } else { Icon::Play };
@@ -306,6 +318,30 @@ impl App {
             }
             if icon_button(&mut top, Icon::Restart, None).clicked() {
                 rt.seek_ms.store(0, Ordering::Relaxed);
+            }
+        }
+        if let (Kind::PowerPoint { .. }, Some(rt)) = (&input.kind, &rt) {
+            // Through the named functions, so the card does what a remote does.
+            let number = self.input_number(project, id);
+            let back = named(
+                icon_button(&mut top, Icon::Step(false), None),
+                t!("slides.previous_named", name = input.name),
+            );
+            if back.on_hover_text(t!("slides.previous")).clicked() {
+                self.call("PreviousPicture", &Args::new().input(&number));
+            }
+            let count = rt.items.load(Ordering::Relaxed);
+            let at = match count {
+                0 => "…".to_string(),
+                n => format!("{}/{n}", rt.item.load(Ordering::Relaxed) + 1),
+            };
+            top.label(RichText::new(at).size(10.5).color(TEXT));
+            let on = named(
+                icon_button(&mut top, Icon::Step(true), None),
+                t!("slides.next_named", name = input.name),
+            );
+            if on.on_hover_text(t!("slides.next")).clicked() {
+                self.call("NextPicture", &Args::new().input(&number));
             }
         }
         let mut bottom =
@@ -345,7 +381,7 @@ impl App {
         });
     }
 
-    fn input_number(&self, project: &Project, id: u64) -> String {
+    pub(super) fn input_number(&self, project: &Project, id: u64) -> String {
         let at = project.inputs.iter().position(|i| i.id == id);
         at.map_or(String::new(), |n| (n + 1).to_string())
     }
@@ -408,6 +444,21 @@ impl App {
                     ui.close();
                 }
             }
+            Kind::VirtualSet { cameras, .. } => {
+                for (n, cam) in cameras.iter().enumerate() {
+                    if ui
+                        .button(t!(
+                            "inputs.set_camera_menu",
+                            n = n + 1,
+                            name = crate::sets::camera_label(&cam.name)
+                        ))
+                        .clicked()
+                    {
+                        self.with(|s| s.set_camera(id, n, None, Instant::now()));
+                        ui.close();
+                    }
+                }
+            }
             Kind::Title { presets, style, .. } => {
                 if *style == TitleStyle::Countdown {
                     for (label, f) in [
@@ -446,10 +497,16 @@ impl App {
                     }
                 }
             }
-            Kind::Photos { .. } | Kind::List { .. } => {
+            Kind::Photos { .. } | Kind::List { .. } | Kind::PowerPoint { .. } => {
+                let slides = matches!(input.kind, Kind::PowerPoint { .. });
                 let count = self.engine.rt(id).map_or(0, |r| r.items.load(Ordering::Relaxed));
                 for n in 0..count.min(30) {
-                    if ui.button(t!("inputs.menu_item", n = n + 1)).clicked() {
+                    let label = if slides {
+                        t!("inputs.menu_slide", n = n + 1)
+                    } else {
+                        t!("inputs.menu_item", n = n + 1)
+                    };
+                    if ui.button(label).clicked() {
                         if let Some(rt) = self.engine.rt(id) {
                             rt.select.store(n as i64, Ordering::Relaxed);
                         }
@@ -490,6 +547,9 @@ impl App {
                 } else {
                     self.confirm_open = Some(path);
                 }
+            }
+            _ if crate::slides::is_presentation(&path) => {
+                self.add_input(&name, Kind::PowerPoint { path });
             }
             _ if p.is_dir() => {
                 self.add_input(&name, Kind::Photos { folder: path, seconds: 0.0 });
@@ -577,6 +637,15 @@ impl App {
             }
             if ui.button(t!("inputs.add_photos")).clicked() {
                 if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                    self.add_file(&p);
+                }
+                ui.close();
+            }
+            if ui.button(t!("inputs.add_powerpoint")).clicked() {
+                let picked = rfd::FileDialog::new()
+                    .add_filter(t!("inputs.presentation_filter"), &crate::slides::EXTENSIONS)
+                    .pick_files();
+                for p in picked.unwrap_or_default() {
                     self.add_file(&p);
                 }
                 ui.close();
@@ -671,6 +740,12 @@ impl App {
             if ui.button(t!("inputs.telestrator")).clicked() {
                 let id = self.add_input(t!("inputs.telestrator"), Kind::Telestrator { background: None });
                 self.telestrator_for = Some(id);
+                ui.close();
+            }
+            if ui.button(t!("inputs.add_set")).clicked() {
+                let id = self.add_input(t!("inputs.set_name"), crate::sets::new_set(SetLook::Studio));
+                self.editing = Some(id);
+                self.edit_tab = 0;
                 ui.close();
             }
             ui.separator();

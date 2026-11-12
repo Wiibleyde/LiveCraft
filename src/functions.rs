@@ -7,6 +7,7 @@ use crate::model::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 #[derive(Default, Clone, Debug)]
 pub struct Args {
@@ -91,6 +92,7 @@ pub const NAMES: &[&str] = &[
     "MirrorOff",
     "MirrorOn",
     "NextItem",
+    "NextPicture",
     "NextPlayListEntry",
     "Pause",
     "PauseCountdown",
@@ -100,6 +102,7 @@ pub const NAMES: &[&str] = &[
     "PreviewInputNext",
     "PreviewInputPrevious",
     "PreviousItem",
+    "PreviousPicture",
     "QuickPlay",
     "RemoveInput",
     "Restart",
@@ -139,6 +142,7 @@ pub const NAMES: &[&str] = &[
     "StopSRTOutput",
     "StopStreaming",
     "Undo",
+    "VirtualSet",
 ];
 
 fn strip_prefix_any_case<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
@@ -225,7 +229,7 @@ impl Engine {
                 self.state.lock().unwrap().cut_to(id);
             }
             "Play" | "Pause" | "PlayPause" | "Restart" | "Loop" | "LoopOn" | "LoopOff" | "SetPosition"
-            | "NextItem" | "PreviousItem" | "SelectIndex" => {
+            | "NextItem" | "PreviousItem" | "NextPicture" | "PreviousPicture" | "SelectIndex" => {
                 return self.playback_function(name, a);
             }
             "StartCountdown" | "StopCountdown" | "PauseCountdown" | "SetCountdown" => {
@@ -259,6 +263,7 @@ impl Engine {
                 self.close_input(id);
             }
             "LayerOn" | "LayerOff" | "LayerOnOff" => return self.layer_function(name, a),
+            "VirtualSet" => return self.virtual_set_function(a),
             "Audio" | "AudioOn" | "AudioOff" => {
                 self.with_input(a, |i| {
                     i.audio.muted = match name {
@@ -446,11 +451,18 @@ impl Engine {
             "Restart" => rt.seek_ms.store(0, Ordering::Relaxed),
             "SetPosition" => rt.seek_ms.store(a.number()? as i64, Ordering::Relaxed),
             "SelectIndex" => rt.select.store(a.number()? as i64 - 1, Ordering::Relaxed),
-            "NextItem" | "PreviousItem" => {
-                let step = if name == "NextItem" { 1 } else { -1 };
+            "NextItem" | "PreviousItem" | "NextPicture" | "PreviousPicture" => {
+                let step = if name.starts_with("Next") { 1 } else { -1 };
                 let count = rt.items.load(Ordering::Relaxed).max(1) as i64;
-                let at = rt.item.load(Ordering::Relaxed) as i64;
-                rt.select.store((at + step + count) % count, Ordering::Relaxed);
+                let at = rt.item.load(Ordering::Relaxed) as i64 + step;
+                // A presentation stops at its ends, as in PowerPoint: one click
+                // too many must not put the title slide back on air.
+                let slides = matches!(
+                    self.state.lock().unwrap().input(id).map(|i| &i.kind),
+                    Some(Kind::PowerPoint { .. })
+                );
+                let to = if slides { at.clamp(0, count - 1) } else { (at + count) % count };
+                rt.select.store(to, Ordering::Relaxed);
             }
             _ => {
                 {
@@ -517,6 +529,29 @@ impl Engine {
                 };
             }
         })
+    }
+
+    /// Moves a virtual set's camera to a preset, by number from 1 or by name.
+    /// A Duration replaces the set's own move time; 0 cuts straight there.
+    fn virtual_set_function(&self, a: &Args) -> Result<(), String> {
+        let id = self.target(a)?;
+        let wanted = a.value.as_deref().unwrap_or("").trim();
+        let mut s = self.state.lock().unwrap();
+        let Some(Kind::VirtualSet { cameras, .. }) = s.input(id).map(|i| &i.kind) else {
+            return Err(t!("functions.not_a_set").into());
+        };
+        let n = match wanted.parse::<usize>() {
+            Ok(n) => n.checked_sub(1),
+            Err(_) => cameras.iter().position(|c| {
+                c.name.eq_ignore_ascii_case(wanted)
+                    || crate::sets::camera_label(&c.name).eq_ignore_ascii_case(wanted)
+            }),
+        };
+        let n = n
+            .filter(|n| *n < cameras.len())
+            .ok_or_else(|| t!("functions.camera_not_found", name = wanted))?;
+        s.set_camera(id, n, a.duration, Instant::now());
+        Ok(())
     }
 }
 

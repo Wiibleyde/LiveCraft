@@ -6,6 +6,7 @@
 use crate::clock::{self, FrameLine, SampleLine};
 use crate::frame::Frame;
 use crate::model::AudioPick;
+use crate::replay::FrameLog;
 use crate::sources::{end_process_tree, ffmpeg};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -58,18 +59,20 @@ pub struct Encoder {
     log: Arc<Mutex<String>>,
     warning: Arc<Mutex<Option<String>>>,
     child: Arc<Mutex<Option<Child>>>,
-    /// Where the file starts on the shared clock, `NOT_YET` until ffmpeg is ready.
-    began: Arc<AtomicU64>,
+    pictures: Arc<Mutex<FrameLog>>,
 }
 
+/// Where a file starts on the shared clock until ffmpeg is ready.
 const NOT_YET: u64 = u64::MAX;
 
 /// What a writer hands back once its queue is empty, so that sound and
 /// picture can be brought to the same end before the pipes close.
 struct PictureTail {
     pipe: ChildStdin,
-    last: Option<Arc<Frame>>,
+    /// The last picture written and the time on the clock it stands for.
+    last: Option<(u64, Arc<Frame>)>,
     frames: u64,
+    log: Arc<Mutex<FrameLog>>,
 }
 
 struct SoundTail {
@@ -88,12 +91,13 @@ fn join_by<T>(job: JoinHandle<Option<T>>, deadline: Instant) -> Option<T> {
 /// Pads the shorter of picture and sound to the end of the other: a file
 /// ends with both, not with one of them missing for its last moment.
 fn even_ends(mut p: PictureTail, mut s: SoundTail, fps: u32, channels: usize) {
-    let Some(last) = p.last.take() else { return };
+    let Some((at, last)) = p.last.take() else { return };
     let (frames, samples) = clock::even_end(p.frames, s.samples, fps);
     for _ in p.frames..frames {
         if p.pipe.write_all(&last.data).is_err() {
             return;
         }
+        p.log.lock().unwrap().push(clock::instant(at));
     }
     let _ = s.sock.write_all(&vec![0u8; (samples - s.samples) as usize * channels * 2]);
 }
@@ -245,12 +249,14 @@ impl Encoder {
         // one a frame earlier than its sound.
         let began = Arc::new(AtomicU64::new(NOT_YET));
         let repeated = Arc::new(AtomicU64::new(0));
+        let pictures = Arc::new(Mutex::new(FrameLog::new(s.fps)));
         let mut pipe = child.stdin.take().unwrap();
         let (vtx, vrx) = sync_channel::<(u64, Arc<Frame>)>(6);
         let (fail, start, again, fps) = (failed.clone(), began.clone(), repeated.clone(), s.fps);
-        let pictures = thread::spawn(move || {
+        let taken = pictures.clone();
+        let picture_writer = thread::spawn(move || {
             let mut line: Option<FrameLine> = None;
-            let mut last: Option<Arc<Frame>> = None;
+            let mut last: Option<(u64, Arc<Frame>)> = None;
             while let Ok((at, f)) = vrx.recv() {
                 let origin = start.load(Ordering::Acquire);
                 if origin == NOT_YET {
@@ -259,21 +265,25 @@ impl Encoder {
                 let Some(gap) = line.get_or_insert_with(|| FrameLine::new(origin, fps)).place(at) else {
                     continue;
                 };
-                let fill = last.as_ref().unwrap_or(&f);
+                // A copy shows the picture before it, and is logged as taken
+                // when that one was: a replay finds pictures by that moment.
+                let (fill_at, fill) = last.as_ref().map_or((at, &f), |(t, p)| (*t, p));
                 for _ in 0..gap {
                     if pipe.write_all(&fill.data).is_err() {
                         fail.store(true, Ordering::Relaxed);
                         return None;
                     }
+                    taken.lock().unwrap().push(clock::instant(fill_at));
                 }
                 again.fetch_add(gap, Ordering::Relaxed);
                 if pipe.write_all(&f.data).is_err() {
                     fail.store(true, Ordering::Relaxed);
                     return None;
                 }
-                last = Some(f);
+                taken.lock().unwrap().push(clock::instant(at));
+                last = Some((at, f));
             }
-            Some(PictureTail { pipe, last, frames: line.map_or(0, |l| l.written()) })
+            Some(PictureTail { pipe, last, frames: line.map_or(0, |l| l.written()), log: taken })
         });
 
         let (atx, arx) = sync_channel::<(u64, Vec<i16>)>(100);
@@ -314,7 +324,7 @@ impl Encoder {
         Ok(Self {
             video: Some(vtx),
             audio: Some(atx),
-            writers: Some((pictures, sound)),
+            writers: Some((picture_writer, sound)),
             size: (s.w, s.h),
             fps: s.fps,
             channels,
@@ -328,17 +338,18 @@ impl Encoder {
             log,
             warning,
             child: Arc::new(Mutex::new(Some(child))),
-            began,
+            pictures,
         })
     }
 
-    /// When the file starts: the moment ffmpeg was ready for both inputs.
-    pub fn began(&self) -> Option<Instant> {
-        let at = self.began.load(Ordering::Acquire);
-        (at != NOT_YET).then(|| clock::instant(at))
+    /// When each picture in the file was taken, which places a moment of the
+    /// show in the file even after pictures were lost on the way.
+    pub fn pictures(&self) -> Arc<Mutex<FrameLog>> {
+        self.pictures.clone()
     }
 
-    /// `at` is the time on the shared clock the picture stands for.
+    /// `at` is the time on the shared clock the picture stands for: the file
+    /// places it, and its log notes it, by that time.
     pub fn push_video(&self, f: Arc<Frame>, at: u64) {
         // A frame of another size would scramble the raw stream.
         if (f.w, f.h) != self.size {
