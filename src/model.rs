@@ -73,6 +73,14 @@ pub enum Kind {
         fps: f32,
         looped: bool,
     },
+    /// A DVD-Video title: a disc drive, a folder holding VIDEO_TS, or an .iso.
+    Dvd {
+        #[serde(default)]
+        path: String,
+        /// Counted from 1, as on the disc.
+        #[serde(default)]
+        title: u32,
+    },
     /// A presentation; its slides are turned into pictures by PowerPoint or
     /// LibreOffice, whichever the machine has.
     PowerPoint {
@@ -175,6 +183,7 @@ impl Kind {
             Kind::List { .. } => t!("model.kind.list"),
             Kind::Photos { .. } => t!("model.kind.photos"),
             Kind::ImageSequence { .. } => t!("model.kind.image_sequence"),
+            Kind::Dvd { .. } => t!("model.kind.dvd"),
             Kind::PowerPoint { .. } => t!("model.kind.powerpoint"),
             Kind::Camera { .. } => t!("model.kind.camera"),
             Kind::Network { .. } => t!("model.kind.network"),
@@ -206,6 +215,7 @@ impl Kind {
             Kind::List { .. } => "VideoList",
             Kind::Photos { .. } => "Photos",
             Kind::ImageSequence { .. } => "ImageSequence",
+            Kind::Dvd { .. } => "DVD",
             Kind::PowerPoint { .. } => "PowerPoint",
             Kind::Camera { .. } => "Capture",
             Kind::Network { .. } => "Stream",
@@ -227,6 +237,7 @@ impl Kind {
             Kind::Video { .. }
                 | Kind::AudioFile { .. }
                 | Kind::List { .. }
+                | Kind::Dvd { .. }
                 | Kind::Network { .. }
                 | Kind::Ndi { .. }
                 | Kind::Omt { .. }
@@ -244,7 +255,11 @@ impl Kind {
     pub fn has_timeline(&self) -> bool {
         matches!(
             self,
-            Kind::Video { .. } | Kind::AudioFile { .. } | Kind::List { .. } | Kind::ImageSequence { .. }
+            Kind::Video { .. }
+                | Kind::AudioFile { .. }
+                | Kind::List { .. }
+                | Kind::ImageSequence { .. }
+                | Kind::Dvd { .. }
         )
     }
 
@@ -257,6 +272,8 @@ impl Kind {
             | (Kind::ImageSequence { first: a, .. }, Kind::ImageSequence { first: b, .. })
             | (Kind::PowerPoint { path: a }, Kind::PowerPoint { path: b }) => a == b,
             (Kind::List { items: a, .. }, Kind::List { items: b, .. }) => a == b,
+            // A position only means something within the same title.
+            (Kind::Dvd { path: a, title: x }, Kind::Dvd { path: b, title: y }) => a == b && x == y,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
