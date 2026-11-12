@@ -39,7 +39,7 @@ Get the installer or the portable zip from the
 administrator rights.
 
 1. Install [FFmpeg](https://ffmpeg.org), which is not included: `winget install Gyan.FFmpeg`.
-2. Run `LiveCraft-<version>-windows-x64-setup.exe`, or unzip the portable zip and start `livecraft.exe`.
+2. Run the `…-setup.exe` installer, or unzip the `…-portable.zip` and start `livecraft.exe`.
 3. Alpha builds are not signed yet, so Windows SmartScreen may warn: click **More info**, then
    **Run anyway**. Checksums are in `SHA256SUMS.txt` next to the files.
 
