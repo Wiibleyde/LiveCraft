@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src https://api.github.com; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>LiveCraft: free, open-source live video production</title>
+  <meta name="description" content="Free, open-source live video production in Rust: switch cameras, files, screens, web pages, NDI and SRT, mix sound, record and stream. Early alpha for Windows.">
+  <link rel="canonical" href="https://wiibleyde.github.io/LiveCraft/">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0b0e13" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="LiveCraft">
+  <meta property="og:locale" content="en_GB">
+  <meta property="og:url" content="https://wiibleyde.github.io/LiveCraft/">
+  <meta property="og:title" content="LiveCraft: free, open-source live video production">
+  <meta property="og:description" content="A live video mixer and switcher written from scratch in Rust: cameras, files, screens, web pages, NDI, SRT and video calls, with recording, streaming and replay. Early alpha for Windows.">
+  <meta property="og:image" content="https://wiibleyde.github.io/LiveCraft/images/social-preview.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="LiveCraft, open-source live video production in Rust, with its desk: preview, program, input cards and audio mixer">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="LiveCraft: free, open-source live video production">
+  <meta name="twitter:description" content="A live video mixer and switcher written from scratch in Rust. Early alpha for Windows, free and open source.">
+  <meta name="twitter:image" content="https://wiibleyde.github.io/LiveCraft/images/social-preview.png">
+  <meta name="twitter:image:alt" content="LiveCraft, open-source live video production in Rust, with its desk: preview, program, input cards and audio mixer">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "LiveCraft",
+    "description": "Free, open-source live video production for Windows: a video mixer and switcher for live streaming and recording, written from scratch in Rust.",
+    "url": "https://wiibleyde.github.io/LiveCraft/",
+    "image": "https://wiibleyde.github.io/LiveCraft/images/social-preview.png",
+    "screenshot": "https://wiibleyde.github.io/LiveCraft/images/desk.png",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Windows, Linux, macOS",
+    "softwareVersion": "0.1.0-alpha.1",
+    "softwareRequirements": "FFmpeg",
+    "license": [
+      "https://spdx.org/licenses/MIT.html",
+      "https://spdx.org/licenses/Apache-2.0.html"
+    ],
+    "isAccessibleForFree": true,
+    "downloadUrl": "https://github.com/Wiibleyde/LiveCraft/releases",
+    "sameAs": "https://github.com/Wiibleyde/LiveCraft",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    }
+  }
+  </script>
+
+  <link rel="stylesheet" href="styles.css">
+  <script src="main.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap header-row">
+      <a class="brand" href="./" aria-label="LiveCraft, home">
+        <svg class="brand-mark" viewBox="0 0 64 64" width="28" height="28" aria-hidden="true" focusable="false">
+          <rect width="64" height="64" rx="14" fill="#ff8a1f"/>
+          <rect x="8" y="17" width="22" height="15" rx="3" fill="#12161d"/>
+          <rect x="34" y="17" width="22" height="15" rx="3" fill="#12161d"/>
+          <rect x="8" y="38" width="9" height="8" rx="2" fill="#12161d"/>
+          <rect x="21" y="38" width="9" height="8" rx="2" fill="#12161d"/>
+          <rect x="34" y="38" width="9" height="8" rx="2" fill="#12161d"/>
+          <rect x="47" y="38" width="9" height="8" rx="2" fill="#12161d"/>
+        </svg>
+        <span>LiveCraft</span>
+      </a>
+      <nav class="site-nav" aria-label="Main">
+        <ul>
+          <li class="nav-wide"><a href="#features">Features</a></li>
+          <li class="nav-wide"><a href="#screens">Screens</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/wiki">Docs</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft">GitHub</a></li>
+          <li><a class="nav-cta" href="#download">Download</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="wrap hero-text">
+        <p class="pill"><span class="tally" aria-hidden="true"></span>Live production desk · Early alpha</p>
+        <h1 id="hero-title">Run your live show from one open desk.</h1>
+        <p class="lede">Cut and fade between cameras, files, screens, web pages and network streams. Add titles and
+          overlays, mix the sound, then record and stream the result. Free, open source, with no account and no
+          subscription.</p>
+        <div class="actions">
+          <a class="btn btn-primary btn-lg" href="https://github.com/Wiibleyde/LiveCraft/releases" data-asset="setup">
+            <svg class="icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 17v3h16v-3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Download for Windows
+          </a>
+          <a class="btn btn-lg" href="https://github.com/Wiibleyde/LiveCraft/wiki">Docs</a>
+          <a class="btn btn-lg" href="https://github.com/Wiibleyde/LiveCraft">GitHub</a>
+        </div>
+        <p class="release-line"><span data-release-summary>Installer and portable zip on GitHub Releases.</span>
+          FFmpeg is needed: <a href="#install">see the install steps</a>.</p>
+        <ul class="platforms" aria-label="Platforms">
+          <li>Windows</li>
+          <li>Linux and macOS from source</li>
+          <li>Free and open source</li>
+        </ul>
+      </div>
+
+      <figure class="wrap hero-shot">
+        <a class="viewfinder" href="images/desk.png" title="Open the full-size screenshot">
+          <img src="images/desk.png" width="1600" height="637" fetchpriority="high"
+            alt="The LiveCraft desk: a test card in preview on the left, a Welcome holding screen on air on the right, transition buttons between them, a row of input cards below and the audio mixer at the bottom right.">
+        </a>
+        <figcaption>The desk: preview on the left, program on the right, transitions between them, input cards and
+          the audio mixer below. If you have run a show on a software mixer, you already know where everything is.</figcaption>
+      </figure>
+    </section>
+
+    <section id="features" class="section" aria-labelledby="features-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow"><span class="eyebrow-num">01</span> / Features</p>
+          <h2 id="features-title">A whole control room in one program.</h2>
+          <p>One native window holds the desk, the mixer, the recorders and the streams. No plug-in framework, no
+            web wrapper.</p>
+        </header>
+
+        <ol class="cards" role="list">
+          <li class="card">
+            <span class="card-num" aria-hidden="true">01</span>
+            <h3>Composed on the graphics card</h3>
+            <p>The picture is put together on the GPU through DirectX 12 or Vulkan, with the CPU as a fallback.
+              Files heavier than 1080p60 and network streams are decoded by the card, and software takes over by
+              itself if it fails.</p>
+          </li>
+          <li class="card">
+            <span class="card-num" aria-hidden="true">02</span>
+            <h3>Every source you have</h3>
+            <p>Cameras and microphones, video files, images, screen capture and system audio, web pages, SRT, RTMP,
+              RTSP and TS streams, NDI and OMT, video calls from a guest's browser with the program sent back,
+              PowerPoint presentations and DVDs.</p>
+          </li>
+          <li class="card">
+            <span class="card-num" aria-hidden="true">03</span>
+            <h3>A real audio mixer</h3>
+            <p>Master and buses A to G, a gate, compressor, ten-band EQ and delay on every input, solo and
+              headphones, several output devices. CLAP plug-ins on any input, bus or Master, saved with the
+              project.</p>
+          </li>
+          <li class="card">
+            <span class="card-num" aria-hidden="true">04</span>
+            <h3>Record and stream, several at once</h3>
+            <p>Two recorders, up to five stream destinations and separate recordings per input, with sound and
+              picture on one shared clock. SRT output, and the program as an NDI or OMT source. NVENC, Quick Sync
+              and AMF when your FFmpeg has them.</p>
+          </li>
+          <li class="card">
+            <span class="card-num" aria-hidden="true">05</span>
+            <h3>Remote control built in</h3>
+            <p>One list of named functions sits behind every button, shortcut, trigger and script. Drive them from
+              the web controller on a phone or tablet, or over HTTP and TCP. Remote control listens only on this
+              computer until you turn network access on.</p>
+          </li>
+          <li class="card">
+            <span class="card-num" aria-hidden="true">06</span>
+            <h3>Opens your <code>.vmix</code> shows</h3>
+            <p>Inputs, scenes and layers, overlays, tabs, colour settings, LUTs, audio routing and the state you left
+              them in come across. Your file is never changed: you save a new <code>.livecraft</code> project.</p>
+          </li>
+        </ol>
+
+        <div class="also">
+          <h3 class="also-title">Also on the desk</h3>
+          <ul class="chips">
+            <li>Cut, fade, zoom, wipes, slides, cubes, merge and stingers</li>
+            <li>Four transition slots and a T-bar</li>
+            <li>Fade to black and Quick Play</li>
+            <li>Scenes with layers</li>
+            <li>Eight overlay channels</li>
+            <li>Picture-in-picture</li>
+            <li>Virtual sets with a moving camera</li>
+            <li>Colour correction, keys and LUTs</li>
+            <li>Titles, tickers and countdowns</li>
+            <li>Instant replay with events and tags</li>
+            <li>Playlists and triggers</li>
+            <li>Data sources from CSV</li>
+            <li>Scripts</li>
+            <li>VISCA PTZ control</li>
+            <li>Telestrator</li>
+            <li>Multiview</li>
+            <li>French and English interface</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="screens" class="section section-alt" aria-labelledby="screens-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow"><span class="eyebrow-num">02</span> / Screens</p>
+          <h2 id="screens-title">A closer look.</h2>
+          <p>Taken from LiveCraft itself, in English. The interface follows the system language and also speaks
+            French.</p>
+        </header>
+
+        <div class="shots">
+          <figure class="shot">
+            <div class="shot-stage">
+              <img src="images/settings-outputs.png" width="720" height="510" loading="lazy"
+                alt="Settings, Outputs page: fullscreen on two screens, an external output window, four SRT outputs with their bitrate, and NDI and OMT outputs with a name each.">
+            </div>
+            <figcaption><strong>Outputs.</strong> Fullscreen on two screens, an external window, SRT outputs, and
+              the program with the Master sound as an NDI or OMT source.</figcaption>
+          </figure>
+          <figure class="shot">
+            <div class="shot-stage">
+              <img src="images/input-audio.png" width="670" height="490" loading="lazy"
+                alt="Input settings, Audio page: gain, balance, delay and headphones volume sliders, compressor, noise gate and a ten-band equaliser.">
+            </div>
+            <figcaption><strong>Audio per input.</strong> Gain, balance, delay, compressor, noise gate and a ten-band
+              equaliser on every input.</figcaption>
+          </figure>
+          <figure class="shot">
+            <div class="shot-stage">
+              <img src="images/overlays.png" width="450" height="220" loading="lazy"
+                alt="Overlays and stingers window: overlay channels 1 to 8 and stingers S1 to S8, with full frame or picture-in-picture, an effect, its duration and a close timer.">
+            </div>
+            <figcaption><strong>Overlays and stingers.</strong> Each overlay channel has its own effect, duration and
+              close timer, full frame or picture-in-picture.</figcaption>
+          </figure>
+          <figure class="shot">
+            <div class="shot-stage">
+              <img src="images/replay-window.png" width="540" height="185" loading="lazy"
+                alt="Replay window: a list of inputs to record, up to eight, and a Start recording button.">
+            </div>
+            <figcaption><strong>Instant replay.</strong> Pick up to eight cameras to record, then mark events and
+              play them back.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="why" class="section" aria-labelledby="why-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow"><span class="eyebrow-num">03</span> / Why LiveCraft</p>
+          <h2 id="why-title">Built to be yours.</h2>
+        </header>
+        <ul class="why" role="list">
+          <li>
+            <h3>Free and open source</h3>
+            <p>MIT or Apache-2.0, with no account, no licence key and no tier. Read the code, change it, ship it.</p>
+          </li>
+          <li>
+            <h3>Native, in Rust</h3>
+            <p>Written from scratch in Rust, with egui for the window, wgpu on the graphics card and FFmpeg as a
+              separate process for each source and output.</p>
+          </li>
+          <li>
+            <h3>Light on purpose</h3>
+            <p>What nobody is watching costs next to nothing: cards are drawn at card size, pages off air slow down
+              on their own, and all web inputs share a single browser.</p>
+          </li>
+          <li>
+            <h3>Scriptable from the start</h3>
+            <p>The HTTP and TCP interfaces use the published function names, so existing control surfaces can
+              connect.</p>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="download" class="section section-alt" aria-labelledby="download-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow"><span class="eyebrow-num">04</span> / Download</p>
+          <h2 id="download-title">Get the alpha.</h2>
+          <p>Released builds are for Windows. Linux and macOS run from source for now, as an experiment; packaged
+            builds for them will follow.</p>
+        </header>
+
+        <div class="downloads">
+          <article class="card dl" aria-labelledby="dl-windows">
+            <div class="dl-head">
+              <h3 id="dl-windows">Windows</h3>
+              <span class="tag">Installer or zip</span>
+            </div>
+            <p class="dl-version" data-release-detail hidden></p>
+            <div class="dl-buttons">
+              <a class="btn btn-primary btn-block" href="https://github.com/Wiibleyde/LiveCraft/releases" data-asset="setup">
+                <span class="btn-main">Installer <span class="btn-ext">.exe</span></span>
+                <span class="btn-sub">Recommended · no administrator rights<span data-size="setup"></span></span>
+              </a>
+              <a class="btn btn-block" href="https://github.com/Wiibleyde/LiveCraft/releases" data-asset="portable">
+                <span class="btn-main">Portable <span class="btn-ext">.zip</span></span>
+                <span class="btn-sub">Unzip and start livecraft.exe<span data-size="portable"></span></span>
+              </a>
+            </div>
+            <p class="dl-links">
+              <a href="https://github.com/Wiibleyde/LiveCraft/releases" data-asset="sums">Checksums (SHA256SUMS.txt)</a>
+              <a href="https://github.com/Wiibleyde/LiveCraft/releases" data-asset="release" hidden>Release notes</a>
+              <a href="https://github.com/Wiibleyde/LiveCraft/releases">All releases</a>
+            </p>
+            <h4 id="install" class="dl-subtitle">Install in three steps</h4>
+            <ol class="steps">
+              <li>Install <a href="https://ffmpeg.org">FFmpeg</a>, which is not included:
+                <code class="nowrap">winget install Gyan.FFmpeg</code></li>
+              <li>Run the installer, or unzip the portable zip and start <code>livecraft.exe</code>.</li>
+              <li>Alpha builds are not signed yet. If SmartScreen warns, click <strong>More info</strong>, then
+                <strong>Run anyway</strong>. Checksums are in <code>SHA256SUMS.txt</code>.</li>
+            </ol>
+            <p class="note">Web inputs also need Chrome, Chromium or Edge, and presentations need Microsoft PowerPoint
+              or LibreOffice. NDI and OMT are optional and loaded only when used.
+              <a href="https://github.com/Wiibleyde/LiveCraft/wiki/Installing">Install guide</a></p>
+          </article>
+
+          <article class="card dl" aria-labelledby="dl-source">
+            <div class="dl-head">
+              <h3 id="dl-source">Linux and macOS</h3>
+              <span class="tag tag-quiet">Run from source</span>
+            </div>
+            <p>No packaged builds yet. You need <a href="https://rustup.rs">Rust</a> and FFmpeg on your
+              <code>PATH</code>; Linux also needs the ALSA headers and <code>pkg-config</code>.</p>
+            <div class="terminal">
+              <div class="terminal-bar">
+                <span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span class="terminal-title">Terminal</span>
+              </div>
+<pre tabindex="0" aria-label="Commands to build and run LiveCraft from source"><code><span class="c"># Debian or Ubuntu</span>
+sudo apt install libasound2-dev pkg-config ffmpeg
+<span class="c"># macOS, with Homebrew</span>
+brew install ffmpeg
+
+<span class="c"># Then, on both</span>
+git clone https://github.com/Wiibleyde/LiveCraft
+cd LiveCraft
+cargo run --release</code></pre>
+            </div>
+            <ul class="notes">
+              <li><strong>Linux:</strong> FFmpeg needs <code>v4l2</code>, <code>pulse</code> and <code>x11grab</code>,
+                as distribution builds have. Under Wayland, screen capture only sees windows of X programs.</li>
+              <li><strong>macOS:</strong> allow the camera, the microphone and screen recording for the terminal that
+                starts LiveCraft.</li>
+            </ul>
+            <p class="dl-links">
+              <a href="https://github.com/Wiibleyde/LiveCraft/wiki/Linux-and-macOS">Linux and macOS guide</a>
+              <a href="https://github.com/Wiibleyde/LiveCraft#platforms">Platform details</a>
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="community" class="section" aria-labelledby="community-title">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow"><span class="eyebrow-num">05</span> / Community</p>
+          <h2 id="community-title">Early alpha. Your show is the test it needs.</h2>
+          <p>LiveCraft has run on one Windows machine and on Linux under WSL; on macOS it is only built and tested by
+            CI so far. It has not been tried with physical cameras, capture cards, PTZ heads or a live streaming
+            platform, so it is not ready for a show that matters yet. <strong>Reports are worth more than features at
+            this stage.</strong></p>
+        </header>
+
+        <ul class="help" role="list">
+          <li class="card help-card">
+            <span class="card-num" aria-hidden="true">A</span>
+            <h3><a class="stretch" href="https://github.com/Wiibleyde/LiveCraft/issues/new/choose">Try it with real gear</a></h3>
+            <p>Open an issue with your system and its version, your hardware and what you expected. This is the most
+              useful thing right now.</p>
+          </li>
+          <li class="card help-card">
+            <span class="card-num" aria-hidden="true">B</span>
+            <h3><a class="stretch" href="https://github.com/Wiibleyde/LiveCraft/discussions">Talk it through</a></h3>
+            <p>Questions, setups, ideas: bring them to Discussions, in English or in French.</p>
+          </li>
+          <li class="card help-card">
+            <span class="card-num" aria-hidden="true">C</span>
+            <h3><a class="stretch" href="https://github.com/Wiibleyde/LiveCraft/tree/main/locales">Translate the interface</a></h3>
+            <p>A language is one text file in <code>locales/</code>. No code needed.</p>
+          </li>
+          <li class="card help-card">
+            <span class="card-num" aria-hidden="true">D</span>
+            <h3><a class="stretch" href="https://github.com/Wiibleyde/LiveCraft/blob/main/ROADMAP.md">Take something from the roadmap</a></h3>
+            <p>Start with CONTRIBUTING.md, and open an issue before starting something large.</p>
+          </li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-grid">
+      <div class="footer-brand">
+        <a class="brand" href="./" aria-label="LiveCraft, home">
+          <svg class="brand-mark" viewBox="0 0 64 64" width="28" height="28" aria-hidden="true" focusable="false">
+            <rect width="64" height="64" rx="14" fill="#ff8a1f"/>
+            <rect x="8" y="17" width="22" height="15" rx="3" fill="#12161d"/>
+            <rect x="34" y="17" width="22" height="15" rx="3" fill="#12161d"/>
+            <rect x="8" y="38" width="9" height="8" rx="2" fill="#12161d"/>
+            <rect x="21" y="38" width="9" height="8" rx="2" fill="#12161d"/>
+            <rect x="34" y="38" width="9" height="8" rx="2" fill="#12161d"/>
+            <rect x="47" y="38" width="9" height="8" rx="2" fill="#12161d"/>
+          </svg>
+          <span>LiveCraft</span>
+        </a>
+        <p>Free, open-source live video production, written from scratch in Rust.</p>
+      </div>
+      <nav aria-labelledby="footer-project">
+        <h2 id="footer-project" class="footer-title">Project</h2>
+        <ul>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/releases">Releases</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/wiki">Docs</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/blob/main/ROADMAP.md">Roadmap</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/blob/main/SECURITY.md">Security</a></li>
+        </ul>
+      </nav>
+      <nav aria-labelledby="footer-community">
+        <h2 id="footer-community" class="footer-title">Community</h2>
+        <ul>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/discussions">Discussions</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/issues">Issues</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/blob/main/CONTRIBUTING.md">Contributing</a></li>
+        </ul>
+      </nav>
+      <nav aria-labelledby="footer-source">
+        <h2 id="footer-source" class="footer-title">Source</h2>
+        <ul>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft">GitHub</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/blob/main/LICENSE-MIT">MIT License</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/blob/main/LICENSE-APACHE">Apache License 2.0</a></li>
+          <li><a href="https://github.com/Wiibleyde/LiveCraft/blob/main/ATTRIBUTION.md">Third-party credits</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="wrap footer-legal">
+      <p>© 2026 Nathan Bonnell and the LiveCraft contributors. Licensed under the MIT License or the Apache License
+        2.0, at your option.</p>
+      <p>LiveCraft is an independent project, built from public documentation. It is not affiliated with or endorsed
+        by the makers of vMix or any other product named here; those names are trademarks of their owners and appear
+        only to describe compatibility.</p>
+      <p>This site sets no cookies and has no analytics. Its only outside request asks GitHub for the latest
+        release.</p>
+    </div>
+  </footer>
+</body>
+</html>
