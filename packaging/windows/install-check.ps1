@@ -10,7 +10,10 @@ hosted CI runners lack.
 #>
 param(
     [Parameter(Mandatory)][string]$Setup,
-    [string]$Screenshot
+    [string]$Screenshot,
+    # Go on although a LiveCraft is installed for this user; the check then
+    # shares its registry keys and removes the ones it finds at the end.
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,6 +37,12 @@ function Get-Default([string]$key) {
 
 function Test-Value([string]$key, [string]$name) {
     (Test-Path $key) -and ((Get-Item $key).GetValueNames() -contains $name)
+}
+
+$installed = @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+    Where-Object { $_.GetValue('DisplayName') -like 'LiveCraft*' })
+if ($installed -and -not $Force) {
+    throw 'LiveCraft is installed for this user: this check would uninstall it. Pass -Force if that is what you want.'
 }
 
 $extensions = '.livecraft', '.vmix', '.regie'

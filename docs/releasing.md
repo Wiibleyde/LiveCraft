@@ -64,7 +64,10 @@ runs on many. A release therefore holds two builds of the same code:
 
 Shortcuts and file types start `livecraft.exe`. When the processor has every feature `x86-64-v3`
 assumes and `livecraft-avx2.exe` is beside it, it starts that one with the same arguments, waits, and
-exits with its exit code (`hand_over_to_avx2_build` in `src/main.rs`). Otherwise it runs itself.
+exits with its exit code (`hand_over_to_avx2_build` in `src/main.rs`). Otherwise it runs itself, and
+so it does when `livecraft-avx2.exe` cannot start or dies within two seconds with a Windows crash
+status (illegal instruction, access violation, missing library...). The wrapper and the program it
+started end together: killing one kills the other.
 Development builds have the AVX2 features enabled, so the hand-over is compiled out of them.
 
 What the second build is worth, measured with a throwaway benchmark of the compositing primitives at
@@ -105,7 +108,9 @@ gh secret set WINDOWS_CERTIFICATE_PASSWORD
 
 `packaging/windows/certificate.ps1` puts the certificate in the runner's user store straight from
 memory, so neither the `.pfx` nor its password reaches the disk or a command line; `signtool` then
-finds it by thumbprint, and the last step takes it out again. The workflow checks every signature
+finds it by thumbprint, and the last step (which runs even when others fail) takes it out again. Both
+programs are built before the certificate is imported (`package.ps1 -BuildOnly`, then `-NoBuild`), so
+no dependency's build script ever runs with the key available. The workflow checks every signature
 and timestamp before publishing.
 
 Certificates issued since June 2023 by public authorities keep their key in hardware or a cloud
@@ -126,6 +131,10 @@ You need Rust, [Inno Setup](https://jrsoftware.org/isdl.php) 6.3 or later (or `I
 ./packaging/windows/install-check.ps1 (Get-Item target/dist/*-setup.exe).FullName -Screenshot target/shot.png
 ```
 
-`install-check.ps1` installs silently into a temporary folder, checks the Start menu entry, the file
+A tag release also needs a tag on `main`, and runs `cargo fmt --check`, `clippy` and the tests first;
+the actions and the Rust version it uses are pinned.
+
+`install-check.ps1` refuses to run when LiveCraft is installed for the current user (it would
+uninstall it) unless `-Force` is given. It installs silently into a temporary folder, checks the Start menu entry, the file
 types and the uninstall entry, starts the program, then uninstalls and checks nothing is left. The
 workflow runs it without `-Screenshot`, as hosted runners have no OpenGL.

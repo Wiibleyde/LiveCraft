@@ -5,8 +5,10 @@ CERT_PASSWORD into the CurrentUser\My store, or takes it out with -Remove.
 
 .DESCRIPTION
 The release workflow runs this with its signing secrets. The .pfx is read from
-memory, never written to disk, and the password never appears on a command
-line: signtool then picks the certificate by thumbprint, which is not secret,
+memory and never written to disk, and the password never appears on a command
+line. The key does end up in the user's key store (PersistKeySet), where it
+stays until -Remove deletes it, so the workflow runs -Remove in an always()
+step. signtool then picks the certificate by thumbprint, which is not secret,
 and which goes to LIVECRAFT_SIGN_THUMBPRINT for the next steps.
 #>
 param([switch]$Remove)
@@ -41,6 +43,10 @@ try {
     $all.Import([Convert]::FromBase64String($env:CERT_BASE64), $env:CERT_PASSWORD, $flags)
     $signer = @($all | Where-Object HasPrivateKey)
     if ($signer.Count -ne 1) { throw "Expected one certificate with a private key, found $($signer.Count)" }
+    # Named before the key is stored, so that -Remove finds it even if a later
+    # step fails.
+    $line = "LIVECRAFT_SIGN_THUMBPRINT=$($signer[0].Thumbprint)"
+    if ($env:GITHUB_ENV) { $line >> $env:GITHUB_ENV } else { Write-Output $line }
     $my.Add($signer[0])
     # Intermediates go where signtool looks for them, so the signature carries
     # the whole chain.
@@ -48,8 +54,6 @@ try {
     $ca.Open('ReadWrite')
     $all | Where-Object { -not $_.HasPrivateKey -and $_.Subject -ne $_.Issuer } | ForEach-Object { $ca.Add($_) }
     $ca.Close()
-    $line = "LIVECRAFT_SIGN_THUMBPRINT=$($signer[0].Thumbprint)"
-    if ($env:GITHUB_ENV) { $line >> $env:GITHUB_ENV } else { Write-Output $line }
 } finally {
     $my.Close()
 }

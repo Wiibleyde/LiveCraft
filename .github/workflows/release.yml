@@ -25,13 +25,26 @@ jobs:
       INNO_TAG: is-7_1_1
       INNO_FILE: innosetup-7.1.1-x64.exe
       INNO_SHA256: 8a5a6711c3766a6e5fb74f280ba0e3551e719ce94538d901fdbd1f8f9920b3f0
+      # Pinned like the above; raise it on purpose, in a commit of its own.
+      RUST_VERSION: 1.99.0
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to full commit hashes: a moved tag must not be able
+      # to run code with this job's secrets and write access.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag is on main
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) { throw "$env:GITHUB_REF_NAME ($env:GITHUB_SHA) is not on main: release from main only" }
 
       - name: Install Rust
         run: |
-          rustup update stable
-          rustup default stable
+          rustup toolchain install $env:RUST_VERSION --profile minimal --component rustfmt --component clippy
+          rustup default $env:RUST_VERSION
 
       - name: Install Inno Setup
         run: |
@@ -44,6 +57,20 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Inno Setup install failed: $($p.ExitCode)" }
           "ISCC=$dir\ISCC.exe" >> $env:GITHUB_ENV
 
+      - name: Format, lints and tests
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { throw 'cargo fmt failed' }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'cargo clippy failed' }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { throw 'cargo test failed' }
+
+      # Everything that compiles (and so every dependency's build script)
+      # runs before the signing key exists on the machine.
+      - name: Build both programs
+        run: ./packaging/windows/package.ps1 -BuildOnly
+
       - name: Import the signing certificate
         if: env.HAS_CERT == 'true'
         env:
@@ -54,7 +81,7 @@ jobs:
       - name: Build the installer and the portable zip
         run: |
           $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME -replace '^v', '' } else { '' }
-          ./packaging/windows/package.ps1 -Version $version
+          ./packaging/windows/package.ps1 -Version $version -NoBuild
 
       - name: Check the signatures
         if: env.HAS_CERT == 'true'
@@ -70,7 +97,7 @@ jobs:
       - name: Install, start and uninstall
         run: ./packaging/windows/install-check.ps1 (Get-Item target/dist/*-setup.exe).FullName
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: livecraft-windows
           path: target/dist/*

@@ -15,7 +15,12 @@ param(
     [string]$Version,
     [string]$CertThumbprint = $env:LIVECRAFT_SIGN_THUMBPRINT,
     [string]$TimestampUrl = 'http://timestamp.digicert.com',
-    [string]$Iscc = $env:ISCC
+    [string]$Iscc = $env:ISCC,
+    # Build both programs and stop. The release workflow does this before the
+    # signing key is in the store, so that no build script ever runs with it.
+    [switch]$BuildOnly,
+    # Package programs a previous -BuildOnly run built, without compiling.
+    [switch]$NoBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -84,10 +89,15 @@ foreach ($exe in $builds.Keys) {
     $cpu = $builds[$exe]
     $env:RUSTFLAGS = "-C target-cpu=$cpu"
     $buildDir = Join-Path $root "target/package/$cpu"
-    Invoke-Checked "cargo build for $cpu" { cargo build --release --locked --target-dir $buildDir }
-    Copy-Item (Join-Path $buildDir 'release/livecraft.exe') (Join-Path $stage $exe)
+    if (-not $NoBuild) {
+        Invoke-Checked "cargo build for $cpu" { cargo build --release --locked --target-dir $buildDir }
+    }
+    $built = Join-Path $buildDir 'release/livecraft.exe'
+    if (-not (Test-Path $built)) { throw "$built is missing: run with -BuildOnly first" }
+    if (-not $BuildOnly) { Copy-Item $built (Join-Path $stage $exe) }
 }
 $env:RUSTFLAGS = $callerFlags
+if ($BuildOnly) { return }
 Copy-Item packaging/windows/FFmpeg.txt, LICENSE-MIT, LICENSE-APACHE, NOTICE, ATTRIBUTION.md $stage
 
 $signArgs = @()

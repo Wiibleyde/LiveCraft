@@ -40,6 +40,11 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 ChangesAssociations=yes
+; Setup and the uninstaller ask to close a running LiveCraft (main.rs creates
+; this mutex) instead of failing on its locked files.
+AppMutex=LiveCraft-running
+CloseApplications=yes
+CloseApplicationsFilter=livecraft*.exe
 UninstallDisplayIcon={app}\livecraft.exe
 UninstallDisplayName=LiveCraft
 OutputDir={#OutputDir}
