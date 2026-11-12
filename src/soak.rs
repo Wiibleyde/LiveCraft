@@ -61,6 +61,9 @@ const STATUS_SAMPLES: u32 = 3;
 const FROZEN_SAMPLES: u32 = 2;
 /// Decoders and the browser may take a while to get going on a busy machine.
 const SETTLE: Duration = Duration::from_secs(30);
+/// Seconds each source, then the web page, may take to show a first picture.
+const SOURCE_START_S: f32 = 30.0;
+const PAGE_START_S: f32 = 90.0;
 
 pub fn run(dir: &str, length: Option<&str>) -> i32 {
     let length = match length {
@@ -787,8 +790,12 @@ fn soak(dir: &str, length: Duration) -> Result<String, String> {
         return Err(e);
     }
     let received = out.join("diffusion.flv").to_string_lossy().into_owned();
+    // It waits for the stream, which only starts once every source has shown
+    // a picture: minutes on a loaded machine. Should the run stop before
+    // that, `finish` ends it.
+    let listen = ((4.0 * SOURCE_START_S + PAGE_START_S) as u32 + 60).to_string();
     let server = ffmpeg()
-        .args(["-y", "-listen", "1", "-timeout", "30", "-f", "flv", "-i", STREAM_URL, "-c", "copy"])
+        .args(["-y", "-listen", "1", "-timeout", &listen, "-f", "flv", "-i", STREAM_URL, "-c", "copy"])
         .arg(&received)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -825,7 +832,7 @@ struct Run {
 fn show(engine: &Arc<Engine>, dir: &str, ids: Ids, length: Duration, csv: &mut File) -> Result<Run, String> {
     for id in [ids.cam_a, ids.cam_b, ids.list, ids.music] {
         let rt = engine.rt(id).ok_or("entrée absente")?;
-        until(30.0, "première image ou durée des médias", || {
+        until(SOURCE_START_S, "première image ou durée des médias", || {
             rt.seq() >= 1 || rt.dur_ms.load(Ordering::Relaxed) > 0
         })?;
         rt.playing.store(true, Ordering::Relaxed);
@@ -834,7 +841,7 @@ fn show(engine: &Arc<Engine>, dir: &str, ids: Ids, length: Duration, csv: &mut F
     // A browser starting on a loaded machine can take most of a minute. A page
     // that never shows fails the run, but everything else is still worth
     // measuring: a long run is costly to start again.
-    let page_start = until(90.0, "la page web", || page.seq() >= 1);
+    let page_start = until(PAGE_START_S, "la page web", || page.seq() >= 1);
     let page_start = page_start.err().map(|e| format!("{e} : {:?}", page.status()));
     sleep(Duration::from_millis(700));
     engine.start_streaming()?;
