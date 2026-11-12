@@ -408,15 +408,23 @@ fn is_live(kind: &Kind) -> bool {
     matches!(kind, Kind::Microphone { .. } | Kind::SystemAudio | Kind::Network { .. })
 }
 
-/// Whether a stream is fetched as fast as its sound is taken, as HTTP and HLS
-/// are: it can run ahead and wait for room in its ring, and what waits there
-/// is still to come. A live protocol delivers at its sender's pace, so sound
-/// waiting in its ring is late, however full the ring is.
+/// Whether a stream is fetched as fast as its sound is taken, as a playlist
+/// (HLS, DASH) or a media file is: it can run ahead and wait for room in its
+/// ring, and what waits there is still to come. Anything else delivers at its
+/// sender's pace, so sound waiting in its ring is late, however full the ring
+/// is: SRT, UDP, RTMP, RTSP, and over HTTP an MPEG-TS feed, a radio or a
+/// camera. Watching the ring cannot tell them apart: a live stream backed up
+/// behind a full ring waits for room just as a playlist does.
 fn may_run_ahead(url: &str) -> bool {
-    let scheme = url.split_once("://").map_or("", |(s, _)| s).to_ascii_lowercase();
-    let live =
-        ["srt", "udp", "rtp", "rist", "tcp", "rtsp", "rtsps", "rtmp", "rtmps", "rtmpt", "rtmpe", "rtmpte"];
-    !live.contains(&scheme.as_str())
+    let (scheme, rest) = url.split_once("://").unwrap_or(("file", url));
+    let name = rest.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("");
+    let kind = name.rsplit_once('.').map_or("", |(_, e)| e).to_ascii_lowercase();
+    let fetched = ["m3u8", "mpd", "mp4", "m4v", "m4a", "mov", "mkv", "webm", "avi", "wmv"];
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => fetched.contains(&kind.as_str()),
+        "file" => true,
+        _ => false,
+    }
 }
 
 /// The source is waiting for room in its ring, with sound still to come. Only
@@ -551,10 +559,19 @@ mod tests {
             "RTMP://h/live/k",
             "rtsp://cam/1",
             "rtp://h:5004",
+            "http://h:8080/live.ts",
+            "http://radio.example:8000/stream.mp3",
+            "http://192.168.1.20/video.mjpg",
+            "https://h/feed",
         ] {
             assert!(!may_run_ahead(live), "{live}");
         }
-        for fetched in ["https://h/live/index.m3u8", "http://h/show.ts", "C:/clips/show.ts"] {
+        for fetched in [
+            "https://h/live/index.m3u8?token=a.b",
+            "https://h/manifest.mpd",
+            "http://h.example/vod/show.MP4",
+            "C:/clips/show.ts",
+        ] {
             assert!(may_run_ahead(fetched), "{fetched}");
         }
     }
