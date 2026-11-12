@@ -9,7 +9,7 @@
 use crate::engine::Engine;
 use crate::functions::Args;
 use crate::model::*;
-use crate::sources::{self, ffmpeg};
+use crate::sources::ffmpeg;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::io::Read;
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -82,11 +82,11 @@ pub fn run(dir: &str, sabotage: Option<&str>) -> i32 {
 
 fn check(dir: &str, sabotage: Sabotage) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    sources::tie_children_to_this_process();
+    crate::platform::tie_children_to_this_process();
     let dll = std::env::var("LIVECRAFT_SOFTCAM")
         .map_err(|_| "LIVECRAFT_SOFTCAM doit donner le chemin de softcam.dll (voir README)".to_string())?;
     let mediamtx = std::env::var("LIVECRAFT_MEDIAMTX").unwrap_or_else(|_| "mediamtx".into());
-    let (_, mics) = sources::list_devices();
+    let (_, mics) = crate::platform::list_devices();
     let mic = mics
         .into_iter()
         .find(|m| m.starts_with(CABLE_OUT))
@@ -263,7 +263,7 @@ fn pull_once(url: &str, pictures: &str, sound: &str) -> Result<(), String> {
             break Some(s);
         }
         if Instant::now() > end {
-            sources::end_process_tree(&mut child);
+            crate::platform::end_process_tree(&mut child);
             break None;
         }
         sleep(Duration::from_millis(50));
@@ -652,7 +652,7 @@ impl Server {
         while TcpStream::connect(("127.0.0.1", rtmp)).is_err() {
             let gone = child.try_wait().ok().flatten().is_some();
             if gone || Instant::now() > end {
-                sources::end_process_tree(&mut child);
+                crate::platform::end_process_tree(&mut child);
                 let log = std::fs::read_to_string(format!("{dir}/mediamtx.log")).unwrap_or_default();
                 let last = log.lines().last().unwrap_or("sans message").to_string();
                 return Err(format!("MediaMTX ne démarre pas : {last}"));
@@ -665,7 +665,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        sources::end_process_tree(&mut self.child);
+        crate::platform::end_process_tree(&mut self.child);
         let _ = self.child.wait();
     }
 }

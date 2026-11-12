@@ -14,6 +14,8 @@ mod extras;
 mod frame;
 mod functions;
 mod fx;
+// The live check drives Windows-only parts: a virtual camera, VB-CABLE and the registry.
+#[cfg(windows)]
 mod livecheck;
 mod mixer;
 mod model;
@@ -49,6 +51,7 @@ fn main() -> eframe::Result {
     if let Some(dir) = value_of("--selftest") {
         std::process::exit(selftest::run(&dir));
     }
+    #[cfg(windows)]
     if let Some(dir) = value_of("--livecheck") {
         std::process::exit(livecheck::run(&dir, value_of("--break").as_deref()));
     }
@@ -130,6 +133,7 @@ fn crashed_at_start(code: i32, after: std::time::Duration) -> bool {
 
 /// Lets the installer see that LiveCraft is running (`AppMutex`), so that an
 /// upgrade or an uninstall asks to close it. It does not stop a second copy.
+#[cfg(windows)]
 fn announce_running() {
     use windows_sys::Win32::System::Threading::CreateMutexW;
     let name: Vec<u16> = "LiveCraft-running\0".encode_utf16().collect();
@@ -138,6 +142,9 @@ fn announce_running() {
         CreateMutexW(std::ptr::null(), 0, name.as_ptr());
     }
 }
+
+#[cfg(not(windows))]
+fn announce_running() {}
 
 /// Prints what opening a .vmix keeps and leaves, without starting anything.
 fn import_report(file: &str) -> i32 {
