@@ -18,10 +18,10 @@ use tungstenite::{Message, WebSocket};
 
 /// A browser runs as dozens of processes. A Windows job holds them together,
 /// so closing the job ends them all, even if this program crashes.
-struct ProcessTree(windows_sys::Win32::Foundation::HANDLE);
+pub(crate) struct ProcessTree(windows_sys::Win32::Foundation::HANDLE);
 
 impl ProcessTree {
-    fn hold(child: &std::process::Child) -> Option<Self> {
+    pub(crate) fn hold(child: &std::process::Child) -> Option<Self> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::*;
         // SAFETY: the job handle is checked, the information block is sized for
@@ -57,7 +57,7 @@ impl Drop for ProcessTree {
     }
 }
 
-fn find_browser() -> Option<PathBuf> {
+pub(crate) fn find_browser() -> Option<PathBuf> {
     let roots = ["ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"];
     let tails = ["Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe"];
     for tail in tails {
@@ -73,7 +73,7 @@ fn find_browser() -> Option<PathBuf> {
     None
 }
 
-fn free_port() -> Option<u16> {
+pub(crate) fn free_port() -> Option<u16> {
     TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok().map(|a| a.port())
 }
 
@@ -97,7 +97,7 @@ fn read_http_body(s: &mut TcpStream) -> Option<Vec<u8>> {
     }
 }
 
-fn http(port: u16, verb: &str, path: &str) -> Option<Vec<u8>> {
+pub(crate) fn http(port: u16, verb: &str, path: &str) -> Option<Vec<u8>> {
     let mut s = TcpStream::connect(("127.0.0.1", port)).ok()?;
     s.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     write!(s, "{verb} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").ok()?;
@@ -194,12 +194,30 @@ fn leave_host(port: u16) {
     }
 }
 
-type Socket = WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
+pub(crate) type Socket = WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
 
-fn send(ws: &mut Socket, id: u64, method: &str, params: Value) -> bool {
+pub(crate) fn send(ws: &mut Socket, id: u64, method: &str, params: Value) -> bool {
     let msg = json!({"id": id, "method": method, "params": params}).to_string();
     ws.send(Message::text(msg)).is_ok()
 }
+
+/// What a page needs beyond showing its pictures: the video call talks to its
+/// page while it runs. Command numbers come from `next_id`, so they never
+/// collide with the ones the picture loop uses.
+pub(crate) trait PageHook {
+    /// Before the page loads, so nothing it says early is missed.
+    fn prepare(&mut self, _ws: &mut Socket, _next_id: &mut u64) -> bool {
+        true
+    }
+    /// Each turn of the loop, at least every few milliseconds.
+    fn turn(&mut self, _ws: &mut Socket, _next_id: &mut u64) {}
+    /// Each message from the browser that is not a picture.
+    fn message(&mut self, _v: &Value) {}
+}
+
+struct PlainPage;
+
+impl PageHook for PlainPage {}
 
 fn frame_from(data: &str, w: usize, h: usize) -> Option<Frame> {
     let bytes = base64_decode(data);
@@ -216,6 +234,17 @@ fn frame_from(data: &str, w: usize, h: usize) -> Option<Frame> {
 }
 
 pub fn run_browser(rt: &Arc<InputRt>, url: &str, alpha: bool, w: usize, h: usize, fps: u32) {
+    run_page(rt, url, alpha, (w, h), fps, &mut PlainPage);
+}
+
+pub(crate) fn run_page(
+    rt: &Arc<InputRt>,
+    url: &str,
+    alpha: bool,
+    (w, h): (usize, usize),
+    fps: u32,
+    hook: &mut dyn PageHook,
+) {
     let Some(exe) = find_browser() else {
         rt.set_status(t!("browser.needs_edge_or_chrome"));
         return;
@@ -235,7 +264,7 @@ pub fn run_browser(rt: &Arc<InputRt>, url: &str, alpha: bool, w: usize, h: usize
             }
         }
         if let Some((id, address)) = tab {
-            stream_page(rt, &address, url, alpha, (w, h), fps);
+            stream_page(rt, &address, url, alpha, (w, h), fps, hook);
             let _ = http(port, "GET", &format!("/json/close/{id}"));
         }
         leave_host(port);
@@ -292,7 +321,15 @@ fn next_picture_in(rt: &InputRt, fps: u32) -> Duration {
     }
 }
 
-fn stream_page(rt: &InputRt, address: &str, url: &str, alpha: bool, size: (usize, usize), fps: u32) {
+fn stream_page(
+    rt: &InputRt,
+    address: &str,
+    url: &str,
+    alpha: bool,
+    size: (usize, usize),
+    fps: u32,
+    hook: &mut dyn PageHook,
+) {
     let (w, h) = size;
     let mut ws = match tungstenite::connect(address) {
         Ok((ws, _)) => ws,
@@ -316,6 +353,8 @@ fn stream_page(rt: &InputRt, address: &str, url: &str, alpha: bool, size: (usize
     let format = if alpha { "png" } else { "jpeg" };
     let cast = json!({"format": format, "quality": 85, "maxWidth": w, "maxHeight": h, "everyNthFrame": 1});
     ok &= send(&mut ws, 5, "Page.startScreencast", cast);
+    let mut id = 10;
+    ok &= hook.prepare(&mut ws, &mut id);
     ok &= send(&mut ws, 6, "Page.navigate", json!({"url": url}));
     if !ok {
         rt.set_status(t!("browser.command_refused"));
@@ -327,9 +366,9 @@ fn stream_page(rt: &InputRt, address: &str, url: &str, alpha: bool, size: (usize
     let mut last_picture = Instant::now() - Duration::from_secs(60);
     let mut got_one = false;
     let mut last_hash = 0u64;
-    let mut id = 10;
     let mut waiting: Option<(String, Value)> = None;
     while !rt.stopped() {
+        hook.turn(&mut ws, &mut id);
         let patience = if got_one { 15 } else { 2 };
         if waiting.is_none() && last_picture.elapsed() > Duration::from_secs(patience) {
             last_picture = Instant::now();
@@ -355,6 +394,8 @@ fn stream_page(rt: &InputRt, address: &str, url: &str, alpha: bool, size: (usize
                 } else if let Some(data) = v["result"]["data"].as_str() {
                     last_picture = Instant::now();
                     got_one |= show(rt, data, (w, h), &mut last_hash);
+                } else {
+                    hook.message(&v);
                 }
             }
             Ok(_) => {}

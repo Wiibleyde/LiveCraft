@@ -12,7 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const HTTP_PORT: u16 = 8088;
 pub const TCP_PORT: u16 = 8099;
@@ -21,6 +21,9 @@ pub const TCP_PORT: u16 = 8099;
 const MAX_LINE: usize = 16 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_CONNECTIONS: usize = 64;
+/// For a whole request, headers and body: a client sending a byte now and
+/// then must not keep a place for ever.
+const REQUEST_TIME: Duration = Duration::from_secs(10);
 
 static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -40,6 +43,57 @@ impl Place {
 impl Drop for Place {
     fn drop(&mut self) {
         CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A connection whose reads share one deadline, rather than each having its
+/// own: every read gets only the time left.
+struct Timed {
+    stream: TcpStream,
+    until: Instant,
+}
+
+impl Timed {
+    fn new(stream: TcpStream, time: Duration) -> Self {
+        Self { stream, until: Instant::now() + time }
+    }
+
+    /// Time left to read, or an error once it has run out.
+    fn left(&self) -> std::io::Result<Duration> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "request too slow"));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        Ok(left)
+    }
+
+    fn peek(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.left()?;
+        self.stream.peek(buf)
+    }
+
+    /// The answer is sent: a moment more to read the client's goodbye.
+    fn end(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Write);
+        self.until = Instant::now() + Duration::from_secs(1);
+    }
+}
+
+impl Read for Timed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.left()?;
+        self.stream.read(buf)
+    }
+}
+
+impl Write for Timed {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
     }
 }
 
@@ -79,6 +133,47 @@ fn request_allowed(host: &str, origin: &str, fetch_site: &str, lan: bool) -> boo
 pub struct ApiConfig {
     pub lan: bool,
     pub password: String,
+}
+
+/// What a guest link may ask: its page and its call, nothing else.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GuestAsk<'a> {
+    Page(&'a str),
+    Offer(&'a str),
+}
+
+fn guest_request(path: &str) -> Option<GuestAsk<'_>> {
+    let rest = path.strip_prefix("/call/")?;
+    let (token, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    match tail {
+        "" => Some(GuestAsk::Page(token)),
+        "offer" => Some(GuestAsk::Offer(token)),
+        _ => None,
+    }
+}
+
+/// A certificate made for this run. Guests' browsers do not know it and ask
+/// them to accept it, but nothing has to be bought or installed, and its key
+/// never leaves memory.
+fn tls_config() -> Option<Arc<rustls::ServerConfig>> {
+    static CONFIG: std::sync::LazyLock<Option<Arc<rustls::ServerConfig>>> = std::sync::LazyLock::new(|| {
+        let mut names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+        names.extend(crate::call::lan_address());
+        let made = rcgen::generate_simple_self_signed(names).ok()?;
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(made.signing_key.serialize_der());
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .ok()?
+            .with_no_client_auth()
+            .with_single_cert(vec![made.cert.der().clone()], key.into())
+            .ok()?;
+        Some(Arc::new(config))
+    });
+    CONFIG.clone()
 }
 
 fn esc(s: &str) -> String {
@@ -337,14 +432,37 @@ impl Engine {
 
     fn serve_http(self: Arc<Self>, stream: TcpStream, cfg: &Mutex<ApiConfig>) {
         let local = stream.peer_addr().is_ok_and(|a| a.ip().is_loopback());
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-        let mut reader = BufReader::new(match stream.try_clone() {
-            Ok(s) => s,
-            Err(_) => return,
-        });
+        let _ = stream.set_write_timeout(Some(REQUEST_TIME));
+        let stream = Timed::new(stream, REQUEST_TIME);
+        // A guest's browser only opens the camera on https. The same port
+        // answers both, told apart by the first byte a TLS client sends.
+        let mut first = [0u8; 1];
+        if matches!(stream.peek(&mut first), Ok(1)) && first[0] == 0x16 {
+            let Some(conn) = tls_config().and_then(|c| rustls::ServerConnection::new(c).ok()) else { return };
+            let reader = BufReader::new(rustls::StreamOwned::new(conn, stream));
+            self.answer(reader, local, true, cfg, |s| {
+                s.conn.send_close_notify();
+                let _ = s.flush();
+                s.sock.end();
+            });
+        } else {
+            self.answer(BufReader::new(stream), local, false, cfg, Timed::end);
+        }
+    }
+
+    /// Reads one request and answers it. `finish` says the end of the answer.
+    fn answer<S: Read + Write>(
+        self: &Arc<Self>,
+        mut reader: BufReader<S>,
+        local: bool,
+        tls: bool,
+        cfg: &Mutex<ApiConfig>,
+        finish: impl FnOnce(&mut S),
+    ) {
         let Some(first) = read_line(&mut reader) else { return };
         let (mut auth, mut host, mut origin, mut fetch_site) =
             (String::new(), String::new(), String::new(), String::new());
+        let mut length = 0usize;
         for _ in 0..MAX_HEADERS {
             let Some(line) = read_line(&mut reader) else { return };
             if line.trim().is_empty() {
@@ -362,6 +480,7 @@ impl Engine {
                 "host" => host = value,
                 "origin" => origin = value,
                 "sec-fetch-site" => fetch_site = value,
+                "content-length" => length = value.parse().unwrap_or(usize::MAX),
                 _ => {}
             }
         }
@@ -369,26 +488,65 @@ impl Engine {
             let c = cfg.lock().unwrap();
             (c.password.clone(), c.lan)
         };
-        let mut out = stream;
         if !request_allowed(&host, &origin, &fetch_site, lan) {
-            let _ =
-                out.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return;
         }
-        if !local && !password.is_empty() {
+        let mut words = first.split_whitespace();
+        let verb = words.next().unwrap_or("GET").to_string();
+        let target = words.next().unwrap_or("/");
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let guest = guest_request(path);
+        // A guest link is its own key: it opens that guest's page and call,
+        // and nothing else, so it needs no password and gives none away.
+        if guest.is_none() && !local && !password.is_empty() {
             let given = String::from_utf8_lossy(&base64_decode(&auth)).into_owned();
             if given.split_once(':').map(|(_, p)| p) != Some(password.as_str()) {
-                let _ = out.write_all(
+                let _ = reader.get_mut().write_all(
                     b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"LiveCraft\"\r\n\
                       Content-Length: 0\r\nConnection: close\r\n\r\n",
                 );
                 return;
             }
         }
-        let target = first.split_whitespace().nth(1).unwrap_or("/");
-        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let (status, kind, body, extra) = match guest {
+            Some(ask) => {
+                let plain_from_afar = !tls && !local;
+                let (status, kind, body) =
+                    self.guest_answer(ask, &verb, &mut reader, length, plain_from_afar);
+                // The token is in the address: it must not leak to another
+                // site, sit in a cache or be framed by a page that is not ours.
+                (
+                    status,
+                    kind,
+                    body,
+                    "Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n",
+                )
+            }
+            None => {
+                let (status, kind, body) = self.desk_answer(path, query);
+                (status, kind, body, "")
+            }
+        };
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{extra}\
+             Connection: close\r\n\r\n",
+            body.len()
+        );
+        let out = reader.get_mut();
+        let _ = out.write_all(head.as_bytes());
+        let _ = out.write_all(body.as_bytes());
+        // Dropping the socket outright can reach the client as a reset before
+        // it has read the answer: say the end, then wait for theirs.
+        finish(out);
+        let _ = reader.read_to_end(&mut Vec::new());
+    }
+
+    fn desk_answer(self: &Arc<Self>, path: &str, query: &str) -> (&'static str, &'static str, String) {
         let lower = path.trim_end_matches('/').to_lowercase();
-        let (status, kind, body) = match lower.as_str() {
+        match lower.as_str() {
             "/api" => {
                 let q = parse_query(query);
                 let function = q.iter().find(|(k, _)| k.eq_ignore_ascii_case("Function"));
@@ -403,19 +561,50 @@ impl Engine {
             "" => ("200 OK", "text/html; charset=utf-8", controller_page()),
             "/telestrator" => ("200 OK", "text/html; charset=utf-8", telestrator_page()),
             _ => ("404 Not Found", "text/plain", t!("api.not_found").to_string()),
+        }
+    }
+
+    /// `plain_from_afar`: plain http from another computer, which carries the
+    /// link and the call's addresses in clear.
+    fn guest_answer(
+        &self,
+        ask: GuestAsk,
+        verb: &str,
+        reader: &mut impl Read,
+        length: usize,
+        plain_from_afar: bool,
+    ) -> (&'static str, &'static str, String) {
+        let token = match ask {
+            GuestAsk::Page(token) | GuestAsk::Offer(token) => token,
         };
-        let head = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\
-             Connection: close\r\n\r\n",
-            body.len()
-        );
-        let _ = out.write_all(head.as_bytes());
-        let _ = out.write_all(body.as_bytes());
-        // Dropping the socket outright can reach the client as a reset before
-        // it has read the answer: say the end, then wait for theirs.
-        let _ = out.shutdown(std::net::Shutdown::Write);
-        let _ = out.set_read_timeout(Some(Duration::from_secs(1)));
-        let _ = reader.read_to_end(&mut Vec::new());
+        // The link first: nothing is read for a request that opens nothing.
+        let Some(route) = self.guest_route(token) else {
+            return ("404 Not Found", "text/plain", t!("api.not_found").to_string());
+        };
+        // Only an https relay named in the link's address may pass it on in
+        // plain http, as it took the guest's https itself.
+        if plain_from_afar && !route.relayed {
+            return ("403 Forbidden", "text/plain; charset=utf-8", t!("api.guest_needs_https").to_string());
+        }
+        match ask {
+            GuestAsk::Page(_) if verb == "GET" => {
+                ("200 OK", "text/html; charset=utf-8", crate::call::guest_html(&route.ice))
+            }
+            GuestAsk::Offer(_) if verb == "POST" => {
+                if length > crate::call::MAX_OFFER {
+                    return ("413 Content Too Large", "text/plain", String::new());
+                }
+                let mut offer = Vec::with_capacity(length);
+                if reader.take(length as u64).read_to_end(&mut offer).is_err() || offer.len() < length {
+                    return ("400 Bad Request", "text/plain", String::new());
+                }
+                match route.link.answer(String::from_utf8_lossy(&offer).into_owned()) {
+                    Ok(sdp) => ("200 OK", "application/sdp", sdp),
+                    Err(e) => ("503 Service Unavailable", "text/plain; charset=utf-8", e),
+                }
+            }
+            _ => ("405 Method Not Allowed", "text/plain", String::new()),
+        }
     }
 
     fn serve_tcp(self: Arc<Self>, stream: TcpStream) {
@@ -496,7 +685,7 @@ impl Engine {
 }
 
 /// Fills the `{{word}}` slots of a remote-control page in the interface language.
-fn localize(page: &str, words: &[(&str, &str)]) -> String {
+pub(crate) fn localize(page: &str, words: &[(&str, &str)]) -> String {
     let mut out = page.replace("{{lang}}", crate::i18n::language().code());
     for (slot, word) in words {
         out = out.replace(&format!("{{{{{slot}}}}}"), &esc(word));
@@ -612,5 +801,164 @@ mod tests {
     #[test]
     fn special_characters_are_escaped() {
         assert_eq!(esc("a<b&\"c\""), "a&lt;b&amp;&quot;c&quot;");
+    }
+
+    #[test]
+    fn a_guest_link_only_reaches_its_page_and_call() {
+        assert_eq!(guest_request("/call/abc123"), Some(GuestAsk::Page("abc123")));
+        assert_eq!(guest_request("/call/abc123/offer"), Some(GuestAsk::Offer("abc123")));
+        for other in ["/api", "/", "/telestrator", "/call/", "/call/abc/../api", "/call/a.b", "/CALL/abc"] {
+            assert_eq!(guest_request(other), None, "{other}");
+        }
+    }
+
+    /// One request and its answer, without a network.
+    struct Exchange<'a> {
+        request: std::io::Cursor<&'a [u8]>,
+        reply: &'a mut Vec<u8>,
+    }
+
+    impl Read for Exchange<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.request.read(buf)
+        }
+    }
+
+    impl Write for Exchange<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.reply.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Asks as another computer would, the desk having a password; a guest's
+    /// browser asks over https.
+    fn ask_from_afar(engine: &Arc<Engine>, request: &str) -> String {
+        ask_from_afar_over(engine, request, true)
+    }
+
+    fn ask_from_afar_over(engine: &Arc<Engine>, request: &str, tls: bool) -> String {
+        let cfg = Mutex::new(ApiConfig { lan: true, password: "secret".into() });
+        let mut reply = Vec::new();
+        let exchange = Exchange { request: std::io::Cursor::new(request.as_bytes()), reply: &mut reply };
+        engine.answer(BufReader::new(exchange), false, tls, &cfg, |_| {});
+        String::from_utf8_lossy(&reply).into_owned()
+    }
+
+    fn desk_with_calls(calls: &[(&str, &str)]) -> Arc<Engine> {
+        let mut p = Project::blank();
+        for (n, (token, address)) in calls.iter().enumerate() {
+            let mut call = crate::call::new_call();
+            if let Kind::VideoCall { token: t, address: a, .. } = &mut call {
+                (*t, *a) = (token.to_string(), address.to_string());
+            }
+            p.inputs.push(Input::new(n as u64 + 1, "Invité", call));
+        }
+        Engine::start(p)
+    }
+
+    /// The link and the call's addresses never cross the network in clear:
+    /// plain http from afar is turned away, unless the link names an https
+    /// relay, which passes requests on.
+    #[test]
+    fn a_guest_link_needs_https_from_afar() {
+        let (direct, relayed) = (crate::call::new_token(), crate::call::new_token());
+        let engine = desk_with_calls(&[(&direct, ""), (&relayed, "https://relay.example")]);
+        let get = |token: &str| format!("GET /call/{token} HTTP/1.1\r\nHost: 192.168.1.20:8088\r\n\r\n");
+        let plain = ask_from_afar_over(&engine, &get(&direct), false);
+        assert!(plain.starts_with("HTTP/1.1 403"), "{plain}");
+        assert!(!plain.contains("RTCPeerConnection"), "no page in clear");
+        assert!(ask_from_afar_over(&engine, &get(&direct), true).starts_with("HTTP/1.1 200"));
+        assert!(ask_from_afar_over(&engine, &get(&relayed), false).starts_with("HTTP/1.1 200"));
+        engine.shutdown();
+    }
+
+    /// A request for an unknown link is answered before its body is read,
+    /// so a stranger cannot hold a connection by sending it slowly.
+    #[test]
+    fn an_unknown_link_is_refused_before_its_body() {
+        let token = crate::call::new_token();
+        let engine = desk_with_calls(&[(&token, "")]);
+        // Announces a body and sends none: reading it would fail.
+        let post = |token: &str| {
+            format!(
+                "POST /call/{token}/offer HTTP/1.1\r\nHost: 192.168.1.20:8088\r\nContent-Length: 1000\r\n\r\n"
+            )
+        };
+        let unknown = ask_from_afar(&engine, &post(&crate::call::new_token()));
+        assert!(unknown.starts_with("HTTP/1.1 404"), "{unknown}");
+        let known = ask_from_afar(&engine, &post(&token));
+        assert!(known.starts_with("HTTP/1.1 400"), "the real link reads its body: {known}");
+        engine.shutdown();
+    }
+
+    /// A client sending a byte now and then, each in time on its own, is
+    /// cut off when the whole request has taken too long.
+    #[test]
+    fn a_slow_request_is_cut_off_as_a_whole() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let writer = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            for byte in b"POST /call/x/offer HTTP/1.1\r\n".iter().cycle().take(100) {
+                if s.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let start = Instant::now();
+        let mut reader = BufReader::new(Timed::new(stream, Duration::from_millis(400)));
+        let mut got = Vec::new();
+        assert!(reader.read_to_end(&mut got).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2), "cut off after {:?}", start.elapsed());
+        assert!(got.len() < 40, "{} bytes", got.len());
+        drop(reader);
+        let _ = writer.join();
+    }
+
+    #[test]
+    fn a_guest_link_cannot_control_the_desk() {
+        let token = crate::call::new_token();
+        let mut p = Project::blank();
+        p.inputs.push(Input::new(1, "A", Kind::Bars));
+        p.inputs.push(Input::new(2, "B", Kind::Bars));
+        let mut call = crate::call::new_call();
+        if let Kind::VideoCall { token: t, .. } = &mut call {
+            t.clone_from(&token);
+        }
+        p.inputs.push(Input::new(3, "Invité", call));
+        (p.program, p.preview) = (Some(1), Some(2));
+        let engine = Engine::start(p);
+        let get = |path: &str| format!("GET {path} HTTP/1.1\r\nHost: 192.168.1.20:8088\r\n\r\n");
+
+        let page = ask_from_afar(&engine, &get(&format!("/call/{token}")));
+        assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+        assert!(page.contains("Rejoindre") && page.contains("no-referrer"));
+        for path in [
+            "/api/?Function=Cut".to_string(),
+            format!("/call/{token}/../api/?Function=Cut"),
+            format!("/api/?Function=Cut&Value={token}"),
+            "/".to_string(),
+        ] {
+            let reply = ask_from_afar(&engine, &get(&path));
+            assert!(reply.starts_with("HTTP/1.1 401"), "{path}: {reply}");
+        }
+        let wrong = ask_from_afar(&engine, &get(&format!("/call/{}", crate::call::new_token())));
+        assert!(wrong.starts_with("HTTP/1.1 404"), "{wrong}");
+        let offer_by_get = ask_from_afar(&engine, &get(&format!("/call/{token}/offer")));
+        assert!(offer_by_get.starts_with("HTTP/1.1 405"), "{offer_by_get}");
+        assert_eq!(engine.state.lock().unwrap().project.program, Some(1), "nothing was cut");
+
+        let auth = format!("Authorization: Basic {}\r\n", crate::secret::base64(b"x:secret"));
+        let with_password =
+            format!("GET /api/?Function=Cut HTTP/1.1\r\nHost: 192.168.1.20:8088\r\n{auth}\r\n");
+        assert!(ask_from_afar(&engine, &with_password).starts_with("HTTP/1.1 200"));
+        assert_eq!(engine.state.lock().unwrap().project.program, Some(2), "the password still works");
+        engine.shutdown();
     }
 }

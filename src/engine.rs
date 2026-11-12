@@ -303,6 +303,8 @@ impl Engine {
                     renumber(foreground);
                 }
                 Kind::Title { data, .. } => *data = None,
+                // Never the link of a call already on this desk.
+                Kind::VideoCall { token, .. } => *token = crate::call::new_token(),
                 _ => {}
             }
             // A tab keeps its meaning by name, not by its place in the list.

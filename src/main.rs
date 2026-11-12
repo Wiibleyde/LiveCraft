@@ -7,6 +7,8 @@ mod i18n;
 mod api;
 mod audio;
 mod browser;
+mod call;
+mod calltest;
 mod canvas;
 mod clap;
 mod desk;
