@@ -28,6 +28,7 @@ so a slow window cannot hold up the show.
 | `decode.rs` | Which files and streams the graphics card decodes |
 | `slides.rs` | Presentations, turned into one picture per slide by PowerPoint or LibreOffice |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
+| `plugins.rs`, `clap.rs` | CLAP plug-ins: finding, running and saving them. Their own thread starts, saves and shows them; the sound thread only runs blocks, without waiting on a lock. Tests build `fixtures/clap-test-gain` |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
 | `netvideo.rs`, `ndi.rs`, `omt.rs` | NDI and OMT in and out; runtimes loaded on first use, never shipped |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |

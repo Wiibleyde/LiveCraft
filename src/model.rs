@@ -509,6 +509,22 @@ pub struct Effect {
     pub crop: [f32; 4],
 }
 
+/// A third-party sound plug-in in a chain, with its own saved settings.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct PluginSlot {
+    /// Follows the slot when the chain is reordered, so the running plug-in
+    /// stays the same one.
+    pub key: u64,
+    /// The CLAP file, and the plug-in's identifier inside it.
+    pub path: String,
+    pub id: String,
+    pub name: String,
+    pub bypass: bool,
+    /// The plug-in's own state, in base64. Only the plug-in reads it.
+    pub state: String,
+}
+
 /// Per-input sound settings.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
@@ -532,6 +548,16 @@ pub struct AudioCfg {
     pub gate_threshold: f32,
     pub visible: bool,
     pub pfl: bool,
+    /// Run after the built-in treatment, before the fader.
+    pub plugins: Vec<PluginSlot>,
+}
+
+impl AudioCfg {
+    /// Everything but the plug-ins: the sound thread copies these settings on
+    /// every block, and plug-in states can be large.
+    pub fn without_plugins(&self) -> AudioCfg {
+        AudioCfg { plugins: Vec::new(), ..*self }
+    }
 }
 
 impl Default for AudioCfg {
@@ -553,6 +579,7 @@ impl Default for AudioCfg {
             gate_threshold: -90.0,
             visible: true,
             pfl: false,
+            plugins: Vec::new(),
         }
     }
 }
@@ -1120,11 +1147,13 @@ pub struct BusCfg {
     pub muted: bool,
     pub send_to_master: bool,
     pub device: String,
+    /// Run on the summed bus, before its level.
+    pub plugins: Vec<PluginSlot>,
 }
 
 impl Default for BusCfg {
     fn default() -> Self {
-        Self { level: 1.0, muted: false, send_to_master: false, device: String::new() }
+        Self { level: 1.0, muted: false, send_to_master: false, device: String::new(), plugins: Vec::new() }
     }
 }
 
@@ -1191,6 +1220,8 @@ pub struct Project {
     pub master_muted: bool,
     pub buses: [BusCfg; 7],
     pub master_device: String,
+    /// Run on the Master sum, before its level.
+    pub master_plugins: Vec<PluginSlot>,
     pub headphones_device: String,
     pub headphones_level: f32,
     pub ftb_audio: bool,
@@ -1272,6 +1303,7 @@ impl Project {
             master_muted: false,
             buses: Default::default(),
             master_device: String::new(),
+            master_plugins: Vec::new(),
             headphones_device: String::new(),
             headphones_level: 1.0,
             ftb_audio: true,

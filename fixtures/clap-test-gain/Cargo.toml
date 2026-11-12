@@ -1,0 +1,19 @@
+# A tiny CLAP plug-in that LiveCraft's tests build and load. Not shipped.
+[package]
+name = "clap-test-gain"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clap-sys = "0.5.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+# Its own workspace: built apart from LiveCraft, into its own folder.
+[workspace]

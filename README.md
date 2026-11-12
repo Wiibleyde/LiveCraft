@@ -68,7 +68,9 @@ picture-in-picture with borders, and a second mixer as an input.
 and alpha masks, plus scopes and safe areas.
 
 **Audio.** Master and buses A to G, per-input gate, compressor, ten-band EQ, delay, solo and
-headphones, with several output devices.
+headphones, with several output devices. [CLAP](https://cleveraudio.org) plug-ins on any input, bus
+or Master, with their own windows and their settings saved in the project. LiveCraft looks for them
+in the standard CLAP folders and in `CLAP_PATH`.
 
 **Outputs.** Two recorders, up to five stream destinations sharing one encode, separate recordings per
 input, SRT output, the program with sound as an NDI or OMT source, fullscreen and external windows,

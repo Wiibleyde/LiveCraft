@@ -748,6 +748,57 @@ outputs.srt_stopped = SRT stopped: {reason}
 # src/audio.rs
 audio.default_output = Default output
 
+# src/ui/plugin_chain.rs
+plugin_chain.title = Plug-ins
+plugin_chain.button_named = Plug-ins {name}
+plugin_chain.window_title = Plug-ins — {name}
+plugin_chain.owner_input = input {id}
+plugin_chain.heading = Plug-ins (CLAP)
+plugin_chain.empty = No plug-in in this chain
+plugin_chain.active_named = Active {name}
+plugin_chain.bypass_tip = Untick to bypass
+plugin_chain.up_named = Move {name} up
+plugin_chain.down_named = Move {name} down
+plugin_chain.window = Window
+plugin_chain.close_window = Close the window
+plugin_chain.window_named = Window {name}
+plugin_chain.no_window_tip = This plug-in has no window
+plugin_chain.remove = Remove
+plugin_chain.remove_named = Remove {name}
+plugin_chain.starting = Starting…
+plugin_chain.no_latency = No latency
+plugin_chain.latency = Latency: {samples} samples ({ms} ms)
+plugin_chain.add = Add a plug-in
+plugin_chain.searching = Looking for plug-ins…
+plugin_chain.none_found = No CLAP plug-in found
+plugin_chain.rescan = Search again
+plugin_chain.pick_file = Choose a file…
+plugin_chain.file_filter = CLAP plug-in
+plugin_chain.unreadable = {count} unreadable plug-in file(s)
+plugin_chain.params_of = Parameters of {name}
+
+# src/clap.rs
+clap.refused_start = the plug-in refused to start
+clap.offers_nothing = the plug-in offers nothing
+clap.not_in_file = the plug-in {id} is not in this file
+clap.init_failed = the plug-in could not initialise
+clap.refused_activate = the plug-in refused to activate
+clap.no_window = this plug-in has no window
+clap.window_not_opened = the plug-in did not open its window
+clap.window_not_shown = the plug-in did not show its window
+clap.cannot_open_window = cannot open a window
+clap.cannot_embed = the plug-in could not fit into its window
+clap.cannot_load = cannot load {path}: {error}
+clap.not_clap = this file is not a CLAP plug-in
+clap.bad_version = this CLAP version is not supported
+clap.incomplete = incomplete plug-in
+
+# src/plugins.rs
+plugins.no_output = no output
+plugins.no_answer = the plug-in does not answer
+plugins.crashed_scan = the plug-in crashed while being examined
+plugins.not_trusted = This file was not chosen on this computer: pick it again or search again to allow it
+
 # NDI and OMT (src/ndi.rs, src/omt.rs, src/netvideo.rs, src/outputs.rs, inputs and settings)
 ndi.missing = NDI runtime not found: install NDI Tools or the NDI runtime (ndi.video/tools), then restart LiveCraft
 ndi.cpu = The NDI runtime does not support this processor

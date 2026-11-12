@@ -10,12 +10,18 @@ fn older_files_keep_opening() {
     p.remove("overlay_last");
     p.remove("layer_templates");
     p.remove("hardware_decoding");
+    p.remove("master_plugins");
+    for bus in p["buses"].as_array_mut().unwrap() {
+        bus.as_object_mut().unwrap().remove("plugins");
+    }
     p.remove("ndi_out");
     p.remove("omt_out");
     for input in p["inputs"].as_array_mut().unwrap() {
         let i = input.as_object_mut().unwrap();
         i.remove("auto_pause");
-        i["audio"].as_object_mut().unwrap().remove("delay_ms");
+        let audio = i["audio"].as_object_mut().unwrap();
+        audio.remove("delay_ms");
+        audio.remove("plugins");
         if let Some(title) = i["kind"].get_mut("Title").and_then(|t| t.as_object_mut()) {
             title.remove("font");
             title.remove("size");
