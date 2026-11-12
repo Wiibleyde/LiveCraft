@@ -1004,9 +1004,10 @@ fn finish(
     }
     let _ = server.kill();
     let _ = server.wait();
-    let mut run = result?;
-    // Replay files only matter while the show runs, and are large.
+    // Replay files only matter while the show runs, and are large: gone even
+    // when the show failed.
     let _ = std::fs::remove_dir_all(Path::new(dir).join("ralenti"));
+    let mut run = result?;
     let t_end = run.show_s;
     run.segments.check(t_end, &mut run.failures, true);
     let failures = &mut run.failures;
