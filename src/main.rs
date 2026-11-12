@@ -20,6 +20,7 @@ mod dsp;
 mod dvd;
 mod engine;
 mod extras;
+mod ffmpeg;
 mod frame;
 mod functions;
 mod fx;

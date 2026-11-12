@@ -32,7 +32,7 @@ Nothing here has a date. Open an issue before starting something large; the
 - [ ] Video scopes: waveform, RGB parade, vectorscope and safe areas (#27)
 - [x] Production clock with pause, resume and reset (#30)
 - [ ] Open a second project in the running instance (#25)
-- [ ] Find FFmpeg more robustly and say what it can do (#32)
+- [x] Find FFmpeg more robustly and say what it can do (#32)
 
 ## Platforms
 

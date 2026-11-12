@@ -45,13 +45,15 @@ LiveCraft needs FFmpeg, but releases do not ship it. The usual Windows builds (g
 GPL, and handing out a GPL program with ours brings obligations (offering its exact source, among
 others) that deserve a deliberate decision, not a side effect of packaging. Until then:
 
-- the installer looks for `ffmpeg.exe` where LiveCraft will (the program's folder, then `PATH`), and
+- the installer looks for `ffmpeg.exe` where LiveCraft will (the file named by `LIVECRAFT_FFMPEG`, the
+  program's folder, then `PATH`), and
   when it is missing shows a page explaining how to get it, with a link to the download page;
 - `FFmpeg.txt` sits next to `livecraft.exe` in both the installer and the zip;
 - the release notes say so.
 
-Copying `ffmpeg.exe` into the LiveCraft folder works because Windows looks there first for a program
-started by name.
+Copying `ffmpeg.exe` into the LiveCraft folder works because LiveCraft looks there before `PATH`, so a
+portable copy also keeps its own ffmpeg. The Settings, under About, show which ffmpeg was found and what
+it can do.
 
 ## Two builds in one package
 

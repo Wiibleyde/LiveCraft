@@ -38,3 +38,8 @@ pub use windows::{
 pub use unix::{
     ProcessTree, end_process_tree, has_exited, open_sealed, prepare_child, seal, tie_children_to_this_process,
 };
+
+/// The file name of a program: `ffmpeg` is `ffmpeg.exe` on Windows.
+pub fn exe_name(base: &str) -> String {
+    if cfg!(windows) { format!("{base}.exe") } else { base.to_string() }
+}
