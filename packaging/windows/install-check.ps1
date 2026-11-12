@@ -64,6 +64,8 @@ Assert ($null -ne $entry) 'listed in Apps & features'
 $answer = & $exe --import-report (Join-Path $dir 'absent.vmix') 2>&1 | Out-String
 # The answer follows the system's language since the interface was translated (ECHEC or FAILED).
 Assert ($answer -match 'ECHEC|FAILED') "the program starts on this processor and answers: $($answer.Trim())"
+# Failing on a missing file is the expected answer: do not let its exit code end the script as a failure.
+$global:LASTEXITCODE = 0
 if ($Screenshot) {
     if (Test-Path $Screenshot) { Remove-Item $Screenshot }
     $run = Start-Process -PassThru $exe -ArgumentList '--screenshot', "`"$Screenshot`""
@@ -97,3 +99,4 @@ foreach ($e in $extensions | Where-Object { $existedBefore -notcontains $_ }) {
     Assert (-not (Test-Path "$classes\$e")) "no empty $e key left behind"
 }
 Remove-Item "$dir.log" -ErrorAction SilentlyContinue
+exit 0
