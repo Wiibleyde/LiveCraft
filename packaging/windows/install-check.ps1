@@ -62,7 +62,8 @@ Assert ($null -ne $entry) 'listed in Apps & features'
 
 # Piping makes PowerShell wait for a windowed program and read what it prints.
 $answer = & $exe --import-report (Join-Path $dir 'absent.vmix') 2>&1 | Out-String
-Assert ($answer -match 'ECHEC') "the program starts on this processor and answers: $($answer.Trim())"
+# The answer follows the system's language since the interface was translated (ECHEC or FAILED).
+Assert ($answer -match 'ECHEC|FAILED') "the program starts on this processor and answers: $($answer.Trim())"
 if ($Screenshot) {
     if (Test-Path $Screenshot) { Remove-Item $Screenshot }
     $run = Start-Process -PassThru $exe -ArgumentList '--screenshot', "`"$Screenshot`""
