@@ -33,7 +33,7 @@ cargo metadata --format-version 1
 | Program | Used for | Note |
 | --- | --- | --- |
 | [FFmpeg](https://ffmpeg.org) | Decoding, capture, encoding, recording, streaming | Started as a separate process. Installed by the user, under its own license. |
-| Microsoft Edge or Google Chrome | Web page inputs | Started as a separate process with no window. |
+| Microsoft Edge or Google Chrome | Web page and video call inputs | Started as a separate process with no window. |
 | CLAP plug-ins | Sound treatment on inputs and buses | Installed by the user, under their own licenses, and loaded by LiveCraft. The CLAP interface itself is MIT; LiveCraft reaches it through the `clap-sys` crate. |
 | NDI runtime (Vizrt NDI AB) | NDI inputs and output | Proprietary. Loaded at run time from the user's NDI Tools installation, never shipped. Bindings written from the public SDK documentation at docs.ndi.video. NDI® is a registered trademark of Vizrt NDI AB. |
 | [libomt and libvmx](https://github.com/openmediatransport) | OMT inputs and output | MIT. Loaded at run time from beside the program or the `PATH`, not shipped. Bindings written from the public `libomt.h`. |
