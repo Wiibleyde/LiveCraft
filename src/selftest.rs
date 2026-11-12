@@ -4,10 +4,11 @@
 //! out over NDI and OMT and takes it back in, where those runtimes are installed.
 
 use crate::api::ApiConfig;
-use crate::engine::Engine;
+use crate::engine::{Compositor, Engine};
 use crate::functions::Args;
 use crate::model::*;
 use crate::netvideo::Net;
+use crate::output::Padding;
 use crate::sources::ffmpeg;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -40,6 +41,51 @@ fn probe(path: &str) -> Result<String, String> {
         .output()
         .map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&out.stdout).replace(['\r', '\n'], " "))
+}
+
+/// Where the picture and the sound of a file end, from their packets. Both
+/// start together, so a recording whose sound and picture drifted apart ends
+/// one before the other.
+fn ends(path: &str) -> Result<(f64, f64), String> {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries", "packet=codec_type,pts_time,duration_time", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let (mut picture, mut sound) = (0f64, 0f64);
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut field = line.split(',');
+        let kind = field.next();
+        let mut number = || field.next().and_then(|v| v.parse::<f64>().ok());
+        let Some(pts) = number() else { continue };
+        let end = pts + number().unwrap_or(0.0);
+        match kind {
+            Some("video") => picture = picture.max(end),
+            Some("audio") => sound = sound.max(end),
+            _ => {}
+        }
+    }
+    if picture == 0.0 || sound == 0.0 {
+        return Err(format!("{path} : image ou son absent"));
+    }
+    Ok((picture, sound))
+}
+
+/// The end padding of each recorder, to read once they are finished.
+fn paddings(engine: &Engine) -> Vec<std::sync::Arc<std::sync::Mutex<Option<Padding>>>> {
+    engine.recorders.lock().unwrap().iter().map(|e| e.padded.clone()).collect()
+}
+
+/// The longest end padding in seconds. Picture and sound follow one clock,
+/// so they end together and the files end together by construction: what
+/// had to be padded shows whether they drifted apart on the way.
+fn most_padded(pads: &[std::sync::Arc<std::sync::Mutex<Option<Padding>>>], fps: u32) -> Result<f64, String> {
+    let mut most = 0f64;
+    for pad in pads {
+        let p = (*pad.lock().unwrap()).ok_or("fin d'enregistrement non égalisée")?;
+        most = most.max(p.pictures as f64 / fps.max(1) as f64).max(p.samples as f64 / 48_000.0);
+    }
+    Ok(most)
 }
 
 pub(crate) fn http_get(path: &str) -> Result<String, String> {
@@ -192,23 +238,34 @@ fn check(dir: &str) -> Result<String, String> {
         ));
     }
 
-    // A web page draws through the windowless browser.
-    let web = engine.new_id();
+    // A web page draws through the windowless browser, every time it starts:
+    // closing the last page ends the browser, so each start launches one. A
+    // page shown only after being opened twice has failed too.
     let page = "data:text/html,<body style='background:rgb(200,40,40)'><h1>LiveCraft</h1></body>";
-    engine.add_input(Input::new(web, "Web", Kind::Browser { url: page.into(), alpha: false }));
-    let web_rt = engine.rt(web).ok_or("page absente")?;
-    for _ in 0..150 {
-        if web_rt.seq() > 0 {
-            break;
+    for start in 1..=5 {
+        let web = engine.new_id();
+        engine.add_input(Input::new(web, "Web", Kind::Browser { url: page.into(), alpha: false }));
+        let web_rt = engine.rt(web).ok_or("page absente")?;
+        for _ in 0..150 {
+            if web_rt.seq() > 0 {
+                break;
+            }
+            if let Some(status) = web_rt.status() {
+                return Err(format!("page web, départ {start} : {status}"));
+            }
+            sleep(Duration::from_millis(100));
         }
-        sleep(Duration::from_millis(100));
+        let picture = web_rt
+            .latest()
+            .ok_or_else(|| format!("page web muette, départ {start} : {:?}", web_rt.status()))?;
+        let middle = (picture.h / 2 * picture.w + picture.w / 2) * 4;
+        if picture.data[middle] < 150 {
+            return Err(format!("page web mal rendue : {:?}", &picture.data[middle..middle + 3]));
+        }
+        engine.close_input(web);
+        // Long enough for the browser to be gone before the next start.
+        sleep(Duration::from_millis(500));
     }
-    let picture = web_rt.latest().ok_or_else(|| format!("page web muette : {:?}", web_rt.status()))?;
-    let middle = (picture.h / 2 * picture.w + picture.w / 2) * 4;
-    if picture.data[middle] < 150 {
-        return Err(format!("page web mal rendue : {:?}", &picture.data[middle..middle + 3]));
-    }
-    engine.close_input(web);
     let call = crate::calltest::check(&engine)?;
 
     // Remote control drives the desk and auto-play starts the video.
@@ -275,21 +332,37 @@ fn check(dir: &str) -> Result<String, String> {
     }
 
     let peak = rt.peak();
-    let dropped: u64 =
-        engine.recorders.lock().unwrap().iter().map(|r| r.dropped.load(Ordering::Relaxed)).sum();
+    let (dropped, repeated) = engine.recorders.lock().unwrap().iter().fold((0, 0), |(d, r), e| {
+        (d + e.dropped.load(Ordering::Relaxed), r + e.repeated.load(Ordering::Relaxed))
+    });
+    let cut: u64 = engine.streamers.lock().unwrap().iter().map(|e| e.cut.load(Ordering::Relaxed)).sum();
     let fps = engine.stats.ticks_per_sec.load(Ordering::Relaxed);
+    let project_fps = engine.state.lock().unwrap().project.fps;
+    let frame_s = 1.0 / project_fps.max(1) as f64;
     let mix_us = engine.stats.mix_us.load(Ordering::Relaxed);
+    // Says which side this run has checked: the card when there is one.
+    let by = match engine.compositor.lock().unwrap().clone() {
+        Compositor::Gpu(name) => format!("la carte graphique {name}"),
+        Compositor::Cpu(why) => format!("le processeur ({why})"),
+        Compositor::Starting => "personne encore".into(),
+    };
     if let Some(e) = engine.output_error.lock().unwrap().clone() {
         return Err(e);
     }
+    let pads = paddings(&engine);
     engine.shutdown();
+    let padded = most_padded(&pads, project_fps)?;
+    if padded > frame_s + 1e-9 {
+        return Err(format!("{:.0} ms ajoutées à la fin d'un enregistrement", padded * 1000.0));
+    }
     let _ = server.wait();
     sleep(Duration::from_millis(500));
     if peak <= 0.0 {
         return Err("aucun son de la vidéo".into());
     }
     let one = probe(&first)?;
-    let second = probe(&first.replace("-1.mp4", "-2.mkv"))?;
+    let second_path = first.replace("-1.mp4", "-2.mkv");
+    let second = probe(&second_path)?;
     let streamed = probe(&received)?;
     if !one.contains("video") || !one.contains("audio") {
         return Err(format!("enregistrement incomplet : {one}"));
@@ -307,8 +380,143 @@ fn check(dir: &str) -> Result<String, String> {
     if !multi {
         return Err("multi-enregistrement sans fichier".into());
     }
+    // Late ticks and full queues happen in a run this busy: whatever they
+    // cost, sound and picture must still end together.
+    let mut apart = Vec::new();
+    for file in [&first, &second_path] {
+        let (picture, sound) = ends(file)?;
+        if (picture - sound).abs() > frame_s {
+            return Err(format!("{file} : image jusqu'à {picture:.3} s, son jusqu'à {sound:.3} s"));
+        }
+        apart.push(format!("{:.0} ms", (sound - picture) * 1000.0));
+    }
     Ok(format!(
-        "enregistreurs {one}/ {second}| diffusion {streamed}| cadence {fps}/s, rendu {mix_us} µs, \
-         images perdues {dropped}, crête son {peak:.2}| {call}"
+        "enregistreurs {one}/ {second}| diffusion {streamed}(images coupées {cut}) | cadence {fps}/s, rendu {mix_us} µs \
+         par {by}, images perdues {dropped}, répétées {repeated}, écart son-image {}, fin égalisée de {:.0} ms, \
+         crête son {peak:.2}| {call}",
+        apart.join(" / "),
+        padded * 1000.0
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A long recording at 1080p while a network source's sender runs 0.05 %
+    /// fast, as a device clock can. Takes as long as it records:
+    /// `cargo test --release long_recording -- --ignored --nocapture`, with
+    /// `LIVECRAFT_MINUTES` for its length, ten by default, five at least: the
+    /// last minute is judged after the input's speed has been learnt.
+    #[test]
+    #[ignore = "needs FFmpeg and takes minutes"]
+    fn a_long_recording_keeps_sound_and_picture_together() {
+        let minutes: u64 = std::env::var("LIVECRAFT_MINUTES").ok().and_then(|m| m.parse().ok()).unwrap_or(10);
+        assert!(minutes >= 5, "LIVECRAFT_MINUTES must be 5 or more, not {minutes}");
+        let dir = std::env::temp_dir().join(format!("livecraft-long-{}", std::process::id()));
+        let dir = dir.to_string_lossy().into_owned();
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = format!("{dir}/clip.mp4");
+        let made = ffmpeg()
+            .args(["-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=20"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=20"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&clip)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // 48 000 samples relabelled as 47 976 a second, then brought back to
+        // 48 000: the sender delivers 24 samples a second too many.
+        let mut sender = ffmpeg()
+            .args(["-re", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30"])
+            .args(["-re", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000"])
+            .args(["-af", "asetrate=47976,aresample=48000"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-c:a", "aac"])
+            .args(["-f", "mpegts"])
+            .arg(format!("udp://127.0.0.1:{port}?pkt_size=1316"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let mut project = Project::sample();
+        (project.out_w, project.out_h) = (1920, 1080);
+        project.records[0].folder = dir.clone();
+        project.records[1].enabled = true;
+        project.records[1].container = "mkv".into();
+        project.records[1].folder = dir.clone();
+        let engine = Engine::start(project);
+        let id = engine.new_id();
+        engine.add_input(Input::new(
+            id,
+            "Clip",
+            Kind::Video { path: clip, looped: true, mark_in: 0, mark_out: 0, rate: 1.0 },
+        ));
+        let net = engine.new_id();
+        let url = format!("udp://127.0.0.1:{port}");
+        engine.add_input(Input::new(net, "Réseau", Kind::Network { url, buffer_ms: 0 }));
+        engine.call("CutDirect", &Args::new().input("Clip")).unwrap();
+        engine.call("Play", &Args::new().input("Clip")).unwrap();
+        sleep(Duration::from_secs(3));
+
+        let first = engine.start_recording(&dir).unwrap();
+        let t0 = Instant::now();
+        // The sender's sound comes in pieces of a third of a second, so what
+        // waits peaks as each one lands. Sound piling up raises the least that
+        // waits in every second, which is what Drift watches: that is checked,
+        // and the peak is shown.
+        let waiting = || engine.rt(net).and_then(|r| r.audio.as_ref().map(|a| a.queued())).unwrap_or(0);
+        let last_minute = Duration::from_secs(minutes * 60 - 60);
+        let (mut floor_late, mut peak_late) = (0, 0);
+        while t0.elapsed() < Duration::from_secs(minutes * 60) {
+            let second = Instant::now();
+            let mut floor = usize::MAX;
+            while second.elapsed() < Duration::from_secs(1) {
+                let now = waiting();
+                floor = floor.min(now);
+                if t0.elapsed() > last_minute {
+                    peak_late = peak_late.max(now);
+                }
+                sleep(Duration::from_millis(10));
+            }
+            if t0.elapsed() > last_minute {
+                floor_late = floor_late.max(floor);
+            }
+        }
+        let late = engine.stats.late_ticks.load(Ordering::Relaxed);
+        let (sent, dropped, repeated) = engine.recorders.lock().unwrap().iter().fold((0, 0, 0), |t, e| {
+            let get = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
+            (t.0 + get(&e.sent), t.1 + get(&e.dropped), t.2 + get(&e.repeated))
+        });
+        let pads = paddings(&engine);
+        engine.shutdown();
+        let _ = sender.kill();
+        let _ = sender.wait();
+        let frame = 1.0 / 30.0;
+        let padded = most_padded(&pads, 30).unwrap();
+        println!("ends evened by at most {:.1} ms", padded * 1000.0);
+        assert!(padded <= frame + 1e-9, "sound and picture drifted apart in the file");
+        for file in [first.clone(), first.replace("-1.mp4", "-2.mkv")] {
+            let (picture, sound) = ends(&file).unwrap();
+            println!(
+                "{file}: picture ends at {picture:.4} s, sound at {sound:.4} s, apart {:.1} ms",
+                (sound - picture) * 1000.0
+            );
+            assert!((picture - sound).abs() <= frame, "{file}");
+        }
+        let ms = |frames: usize| frames as f64 * 1000.0 / 48_000.0;
+        let (floor_ms, peak_ms) = (ms(floor_late), ms(peak_late));
+        println!(
+            "{minutes} min: {late} late ticks; pictures sent {sent}, dropped {dropped}, repeated {repeated}; \
+             fast network sound waiting in the last minute: least each second at most {floor_ms:.0} ms, \
+             peak {peak_ms:.0} ms"
+        );
+        assert!(floor_ms < 100.0, "the fast sender's sound piles up");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -2,6 +2,7 @@
 //! feeds headphones and output devices, and hands sound to recordings.
 
 use crate::clap;
+use crate::clock::{self, Drift, Pace, Take};
 use crate::dsp::Chain;
 use crate::engine::Engine;
 use crate::model::{AudioCfg, AudioPick, Kind, ReturnSound};
@@ -28,6 +29,10 @@ pub fn device_label(name: &str) -> &str {
 
 /// How long a device that failed is left alone before trying it again.
 const RETRY: Duration = Duration::from_secs(2);
+
+/// Up to this far behind, blocks run back to back so that none is missing;
+/// further, the time is given up as silence in recordings.
+const CATCH_UP: u64 = clock::NS / 2;
 
 struct DeviceOut {
     ring: Arc<Ring>,
@@ -123,6 +128,11 @@ struct Strip {
     audible: bool,
     solo: bool,
     always_on: bool,
+    /// Its sound comes at a device's or a sender's pace, not ours.
+    live: bool,
+    /// A stream fetched as fast as its sound is taken, which can run ahead
+    /// and wait for room.
+    may_wait: bool,
     /// What a video call guest hears back.
     call: Option<ReturnSound>,
 }
@@ -152,6 +162,8 @@ impl Engine {
                 audible: !i.audio.muted && (!i.audio.follow || air.contains(&i.id)),
                 solo: s.solo.contains(&i.id),
                 always_on: is_always_on(&i.kind),
+                live: is_live(&i.kind),
+                may_wait: matches!(&i.kind, Kind::Network { url, .. } if may_run_ahead(url)),
                 call: match i.kind {
                     Kind::VideoCall { return_sound, .. } => Some(return_sound),
                     _ => None,
@@ -205,6 +217,8 @@ impl Engine {
         let mut devices: HashMap<String, Slot> = HashMap::new();
         let mut chains: HashMap<u64, Chain> = HashMap::new();
         let mut gains: HashMap<u64, f32> = HashMap::new();
+        let mut drifts: HashMap<u64, Drift> = HashMap::new();
+        let mut raw = vec![0f32; BLOCK + 2];
         let mut tmp = vec![0f32; BLOCK];
         let mut buses = vec![vec![0f32; BLOCK]; 8];
         let mut solo = vec![0f32; BLOCK];
@@ -216,7 +230,8 @@ impl Engine {
         let mut dry = vec![0f32; BLOCK];
         let mut back = vec![0f32; BLOCK];
         let mut rack = Rack::new(&self.plugins);
-        let mut next = Instant::now();
+        let mut pace = Pace::new(clock::now(), (AUDIO_RATE / FRAMES) as u32);
+        let mut skipped = 0;
         while !self.quit.load(Ordering::Relaxed) {
             let mix = self.read_mix();
             rack.refresh();
@@ -224,6 +239,7 @@ impl Engine {
             solo.fill(0.0);
             chains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             gains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
+            drifts.retain(|id, _| mix.strips.iter().any(|s| s.id == *id && s.live));
             own.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             own.values_mut().for_each(|v| v.fill(0.0));
             dry.fill(0.0);
@@ -235,7 +251,21 @@ impl Engine {
                     rt.peak.store(0, Ordering::Relaxed);
                     continue;
                 }
-                ring.pull(&mut tmp);
+                // Time the loop gave up went by for every input too: a file's
+                // sound stays with its picture, a live input drops what aged.
+                let take = match strip.live.then(|| drifts.entry(strip.id).or_default()) {
+                    Some(drift) => {
+                        if skipped > 0 {
+                            drift.resync();
+                        }
+                        drift.take(ring.queued(), FRAMES, held(ring, strip.may_wait))
+                    }
+                    None => {
+                        ring.discard(skipped as usize * FRAMES);
+                        Take { discard: 0, frames: FRAMES, silence: 0 }
+                    }
+                };
+                fill(ring, &take, &mut raw, &mut tmp);
                 let chain = chains.entry(strip.id).or_default();
                 chain.process(&mut tmp, &strip.cfg);
                 rack.run(Owner::Input(strip.id), &mut tmp);
@@ -302,19 +332,13 @@ impl Engine {
 
             let default = default_name.lock().unwrap().clone();
             play_routes(&mix, &buses, &solo, &mut devices, &default);
-            self.feed_encoders(&buses);
+            self.feed_encoders(&buses, pace.stamp());
             self.feed_calls(&mix, &buses, (&dry, &own), &mut back);
             rack.idle();
 
-            next += Duration::from_millis(20);
-            let now = Instant::now();
-            if next > now {
-                thread::sleep(next - now);
-            } else if now - next > Duration::from_millis(500) {
-                next = now;
-            }
-            // Slightly late runs the next block at once: recordings need
-            // every block to stay in step with the picture.
+            let step = pace.advance(clock::now(), CATCH_UP);
+            skipped = step.skipped;
+            thread::sleep(step.wait);
         }
         rack.stop();
     }
@@ -327,25 +351,26 @@ impl Engine {
         *self.audio_devices.lock().unwrap() = names;
     }
 
-    fn feed_encoders(&self, buses: &[Vec<f32>]) {
+    /// `at` is the time on the shared clock of the block's first frame.
+    fn feed_encoders(&self, buses: &[Vec<f32>], at: u64) {
         let pcm = |pick: AudioPick| interleave(buses, pick);
         for enc in self.recorders.lock().unwrap().iter() {
-            enc.push_audio(pcm(enc.pick));
+            enc.push_audio(pcm(enc.pick), at);
         }
         for enc in self.streamers.lock().unwrap().iter() {
-            enc.push_audio(pcm(enc.pick));
+            enc.push_audio(pcm(enc.pick), at);
         }
         for (_, enc) in self.multi.lock().unwrap().iter() {
-            enc.push_audio(pcm(enc.pick));
+            enc.push_audio(pcm(enc.pick), at);
         }
         for (_, enc) in self.srt.lock().unwrap().iter() {
-            enc.push_audio(pcm(enc.pick));
+            enc.push_audio(pcm(enc.pick), at);
         }
         for out in self.net.lock().unwrap().iter() {
             out.push_audio(&buses[0]);
         }
         for cam in self.replay.lock().unwrap().cams.iter() {
-            cam.encoder.push_audio(pcm(cam.encoder.pick));
+            cam.encoder.push_audio(pcm(cam.encoder.pick), at);
         }
     }
 
@@ -451,11 +476,83 @@ fn is_always_on(kind: &Kind) -> bool {
     )
 }
 
+/// Sound timed by a device or a sender rather than by our clock, which a
+/// file or the test tone is: it can run fast or slow and must be kept in step.
+fn is_live(kind: &Kind) -> bool {
+    matches!(kind, Kind::Microphone { .. } | Kind::SystemAudio | Kind::Network { .. })
+}
+
+/// Whether a stream is fetched as fast as its sound is taken, as a playlist
+/// (HLS, DASH) or a media file is: it can run ahead and wait for room in its
+/// ring, and what waits there is still to come. Anything else delivers at its
+/// sender's pace, so sound waiting in its ring is late, however full the ring
+/// is: SRT, UDP, RTMP, RTSP, and over HTTP an MPEG-TS feed, a radio or a
+/// camera. Watching the ring cannot tell them apart: a live stream backed up
+/// behind a full ring waits for room just as a playlist does.
+fn may_run_ahead(url: &str) -> bool {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("file", url));
+    let name = rest.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("");
+    let kind = name.rsplit_once('.').map_or("", |(_, e)| e).to_ascii_lowercase();
+    let fetched = ["m3u8", "mpd", "mp4", "m4v", "m4a", "mov", "mkv", "webm", "avi", "wmv"];
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => fetched.contains(&kind.as_str()),
+        "file" => true,
+        _ => false,
+    }
+}
+
+/// The source is waiting for room in its ring, with sound still to come. Only
+/// a fetched stream can be: a live one found waiting was held up, as when the
+/// sound loop or the receiving ffmpeg stalls for a second on a busy machine.
+/// Taken as held, its ring would stay full from then on, the sender putting
+/// back only what each block takes, and its sound a second behind its picture
+/// for the rest of the show.
+fn held(ring: &Ring, may_wait: bool) -> bool {
+    may_wait && ring.room() < 2 * BLOCK
+}
+
 /// Balance from -1 (left) to 1 (right): the centre leaves both sides at full
 /// level, and moving away only turns the other side down.
 fn balance(b: f32) -> (f32, f32) {
     let b = b.clamp(-1.0, 1.0);
     ((1.0 - b).min(1.0), (1.0 + b).min(1.0))
+}
+
+/// Makes one block of an input's sound in `out` as `take` says: old sound
+/// thrown away, silence first if any, then the frames taken spread over the rest.
+fn fill(ring: &Ring, take: &Take, raw: &mut [f32], out: &mut [f32]) {
+    ring.discard(take.discard);
+    let (quiet, rest) = out.split_at_mut(take.silence * 2);
+    quiet.fill(0.0);
+    if take.frames * 2 == rest.len() {
+        ring.pull(rest);
+    } else {
+        let raw = &mut raw[..take.frames * 2];
+        ring.pull(raw);
+        fit(raw, rest);
+    }
+}
+
+/// Spreads stereo `src` over `out` by linear interpolation. Taking one frame
+/// more or less than a block then plays a thousandth faster or slower for
+/// 20 ms instead of jumping, and the block's first and last frames stay put
+/// so blocks still join without a step.
+fn fit(src: &[f32], out: &mut [f32]) {
+    let (n, m) = (src.len() / 2, out.len() / 2);
+    if n == 0 {
+        out.fill(0.0);
+        return;
+    }
+    let scale = (n - 1) as f32 / (m - 1).max(1) as f32;
+    for (j, pair) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        let x = j as f32 * scale;
+        let i = (x as usize).min(n - 1);
+        let k = (i + 1).min(n - 1);
+        let t = x - i as f32;
+        for c in 0..2 {
+            pair[c] = src[i * 2 + c] + (src[k * 2 + c] - src[i * 2 + c]) * t;
+        }
+    }
 }
 
 /// Puts the picked buses side by side as a multi-track block of 16-bit sound.
@@ -508,6 +605,124 @@ mod tests {
         let names: Vec<String> = AudioPick::all().into_iter().map(|(n, _)| n).collect();
         for want in ["AB", "CD", "DE", "ABCD", "DEFG"] {
             assert!(names.iter().any(|n| n == want));
+        }
+    }
+
+    /// Keeping a live input in step must not click: a block made from one
+    /// frame more or one less is as smooth as the wave, into the next block too.
+    #[test]
+    fn a_block_one_frame_long_or_short_stays_smooth() {
+        let w = 1000.0 * std::f32::consts::TAU / AUDIO_RATE as f32;
+        let wave: Vec<f32> = (0..FRAMES + 2).flat_map(|n| [(n as f32 * w).sin(); 2]).collect();
+        for frames in [FRAMES - 1, FRAMES + 1] {
+            let mut out = vec![0f32; BLOCK];
+            fit(&wave[..frames * 2], &mut out);
+            assert_eq!((out[0], out[BLOCK - 1]), (wave[0], wave[frames * 2 - 1]));
+            out.extend_from_slice(&wave[frames * 2..frames * 2 + 2]);
+            let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+            let steepest = left.windows(2).map(|p| (p[1] - p[0]).abs()).fold(0f32, f32::max);
+            assert!(steepest <= w * 1.01, "{frames} frames: a step of {steepest}");
+        }
+    }
+
+    #[test]
+    fn only_fetched_streams_can_run_ahead() {
+        for live in [
+            "srt://h:9000?mode=caller",
+            "udp://127.0.0.1:5000",
+            "RTMP://h/live/k",
+            "rtsp://cam/1",
+            "rtp://h:5004",
+            "http://h:8080/live.ts",
+            "http://radio.example:8000/stream.mp3",
+            "http://192.168.1.20/video.mjpg",
+            "https://h/feed",
+        ] {
+            assert!(!may_run_ahead(live), "{live}");
+        }
+        for fetched in [
+            "https://h/live/index.m3u8?token=a.b",
+            "https://h/manifest.mpd",
+            "http://h.example/vod/show.MP4",
+            "C:/clips/show.ts",
+        ] {
+            assert!(may_run_ahead(fetched), "{fetched}");
+        }
+    }
+
+    /// Sound left waiting in a ring a minute after the sound loop stalled for
+    /// 1.5 s, from a sender running 0.05 % fast that waits for room as the
+    /// pump does, through the loop's own `held` and `Drift`.
+    fn waiting_after_a_stall(url: &str) -> usize {
+        let ring = Ring::new(1.0);
+        let mut drift = Drift::default();
+        let chunk = [0f32; 960];
+        let (mut raw, mut out) = ([0f32; BLOCK + 2], [0f32; BLOCK]);
+        let (mut sent, mut pushed) = (0f64, 0usize);
+        for n in 0..3500 {
+            sent += FRAMES as f64 * 1.0005;
+            while sent as usize >= pushed + chunk.len() / 2 && ring.room() >= chunk.len() {
+                ring.push(&chunk);
+                pushed += chunk.len() / 2;
+            }
+            if (500..575).contains(&n) {
+                continue;
+            }
+            if n == 575 {
+                drift.resync();
+            }
+            let take = drift.take(ring.queued(), FRAMES, held(&ring, may_run_ahead(url)));
+            fill(&ring, &take, &mut raw, &mut out);
+        }
+        ring.queued()
+    }
+
+    /// What a fetched stream holds is still to come and stays; a live
+    /// sender's is late, and must come back to the margin and stay there.
+    #[test]
+    fn a_live_sender_whose_ring_filled_comes_back_in_step() {
+        let ms = |frames: usize| frames * 1000 / AUDIO_RATE;
+        assert!(ms(waiting_after_a_stall("udp://127.0.0.1:5000")) < 30);
+        assert!(ms(waiting_after_a_stall("https://h/show.m3u8")) > 900);
+    }
+
+    /// A 1 kHz tone from a device 100 ppm fast that delivers 40 ms at a time,
+    /// up to 10 ms late and now and then 45 ms late, as a virtual cable on a
+    /// busy machine does, through the loop's own path. Read back as the live
+    /// check reads its streams, it must still be one steady tone: correcting
+    /// a frame per block for a whole second would leave it a third of the sound.
+    #[test]
+    fn a_tone_from_an_uneven_device_keeps_its_pitch() {
+        let ring = Ring::new(1.0);
+        let mut drift = Drift::default();
+        let (mut raw, mut out) = ([0f32; BLOCK + 2], [0f32; BLOCK]);
+        let mut dice = 7u64;
+        let mut roll = |n: u64| {
+            dice = dice.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (dice >> 33) % n
+        };
+        let w = 1000.0 * std::f64::consts::TAU / AUDIO_RATE as f64;
+        let device_rate = AUDIO_RATE as f64 * 1.0001;
+        let (mut chunks, mut due) = (0u64, 0f64);
+        let mut heard = Vec::new();
+        for n in 0..50 * 10 {
+            let now = n as f64 * 0.02;
+            while due <= now {
+                let first = chunks * 1920;
+                let chunk: Vec<f32> =
+                    (first..first + 1920).flat_map(|i| [((i as f64 * w).sin() * 0.25) as f32; 2]).collect();
+                ring.push(&chunk);
+                chunks += 1;
+                let late = if chunks % 37 == 0 { 0.045 } else { roll(10_000) as f64 / 1e6 };
+                due = due.max((chunks + 1) as f64 * 1920.0 / device_rate + late);
+            }
+            let take = drift.take(ring.queued(), FRAMES, held(&ring, false));
+            fill(&ring, &take, &mut raw, &mut out);
+            heard.extend(out.iter().step_by(2));
+        }
+        let read = &heard[5 * AUDIO_RATE..9 * AUDIO_RATE];
+        if let Err(e) = crate::clock::judge_tone(read, AUDIO_RATE) {
+            panic!("{e}");
         }
     }
 

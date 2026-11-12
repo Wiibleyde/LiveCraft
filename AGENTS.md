@@ -25,6 +25,8 @@ and is easy to test, `src/mixer.rs` makes pictures, `src/sources.rs` and `src/pl
 - ffmpeg opens its inputs in order and reads each before the next. Sound goes first in `output.rs`,
   or pictures and sound wait for each other forever.
 - A page in a background tab draws nothing: each web input gets its own browser window.
+- A new page must answer its first commands before it is sent to its address. Otherwise Edge moves it
+  to a new renderer without them, never draws it and crashes it, and the window stays on about:blank.
 - Saved data must keep loading: every saved struct has `#[serde(default)]`.
 - An encoder's file starts when the encoder is ready, not when the button was pressed.
 - Stopping a child process must end its whole tree, as ffmpeg may be started through a launcher.

@@ -9,7 +9,9 @@ mod audio;
 mod browser;
 mod call;
 mod calltest;
+mod canvas;
 mod clap;
+mod clock;
 mod decode;
 mod desk;
 mod dsp;
@@ -19,6 +21,7 @@ mod extras;
 mod frame;
 mod functions;
 mod fx;
+mod gpu;
 // The live check drives Windows-only parts: a virtual camera, VB-CABLE and the registry.
 #[cfg(windows)]
 mod livecheck;

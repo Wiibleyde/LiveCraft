@@ -17,7 +17,7 @@ mod virtual_set;
 mod windows;
 
 use crate::api::ApiConfig;
-use crate::engine::{Engine, ROUTES, State};
+use crate::engine::{Compositor, Engine, ROUTES, State};
 use crate::functions::Args;
 use crate::i18n::{Lang, language, set_language};
 use crate::model::*;

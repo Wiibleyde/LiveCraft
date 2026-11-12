@@ -433,6 +433,12 @@ settings.add_source = Add a source
 settings.source_n = Source {n}
 settings.about_tagline = Live video mixer, rebuilt from the public documentation.
 settings.about_ffmpeg = Videos, cameras and outputs go through ffmpeg, installed separately.
+settings.compositing = Picture composition
+settings.compose_on_gpu = Compose on the graphics card
+settings.compositor_starting = Starting…
+settings.on_gpu = On the graphics card: {name}
+settings.on_cpu = On the processor: {reason}
+settings.gpu_try_again = Untick and tick the box again to try the card again.
 
 # src/ui/windows.rs
 windows.overlays_title = Overlays and stingers
@@ -753,6 +759,8 @@ browser.page_lost_retrying = Web page lost, retrying…
 browser.cannot_connect = Could not connect to the browser: {error}
 browser.command_refused = Command refused by the browser
 browser.page_lost = Web page lost: {error}
+browser.page_crashed = Web page crashed, reopening…
+browser.page_silent = Web page not answering, reopening…
 
 # src/call.rs
 call.no_answer = The studio could not answer the call
@@ -801,6 +809,18 @@ audio.default_output = Default output
 # src/platform/
 platform.x11_needed = Screen capture needs an X11 or XWayland session
 platform.no_screen_access = No screen to capture: allow screen recording
+
+# src/mixer.rs
+mixer.cpu_chosen = chosen in the settings
+
+# src/gpu.rs
+gpu.none = no suitable graphics card
+gpu.software_only = {name} is only a software emulation
+gpu.unusable = graphics card unusable: {error}
+gpu.error = graphics card error: {error}
+gpu.lost = graphics card lost: {reason}
+gpu.not_responding = the graphics card stopped responding: {error}
+gpu.picture_lost = picture lost on its way back from the graphics card
 
 # src/ui/plugin_chain.rs
 plugin_chain.title = Plug-ins

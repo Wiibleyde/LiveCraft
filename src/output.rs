@@ -3,18 +3,19 @@
 //! Several destinations at the same quality share one encode through ffmpeg's
 //! tee muxer, which costs one encoder instead of five.
 
+use crate::clock::{self, FrameLine, SampleLine};
 use crate::frame::Frame;
 use crate::model::AudioPick;
 use crate::platform::end_process_tree;
 use crate::replay::FrameLog;
-use crate::sources::ffmpeg;
+use crate::sources::{AUDIO_RATE, ffmpeg};
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
-use std::process::{Child, Command, Stdio};
+use std::net::{TcpListener, TcpStream};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub enum Target {
@@ -42,9 +43,12 @@ pub struct Spec {
 }
 
 pub struct Encoder {
-    video: Option<SyncSender<(Arc<Frame>, Instant)>>,
-    audio: Option<SyncSender<Vec<i16>>>,
+    video: Option<SyncSender<(u64, Arc<Frame>)>>,
+    audio: Option<SyncSender<(u64, Vec<i16>)>>,
+    writers: Option<(JoinHandle<Option<PictureTail>>, JoinHandle<Option<SoundTail>>)>,
     size: (usize, usize),
+    fps: u32,
+    channels: usize,
     pub label: String,
     pub codec: String,
     pub pick: AudioPick,
@@ -54,11 +58,85 @@ pub struct Encoder {
     /// set against `sent`, they show picture and sound drifting apart.
     pub audio_sent: AtomicU64,
     pub audio_dropped: AtomicU64,
+    /// Pictures written again for periods no new one arrived in time for.
+    pub repeated: Arc<AtomicU64>,
+    /// Pictures of a stream cut after a long stall, with as much sound.
+    pub cut: Arc<AtomicU64>,
+    /// What finishing added for picture and sound to end together.
+    pub padded: Arc<Mutex<Option<Padding>>>,
     failed: Arc<AtomicBool>,
     log: Arc<Mutex<String>>,
     warning: Arc<Mutex<Option<String>>>,
     child: Arc<Mutex<Option<Child>>>,
     pictures: Arc<Mutex<FrameLog>>,
+}
+
+/// Pictures and sound frames added at the end of a file. Both lines follow
+/// the same clock, so more than a frame means they had drifted apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Padding {
+    pub pictures: u64,
+    pub samples: u64,
+}
+
+/// Where a file starts on the shared clock until ffmpeg is ready.
+const NOT_YET: u64 = u64::MAX;
+
+/// Writes `frames` of silence a second at a time at most: after the machine
+/// slept or a virtual machine was paused, the gap can be hours long.
+fn write_silence(out: &mut impl Write, frames: u64, channels: usize) -> std::io::Result<()> {
+    let chunk = vec![0u8; (frames as usize).min(AUDIO_RATE) * channels * 2];
+    let mut left = frames as usize * channels * 2;
+    while left > 0 {
+        let n = left.min(chunk.len());
+        out.write_all(&chunk[..n])?;
+        left -= n;
+    }
+    Ok(())
+}
+
+/// What a writer hands back once its queue is empty, so that sound and
+/// picture can be brought to the same end before the pipes close.
+struct PictureTail {
+    pipe: ChildStdin,
+    /// The last picture written and the time on the clock it stands for.
+    last: Option<(u64, Arc<Frame>)>,
+    frames: u64,
+    log: Arc<Mutex<FrameLog>>,
+}
+
+struct SoundTail {
+    sock: TcpStream,
+    samples: u64,
+}
+
+/// A writer's result, or `Err` while it is still stuck on its pipe at `deadline`.
+fn join_by<T>(job: JoinHandle<Option<T>>, deadline: Instant) -> Result<Option<T>, ()> {
+    while !job.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    if job.is_finished() { Ok(job.join().ok().flatten()) } else { Err(()) }
+}
+
+/// What the shorter of picture and sound lacks to end with the other, once
+/// there is a picture to repeat.
+fn padding(p: &PictureTail, s: &SoundTail, fps: u32) -> Option<Padding> {
+    p.last.as_ref()?;
+    let (frames, samples) = clock::even_end(p.frames, s.samples, fps);
+    Some(Padding { pictures: frames - p.frames, samples: samples - s.samples })
+}
+
+/// Pads the shorter of picture and sound to the end of the other: a file
+/// ends with both, not with one of them missing for its last moment.
+fn even_ends(mut p: PictureTail, mut s: SoundTail, pad: Padding, channels: usize) {
+    let Some((at, last)) = p.last.take() else { return };
+    for _ in 0..pad.pictures {
+        if p.pipe.write_all(&last.data).is_err() {
+            return;
+        }
+        p.log.lock().unwrap().push(clock::instant(at));
+    }
+    let _ = write_silence(&mut s.sock, pad.samples, channels);
 }
 
 fn add_quality(cmd: &mut Command, s: &Spec, low_latency: bool) {
@@ -143,11 +221,11 @@ impl Encoder {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let tracks = s.audio.count.max(1) as usize;
-        let channels = (tracks * 2).to_string();
+        let channels = tracks * 2;
         // Sound is opened first: ffmpeg reads an input before opening the next,
         // and pictures only start once the sound socket is connected.
         let mut cmd = ffmpeg();
-        cmd.args(["-y", "-f", "s16le", "-ar", "48000", "-ac", &channels, "-i"])
+        cmd.args(["-y", "-f", "s16le", "-ar", "48000", "-ac", &channels.to_string(), "-i"])
             .arg(format!("tcp://127.0.0.1:{port}"))
             .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
             .arg(format!("{}x{}", s.w, s.h))
@@ -202,60 +280,111 @@ impl Encoder {
             });
         }
 
-        // Pictures and sound start together, once ffmpeg has both inputs open.
-        // Whatever piled up during its start-up would otherwise offset them.
-        let ready = Arc::new(AtomicBool::new(false));
-        let mut stdin = child.stdin.take().unwrap();
-        let (vtx, vrx) = sync_channel::<(Arc<Frame>, Instant)>(6);
-        let (fail, go) = (failed.clone(), ready.clone());
+        // The file starts once ffmpeg has both inputs open. From then on each
+        // picture and each block of sound goes where its stamp says: counted
+        // as they come, a picture lost to a full queue would move every later
+        // one a frame earlier than its sound.
+        let began = Arc::new(AtomicU64::new(NOT_YET));
+        let repeated = Arc::new(AtomicU64::new(0));
+        let cut = Arc::new(AtomicU64::new(0));
+        // Time cut from a stream's pictures, which its sound loses as well.
+        let cut_ns = Arc::new(AtomicU64::new(0));
         let pictures = Arc::new(Mutex::new(FrameLog::new(s.fps)));
-        let written = pictures.clone();
-        thread::spawn(move || {
-            while let Ok((f, taken)) = vrx.recv() {
-                if !go.load(Ordering::Acquire) {
+        // After a long stall, a stream repeats half a second at most and
+        // drops the rest of the gap: thousands of repeated pictures would
+        // only push it further behind. A file keeps every repeat, so that
+        // its sound stays whole.
+        let most = match s.target {
+            Target::Rtmp(_) | Target::Srt(_) => (s.fps / 2).max(1) as u64,
+            Target::File { .. } | Target::Growing(_) => u64::MAX,
+        };
+        let mut pipe = child.stdin.take().unwrap();
+        let (vtx, vrx) = sync_channel::<(u64, Arc<Frame>)>(6);
+        let (fail, start, again, fps) = (failed.clone(), began.clone(), repeated.clone(), s.fps);
+        let (taken, dropped_time, cut_count) = (pictures.clone(), cut_ns.clone(), cut.clone());
+        let picture_writer = thread::spawn(move || {
+            let mut line: Option<FrameLine> = None;
+            let mut last: Option<(u64, Arc<Frame>)> = None;
+            while let Ok((at, f)) = vrx.recv() {
+                let origin = start.load(Ordering::Acquire);
+                if origin == NOT_YET {
                     continue;
                 }
-                if stdin.write_all(&f.data).is_err() {
-                    fail.store(true, Ordering::Relaxed);
-                    break;
+                let line = line.get_or_insert_with(|| FrameLine::new(origin, fps));
+                let before = line.cut();
+                let Some(gap) = line.place_within(at, most) else {
+                    continue;
+                };
+                if line.cut() > before {
+                    cut_count.store(line.cut(), Ordering::Relaxed);
+                    dropped_time.store(line.cut_ns(), Ordering::Release);
                 }
-                written.lock().unwrap().push(taken);
+                // A copy shows the picture before it, and is logged as taken
+                // when that one was: a replay finds pictures by that moment.
+                let (fill_at, fill) = last.as_ref().map_or((at, &f), |(t, p)| (*t, p));
+                for _ in 0..gap {
+                    if pipe.write_all(&fill.data).is_err() {
+                        fail.store(true, Ordering::Relaxed);
+                        return None;
+                    }
+                    taken.lock().unwrap().push(clock::instant(fill_at));
+                }
+                again.fetch_add(gap, Ordering::Relaxed);
+                if pipe.write_all(&f.data).is_err() {
+                    fail.store(true, Ordering::Relaxed);
+                    return None;
+                }
+                taken.lock().unwrap().push(clock::instant(at));
+                last = Some((at, f));
             }
+            Some(PictureTail { pipe, last, frames: line.map_or(0, |l| l.written()), log: taken })
         });
 
-        let (atx, arx) = sync_channel::<Vec<i16>>(100);
-        let fail = failed.clone();
-        thread::spawn(move || {
+        let (atx, arx) = sync_channel::<(u64, Vec<i16>)>(100);
+        let (fail, start, dropped_time) = (failed.clone(), began.clone(), cut_ns.clone());
+        let sound = thread::spawn(move || {
             let _ = listener.set_nonblocking(true);
             let deadline = Instant::now() + Duration::from_secs(15);
             let mut sock = loop {
                 match listener.accept() {
                     Ok((s, _)) => break s,
+                    // Stopped before ffmpeg was ready: there is no file to end.
+                    Err(_) if matches!(arx.try_recv(), Err(TryRecvError::Disconnected)) => return None,
                     Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
                     Err(_) => {
                         fail.store(true, Ordering::Relaxed);
-                        return;
+                        return None;
                     }
                 }
             };
             let _ = sock.set_nonblocking(false);
-            while arx.try_recv().is_ok() {}
-            ready.store(true, Ordering::Release);
+            let origin = clock::now();
+            start.store(origin, Ordering::Release);
+            let mut line = SampleLine::new(origin);
             let mut bytes = Vec::new();
-            while let Ok(s) = arx.recv() {
+            while let Ok((at, block)) = arx.recv() {
+                let at = at.saturating_sub(dropped_time.load(Ordering::Acquire));
+                let fit = line.place(at, block.len() / channels);
                 bytes.clear();
-                bytes.extend(s.iter().flat_map(|v| v.to_le_bytes()));
-                if sock.write_all(&bytes).is_err() {
+                bytes.extend(block[fit.skip * channels..].iter().flat_map(|v| v.to_le_bytes()));
+                if write_silence(&mut sock, fit.silence, channels)
+                    .and_then(|()| sock.write_all(&bytes))
+                    .is_err()
+                {
                     fail.store(true, Ordering::Relaxed);
-                    break;
+                    return None;
                 }
             }
+            Some(SoundTail { sock, samples: line.written() })
         });
 
         Ok(Self {
             video: Some(vtx),
             audio: Some(atx),
+            writers: Some((picture_writer, sound)),
             size: (s.w, s.h),
+            fps: s.fps,
+            channels,
             label: s.label,
             codec: s.codec,
             pick: s.audio,
@@ -263,6 +392,9 @@ impl Encoder {
             sent: AtomicU64::new(0),
             audio_sent: AtomicU64::new(0),
             audio_dropped: AtomicU64::new(0),
+            repeated,
+            cut,
+            padded: Arc::new(Mutex::new(None)),
             failed,
             log,
             warning,
@@ -277,14 +409,15 @@ impl Encoder {
         self.pictures.clone()
     }
 
-    /// `taken` is the moment of the show the picture belongs to.
-    pub fn push_video(&self, f: Arc<Frame>, taken: Instant) {
+    /// `at` is the time on the shared clock the picture stands for: the file
+    /// places it, and its log notes it, by that time.
+    pub fn push_video(&self, f: Arc<Frame>, at: u64) {
         // A frame of another size would scramble the raw stream.
         if (f.w, f.h) != self.size {
             return;
         }
         if let Some(tx) = &self.video {
-            match tx.try_send((f, taken)) {
+            match tx.try_send((at, f)) {
                 Ok(()) => {
                     self.sent.fetch_add(1, Ordering::Relaxed);
                 }
@@ -296,10 +429,11 @@ impl Encoder {
         }
     }
 
-    pub fn push_audio(&self, s: Vec<i16>) {
+    /// `at` is the time on the shared clock of the block's first frame.
+    pub fn push_audio(&self, s: Vec<i16>, at: u64) {
         if let Some(tx) = &self.audio {
             let samples = (s.len() / (self.pick.count.max(1) as usize * 2)) as u64;
-            let counter = if tx.try_send(s).is_ok() { &self.audio_sent } else { &self.audio_dropped };
+            let counter = if tx.try_send((at, s)).is_ok() { &self.audio_sent } else { &self.audio_dropped };
             counter.fetch_add(samples, Ordering::Relaxed);
         }
     }
@@ -321,11 +455,37 @@ impl Encoder {
         self.video = None;
         self.audio = None;
         let Some(mut child) = self.child.lock().unwrap().take() else { return false };
-        let t0 = Instant::now();
+        // The writers empty their queues and the ends are evened within the
+        // patience. One still stuck on its pipe then means ffmpeg stopped
+        // reading: it cannot finish the file, and waiting longer would hold
+        // the stop, and closing the program, for good.
+        let deadline = Instant::now() + patience;
+        let closed = match self.writers.take() {
+            Some((pictures, sound)) => match (join_by(pictures, deadline), join_by(sound, deadline)) {
+                (Ok(Some(p)), Ok(Some(s))) => match padding(&p, &s, self.fps) {
+                    Some(pad) => {
+                        *self.padded.lock().unwrap() = Some(pad);
+                        let channels = self.channels;
+                        let job = thread::spawn(move || {
+                            even_ends(p, s, pad, channels);
+                            Some(())
+                        });
+                        join_by(job, deadline).is_ok()
+                    }
+                    None => true,
+                },
+                // A writer that gave up has dropped its pipe already.
+                (p, s) => p.is_ok() && s.is_ok(),
+            },
+            None => true,
+        };
+        // With its inputs closed, ffmpeg writes the end of the file, which
+        // gets its own patience: killed in the middle, an mp4 does not play.
+        let waiting = Instant::now() + patience;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => return status.success(),
-                Ok(None) if t0.elapsed() < patience => thread::sleep(Duration::from_millis(25)),
+                Ok(None) if closed && Instant::now() < waiting => thread::sleep(Duration::from_millis(25)),
                 _ => {
                     end_process_tree(&mut child);
                     let _ = child.wait();
@@ -385,5 +545,82 @@ mod tests {
     fn the_cause_beats_the_closing_line() {
         assert!(is_cause("Connection to tcp://x failed: Connection refused"));
         assert!(!is_cause("Conversion failed!"));
+    }
+
+    /// An encoder of 1080p at 30 fps around `child` in place of ffmpeg, whose
+    /// picture writer hands its pipe back after `busy`, `behind` pictures
+    /// short of ten seconds of sound.
+    fn finishing(mut child: Child, busy: Duration, behind: u64) -> Encoder {
+        let pipe = child.stdin.take().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sock = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut heard, _) = listener.accept().unwrap();
+        thread::spawn(move || std::io::copy(&mut heard, &mut std::io::sink()));
+        let log = Arc::new(Mutex::new(FrameLog::new(30)));
+        let last = Some((0, Arc::new(Frame::new(1920, 1080))));
+        let tail = PictureTail { pipe, last, frames: 300 - behind, log: log.clone() };
+        let pictures = thread::spawn(move || {
+            thread::sleep(busy);
+            Some(tail)
+        });
+        let sound = thread::spawn(move || Some(SoundTail { sock, samples: 480_000 }));
+        Encoder {
+            video: None,
+            audio: None,
+            writers: Some((pictures, sound)),
+            size: (1920, 1080),
+            fps: 30,
+            channels: 2,
+            label: String::new(),
+            codec: String::new(),
+            pick: AudioPick::MASTER,
+            dropped: AtomicU64::new(0),
+            sent: AtomicU64::new(0),
+            audio_sent: AtomicU64::new(0),
+            audio_dropped: AtomicU64::new(0),
+            repeated: Arc::default(),
+            cut: Arc::default(),
+            padded: Arc::default(),
+            failed: Arc::default(),
+            log: Arc::default(),
+            warning: Arc::default(),
+            child: Arc::new(Mutex::new(Some(child))),
+            pictures: log,
+        }
+    }
+
+    /// Runs for about `seconds` and never reads its input.
+    fn idle_process(seconds: u32) -> Child {
+        Command::new("ping")
+            .args(["-n", &(seconds + 1).to_string(), "127.0.0.1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    /// Writers that take most of the patience must not cost ffmpeg its time
+    /// to write the end of the file: killed then, an mp4 does not play. One
+    /// that never ends is given a whole patience of its own after the writers.
+    #[test]
+    fn the_end_of_the_file_gets_its_own_patience() {
+        let enc = finishing(idle_process(120), Duration::from_secs(3), 0);
+        let asked = Instant::now();
+        assert!(!enc.finish(Duration::from_secs(8)));
+        assert!(asked.elapsed() >= Duration::from_secs(11), "ended after {:?}", asked.elapsed());
+    }
+
+    /// An ffmpeg that stopped reading cannot hold the stop, nor closing the
+    /// program: evening the ends waits no longer than the patience, where it
+    /// used to wait for ffmpeg to go away by itself, here two minutes.
+    #[test]
+    fn a_stalled_encoder_cannot_hold_the_stop() {
+        let enc = finishing(idle_process(120), Duration::ZERO, 30);
+        let padded = enc.padded.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        thread::spawn(move || done.send(enc.finish(Duration::from_secs(1))));
+        assert_eq!(finished.recv_timeout(Duration::from_secs(60)), Ok(false));
+        assert_eq!(*padded.lock().unwrap(), Some(Padding { pictures: 30, samples: 0 }));
     }
 }

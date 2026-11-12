@@ -1,6 +1,7 @@
 //! Second half of `--selftest`: everything with a timeline, on real files
 //! decoded by real ffmpeg. Each step states what a person would expect.
 
+use crate::clock;
 use crate::decode::Hardware;
 use crate::engine::Engine;
 use crate::frame::Frame;
@@ -630,28 +631,25 @@ fn replay_marks(dir: &str) -> Result<(), String> {
             if Instant::now() > ready {
                 return Err("le ralenti n'enregistre rien".to_string());
             }
-            cam.push_video(numbered(0, w, h), Instant::now());
-            cam.push_audio(silence.clone());
+            let at = clock::now();
+            cam.push_video(numbered(0, w, h), at);
+            cam.push_audio(silence.clone(), at);
             sleep(beat);
         }
-        // Ticks 30 to 49 lose their pictures, tick 50 comes 0.3 s late and
-        // repeats its picture for the ticks it missed, as the mixer does.
+        // Ticks 30 to 49 lose their pictures and tick 50 comes 0.3 s late:
+        // the encoder repeats the picture it has for the ticks it got nothing
+        // for. Each tick stands for its time on the clock, as the mixer's do.
         let mut taken = vec![Instant::now(); 141];
-        let mut next = Instant::now();
+        let mut next = clock::now();
         for n in 1..=140u32 {
-            next += if n == 50 { beat + Duration::from_millis(300) } else { beat };
-            sleep(next.saturating_duration_since(Instant::now()));
-            let tick = Instant::now();
-            taken[n as usize] = tick;
-            let copies = match n {
-                30..50 => 0,
-                50 => 10,
-                _ => 1,
-            };
-            for _ in 0..copies {
-                cam.push_video(numbered(n, w, h), tick);
+            let late = if n == 50 { Duration::from_millis(300) } else { Duration::ZERO };
+            next += (beat + late).as_nanos() as u64;
+            sleep(clock::instant(next).saturating_duration_since(Instant::now()));
+            taken[n as usize] = clock::instant(next);
+            if !(30..50).contains(&n) {
+                cam.push_video(numbered(n, w, h), next);
             }
-            cam.push_audio(silence.clone());
+            cam.push_audio(silence.clone(), next);
         }
         let between = |n: usize| taken[n] + (taken[n + 1] - taken[n]) / 2;
         r.mark(between(70), between(100));
