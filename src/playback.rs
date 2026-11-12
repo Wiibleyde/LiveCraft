@@ -329,6 +329,8 @@ fn follow_chapter(rt: &InputRt) {
 /// drive with nothing in it is worth waiting on until a disc goes in.
 pub fn run_dvd(rt: &Arc<InputRt>, path: &str, title: u32, w: usize, h: usize, fps: u32) {
     let image = std::path::Path::new(path).is_file();
+    // Waiting for a disc to go in starts at two seconds and backs off to ten.
+    let mut wait_ms = 2_000;
     loop {
         match crate::dvd::titles(path) {
             Ok(titles) => {
@@ -345,14 +347,21 @@ pub fn run_dvd(rt: &Arc<InputRt>, path: &str, title: u32, w: usize, h: usize, fp
                 rt.set_status(t!("playback.dvd_titles_unreadable", error = e));
                 break;
             }
-            Err(e) => {
+            // No VIDEO_TS.IFO: an empty drive, worth waiting on until a disc goes in.
+            Err(e) if crate::dvd::recognise(std::path::Path::new(path)).is_none() => {
                 rt.set_status(t!("playback.dvd_unreadable", error = e));
-                for _ in 0..40 {
+                for _ in 0..wait_ms / 50 {
                     if rt.stopped() {
                         return;
                     }
                     thread::sleep(Duration::from_millis(50));
                 }
+                wait_ms = (wait_ms * 2).min(10_000);
+            }
+            // A disc is there but its tables did not parse: ffmpeg may still play it.
+            Err(e) => {
+                rt.set_status(t!("playback.dvd_titles_unreadable", error = e));
+                break;
             }
         }
     }

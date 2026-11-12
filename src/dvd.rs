@@ -27,7 +27,8 @@ pub struct Title {
 pub fn recognise(p: &Path) -> Option<String> {
     let is_iso = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("iso"));
     if p.is_file() {
-        return is_iso.then(|| p.to_string_lossy().into_owned());
+        // A Linux install image is an .iso too: only one holding VIDEO_TS is a DVD.
+        return (is_iso && Disc::open(p).is_ok()).then(|| p.to_string_lossy().into_owned());
     }
     // ffmpeg wants the folder that holds VIDEO_TS, or the drive itself.
     let holder = if is_video_ts(p) { p.parent()? } else { p };
@@ -53,8 +54,26 @@ pub fn input_args(path: &str, title: u32) -> Vec<String> {
     ["-f", "dvdvideo", "-title", &title.max(1).to_string(), "-i", path].map(String::from).to_vec()
 }
 
+/// `optical_drives`, asked again at most every few seconds: the interface draws
+/// the menu that lists them every frame, and a stale network drive can make the
+/// query slow.
+pub fn optical_drives_cached() -> Vec<String> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    match &*cache {
+        Some((at, drives)) if at.elapsed() < Duration::from_secs(5) => drives.clone(),
+        _ => {
+            let drives = optical_drives();
+            *cache = Some((Instant::now(), drives.clone()));
+            drives
+        }
+    }
+}
+
 /// Drive letters of the computer's optical drives, such as `D:\`.
-pub fn optical_drives() -> Vec<String> {
+fn optical_drives() -> Vec<String> {
     use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     // DRIVE_CDROM, as documented for GetDriveTypeW; DVD drives report it too.
     const DRIVE_CDROM: u32 = 5;
@@ -80,21 +99,30 @@ pub fn titles(path: &str) -> Result<Vec<Title>, String> {
     }
     let srpt = table(&vmg, 0xC4)?;
     let count = be16(&vmg, srpt)? as usize;
-    let mut out = Vec::with_capacity(count);
-    // One title set holds several titles: read each set once.
-    let mut sets: Vec<(u8, Vec<u8>)> = Vec::new();
+    // Read the title entries first, then the title sets one at a time in set order:
+    // a title set file can be large, and an image can name many of them.
+    let mut entries = Vec::with_capacity(count);
     for n in 0..count {
         let e = srpt + 8 + n * 12;
         let angles = *vmg.get(e + 1).ok_or_else(short)? as u32;
         let chapters = be16(&vmg, e + 2)? as u32;
         let (set, set_title) = (*vmg.get(e + 6).ok_or_else(short)?, *vmg.get(e + 7).ok_or_else(short)?);
-        if !sets.iter().any(|(s, _)| *s == set) {
-            sets.push((set, disc.read(&format!("VTS_{set:02}_0.IFO"))?));
-        }
-        let vts = &sets.iter().find(|(s, _)| *s == set).ok_or_else(short)?.1;
-        let duration_ms = title_duration(vts, set_title, chapters)?;
-        out.push(Title { number: n as u32 + 1, chapters, angles, duration_ms });
+        entries.push((n as u32 + 1, angles, chapters, set, set_title));
     }
+    let mut by_set: Vec<usize> = (0..count).collect();
+    by_set.sort_by_key(|&i| entries[i].3);
+    let mut out: Vec<Option<Title>> = vec![None; count];
+    let mut current: Option<(u8, Vec<u8>)> = None;
+    for i in by_set {
+        let (number, angles, chapters, set, set_title) = entries[i];
+        if current.as_ref().is_none_or(|(s, _)| *s != set) {
+            current = Some((set, disc.read(&format!("VTS_{set:02}_0.IFO"))?));
+        }
+        let vts = &current.as_ref().ok_or_else(short)?.1;
+        let duration_ms = title_duration(vts, set_title, chapters)?;
+        out[i] = Some(Title { number, chapters, angles, duration_ms });
+    }
+    let out: Vec<Title> = out.into_iter().flatten().collect();
     Ok(out)
 }
 
@@ -275,6 +303,7 @@ mod tests {
         if made.is_ok_and(|s| s.success()) {
             let iso = iso.to_string_lossy().into_owned();
             assert_eq!(titles(&iso).unwrap(), found);
+            assert_eq!(recognise(Path::new(&iso)), Some(iso.clone()));
             // ffmpeg opens the same image and title with the same arguments.
             let played = crate::sources::ffmpeg()
                 .args(input_args(&iso, 2))
@@ -286,6 +315,16 @@ mod tests {
         } else {
             eprintln!("image non vérifiée : mkisofs manque");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_iso_without_video_ts_is_not_a_dvd() {
+        let dir = std::env::temp_dir().join(format!("livecraft-dvd-iso-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("installation.iso");
+        std::fs::write(&other, vec![0u8; 40 * SECTOR as usize]).unwrap();
+        assert_eq!(recognise(&other), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

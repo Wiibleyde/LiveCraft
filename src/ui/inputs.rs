@@ -669,7 +669,7 @@ impl App {
                 ui.close();
             }
             ui.menu_button(t!("inputs.dvd_menu"), |ui| {
-                for drive in crate::dvd::optical_drives() {
+                for drive in crate::dvd::optical_drives_cached() {
                     if ui.button(t!("inputs.dvd_drive", drive = drive.trim_end_matches('\\'))).clicked() {
                         self.add_input(
                             &crate::dvd::display_name(&drive),
