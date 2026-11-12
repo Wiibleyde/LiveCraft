@@ -9,13 +9,33 @@
 //! network stream is opened once and not seeked, so it always goes to the card.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, mpsc};
 use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
-/// What is known of each file asked about: `None` while ffprobe is reading it.
-/// A file's weight only changes if the file does, so once per run is enough.
-static KNOWN: Mutex<BTreeMap<String, Option<bool>>> = Mutex::new(BTreeMap::new());
+/// What is known of one file: how it looked when asked about (a file that
+/// changes is asked about again) and what ffprobe said.
+struct Entry {
+    stamp: Option<(SystemTime, u64)>,
+    state: State,
+}
+
+enum State {
+    /// ffprobe is reading it.
+    Probing,
+    Known(bool),
+    /// ffprobe could not tell (a share that is down, a locked file). Not
+    /// remembered for long: the next question after a while tries again.
+    Failed(Instant),
+}
+
+static KNOWN: Mutex<BTreeMap<String, Entry>> = Mutex::new(BTreeMap::new());
+
+/// How long ffprobe may take, and how long a failed answer is believed.
+const PROBE_LIMIT: Duration = Duration::from_secs(10);
+const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// The ffmpeg input options that move decoding to the graphics card.
 pub type Hardware = &'static [&'static str];
@@ -63,27 +83,79 @@ impl Picture {
     }
 }
 
-fn probe(path: &str) -> Option<Picture> {
-    let mut cmd = Command::new("ffprobe");
-    cmd.args(["-v", "error", "-select_streams", "v:0"])
-        .args(["-show_entries", "stream=codec_name,width,height,avg_frame_rate", "-of", "csv=p=0"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null());
+/// Runs a command and returns what it printed, or `None` when it could not
+/// start, failed, or did not finish within `limit` (its whole tree is then
+/// ended, so a dead share cannot leave probes behind).
+fn run_limited(mut cmd: Command, limit: Duration) -> Option<String> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let out = cmd.output().ok()?;
-    String::from_utf8_lossy(&out.stdout).lines().find_map(Picture::parse)
+    let mut child = cmd.spawn().ok()?;
+    let mut out = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut text = String::new();
+        let mut bytes = Vec::new();
+        if out.read_to_end(&mut bytes).is_ok() {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+            let _ = tx.send(text);
+        }
+    });
+    let text = rx.recv_timeout(limit).ok();
+    if text.is_none() {
+        crate::sources::end_process_tree(&mut child);
+    }
+    let status = child.wait().ok()?;
+    if status.success() { text } else { None }
+}
+
+/// `Err` when ffprobe gave no answer, `Ok(None)` when the file has no picture.
+fn probe(path: &str) -> Result<Option<Picture>, ()> {
+    let mut cmd = Command::new("ffprobe");
+    cmd.args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-show_entries", "stream=codec_name,width,height,avg_frame_rate", "-of", "csv=p=0"])
+        .arg(path);
+    let text = run_limited(cmd, PROBE_LIMIT).ok_or(())?;
+    Ok(text.lines().find_map(Picture::parse))
+}
+
+type Stamp = Option<(SystemTime, u64)>;
+
+/// A file's modification time and size; `None` for what is not a local file.
+fn stamp(path: &str) -> Stamp {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+enum Need {
+    Answer(Option<bool>),
+    Probe,
+}
+
+/// Whether an entry still holds good for a file that looks like `stamp` now.
+fn consult(entry: Option<&Entry>, stamp: Stamp, now: Instant) -> Need {
+    match entry {
+        None => Need::Probe,
+        Some(e) if e.stamp != stamp => Need::Probe,
+        Some(Entry { state: State::Probing, .. }) => Need::Answer(None),
+        Some(Entry { state: State::Known(heavy), .. }) => Need::Answer(Some(*heavy)),
+        Some(Entry { state: State::Failed(at), .. }) if now.duration_since(*at) >= RETRY_AFTER => Need::Probe,
+        Some(Entry { state: State::Failed(_), .. }) => Need::Answer(None),
+    }
 }
 
 /// Whether this file is heavy enough for the card, once known. The first
 /// question starts finding out on the side: a picture never waits for it.
 pub fn verdict(path: &str) -> Option<bool> {
-    if let Some(known) = KNOWN.lock().unwrap().get(path) {
-        return *known;
+    let now = stamp(path);
+    {
+        let known = KNOWN.lock().unwrap();
+        if let Need::Answer(a) = consult(known.get(path), now, Instant::now()) {
+            return a;
+        }
     }
     ask_ahead(vec![path.to_string()]);
     None
@@ -91,13 +163,14 @@ pub fn verdict(path: &str) -> Option<bool> {
 
 /// Finds out about files that will play later, one after the other.
 pub fn ask_ahead(paths: Vec<String>) {
-    let fresh: Vec<String> = {
+    let fresh: Vec<(String, Stamp)> = {
         let mut known = KNOWN.lock().unwrap();
         let mut fresh = Vec::new();
         for path in paths {
-            if !known.contains_key(&path) {
-                known.insert(path.clone(), None);
-                fresh.push(path);
+            let now = stamp(&path);
+            if let Need::Probe = consult(known.get(&path), now, Instant::now()) {
+                known.insert(path.clone(), Entry { stamp: now, state: State::Probing });
+                fresh.push((path, now));
             }
         }
         fresh
@@ -106,9 +179,12 @@ pub fn ask_ahead(paths: Vec<String>) {
         return;
     }
     thread::spawn(move || {
-        for path in fresh {
-            let heavy = probe(&path).is_some_and(|p| p.worth_the_card());
-            KNOWN.lock().unwrap().insert(path, Some(heavy));
+        for (path, stamp) in fresh {
+            let state = match probe(&path) {
+                Ok(picture) => State::Known(picture.is_some_and(|p| p.worth_the_card())),
+                Err(()) => State::Failed(Instant::now()),
+            };
+            KNOWN.lock().unwrap().insert(path, Entry { stamp, state });
         }
     });
 }
@@ -130,9 +206,43 @@ mod tests {
     #[test]
     fn asking_again_keeps_what_is_known() {
         let path = "C:/déjà/lu.mp4";
-        KNOWN.lock().unwrap().insert(path.into(), Some(true));
+        KNOWN.lock().unwrap().insert(path.into(), Entry { stamp: None, state: State::Known(true) });
         ask_ahead(vec![path.into(), path.into()]);
         assert_eq!(verdict(path), Some(true), "must not be asked again and forgotten meanwhile");
+    }
+
+    #[test]
+    fn a_changed_file_is_asked_about_again() {
+        let then = Some((SystemTime::UNIX_EPOCH + Duration::from_secs(10), 100));
+        let known = Entry { stamp: then, state: State::Known(true) };
+        let now = Instant::now();
+        assert!(matches!(consult(Some(&known), then, now), Need::Answer(Some(true))));
+        let rewritten = Some((SystemTime::UNIX_EPOCH + Duration::from_secs(20), 100));
+        assert!(matches!(consult(Some(&known), rewritten, now), Need::Probe), "new modification time");
+        let longer = Some((SystemTime::UNIX_EPOCH + Duration::from_secs(10), 200));
+        assert!(matches!(consult(Some(&known), longer, now), Need::Probe), "new size");
+        assert!(matches!(consult(None, then, now), Need::Probe));
+    }
+
+    #[test]
+    fn a_failed_probe_is_tried_again_after_a_while() {
+        let failed = Entry { stamp: None, state: State::Failed(Instant::now()) };
+        assert!(matches!(consult(Some(&failed), None, Instant::now()), Need::Answer(None)));
+        let later = Instant::now() + RETRY_AFTER;
+        assert!(matches!(consult(Some(&failed), None, later), Need::Probe));
+    }
+
+    #[test]
+    fn a_probe_that_hangs_is_ended() {
+        let mut cmd = Command::new("ping");
+        cmd.args(["-n", "100", "127.0.0.1"]);
+        let started = Instant::now();
+        assert_eq!(run_limited(cmd, Duration::from_millis(300)), None);
+        // The command would run for 100 s; the slack is for a machine under load.
+        assert!(started.elapsed() < Duration::from_secs(40), "must not wait for the command");
+        let mut quick = Command::new("cmd");
+        quick.args(["/c", "echo", "hello"]);
+        assert_eq!(run_limited(quick, Duration::from_secs(10)).as_deref().map(str::trim), Some("hello"));
     }
 
     #[test]

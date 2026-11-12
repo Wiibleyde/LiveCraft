@@ -322,6 +322,20 @@ impl Desk {
         Ok(())
     }
 
+    /// A card that fails on the damaged tail of a file, after showing all of
+    /// it, hands over to software at the very end: the file is finished, not
+    /// "cannot be played", so lists go on and loops loop.
+    fn card_tail(&self, short: &str) -> Result<(), String> {
+        let spec = Spec::file(short.into(), false, 0, 0, 1.0, false);
+        let rt = InputRt::new(false, false);
+        let ended = playback::resumes_to_the_end(&rt, &spec, 60_000, 640, 360);
+        let status = rt.status();
+        if !ended || status.is_some() {
+            return Err(format!("fin de fichier après la carte : terminé attendu, état {status:?}"));
+        }
+        Ok(())
+    }
+
     /// The same for a live stream.
     fn card_missing_for_stream(&self) -> Result<(), String> {
         let port = free_udp_port()?;
@@ -477,6 +491,7 @@ pub fn check(dir: &str) -> Result<String, String> {
         desk.overlay()?;
         desk.card_crash(&heavy)?;
         desk.card_missing_for_file(&heavy)?;
+        desk.card_tail(&short)?;
         desk.card_missing_for_stream()?;
         desk.card_stall()?;
         desk.card_not_blamed()?;

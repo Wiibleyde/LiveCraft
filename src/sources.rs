@@ -195,9 +195,14 @@ impl InputRt {
     }
 
     /// Whether the child with this id stopped with an error. A child that has
-    /// closed its output exits right after, so this waits only briefly.
+    /// closed its output exits right after, so this waits only briefly: one
+    /// still running after that is hung (a stuck driver) and counts as bad.
     pub(crate) fn ended_badly(&self, pid: u32) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        self.ended_badly_within(pid, Duration::from_secs(2))
+    }
+
+    fn ended_badly_within(&self, pid: u32, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
         loop {
             if let Some(c) = self.children.lock().unwrap().iter_mut().find(|c| c.id() == pid) {
                 match c.try_wait() {
@@ -209,7 +214,7 @@ impl InputRt {
                 return false;
             }
             if Instant::now() > deadline {
-                return false;
+                return true;
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -751,6 +756,75 @@ fn stall_guard(rt: &Arc<InputRt>, over: Arc<AtomicBool>) -> Arc<AtomicBool> {
     stalled
 }
 
+/// Where a network input stands between the card and software.
+///
+/// A stream that shows nothing on the card is tried once in software at once.
+/// If software shows nothing either, the stream is unreachable and the card
+/// was not to blame: from then on there is one try per round, with a growing
+/// wait, instead of two. A card whose session goes quiet is handed to
+/// software for that round; it is blamed for the whole run only when that
+/// happens twice in a row, as one quiet spell may just be the sender.
+struct CardState {
+    on_card: bool,
+    /// The session running is software standing in for the card.
+    trial: bool,
+    stalls: u32,
+    unreachable: bool,
+    misses: u32,
+}
+
+/// What to do after a session ended.
+#[derive(Debug, PartialEq)]
+enum Next {
+    Now,
+    After(Duration),
+}
+
+impl CardState {
+    fn new(card: bool) -> Self {
+        Self { on_card: card, trial: false, stalls: 0, unreachable: false, misses: 0 }
+    }
+
+    fn backoff(&self) -> Duration {
+        Duration::from_secs(2u64 << self.misses.min(4))
+    }
+
+    fn after(&mut self, ran_on_card: bool, got_any: bool, stalled: bool) -> Next {
+        let wait = Next::After(Duration::from_secs(2));
+        if got_any {
+            (self.unreachable, self.misses) = (false, 0);
+        }
+        if ran_on_card {
+            if stalled {
+                self.stalls += 1;
+                (self.on_card, self.trial) = (false, true);
+                Next::Now
+            } else if got_any {
+                self.stalls = 0;
+                wait
+            } else if self.unreachable {
+                self.misses += 1;
+                Next::After(self.backoff())
+            } else {
+                (self.on_card, self.trial) = (false, true);
+                Next::Now
+            }
+        } else if self.trial {
+            self.trial = false;
+            if got_any {
+                self.on_card = self.stalls < 2;
+                wait
+            } else {
+                (self.on_card, self.unreachable) = (true, true);
+                self.misses += 1;
+                Next::After(self.backoff())
+            }
+        } else {
+            wait
+        }
+    }
+}
+
 pub(crate) fn run_capture(
     rt: &Arc<InputRt>,
     input_args: Vec<String>,
@@ -760,12 +834,9 @@ pub(crate) fn run_capture(
     card: Option<Hardware>,
 ) {
     let size = w * h * 4;
-    // A stream that shows nothing on the card is tried once in software at
-    // once. If software shows nothing either, the stream is unreachable and
-    // the card was not to blame.
-    let (mut on_card, mut trial) = (card.is_some(), false);
+    let mut state = CardState::new(card.is_some());
     while !rt.stopped() {
-        let session_card = card.filter(|_| on_card);
+        let session_card = card.filter(|_| state.on_card);
         let mut cmd = ffmpeg();
         cmd.args(session_card.unwrap_or_default());
         rt.hardware.store(session_card.is_some(), Ordering::Relaxed);
@@ -825,20 +896,16 @@ pub(crate) fn run_capture(
         if rt.stopped() {
             return;
         }
-        if session_card.is_some() {
-            if stalled.is_some_and(|s| s.load(Ordering::Relaxed)) {
-                on_card = false;
-            } else if !got_any {
-                (on_card, trial) = (false, true);
-                continue;
-            }
-        } else if trial {
-            trial = false;
-            on_card = !got_any;
+        let stalled = stalled.is_some_and(|s| s.load(Ordering::Relaxed));
+        let next = state.after(session_card.is_some(), got_any, stalled);
+        if next == Next::Now {
+            continue;
         }
         let why = log.lock().unwrap().clone();
         rt.set_status(t!("sources.source_lost", reason = why));
-        thread::sleep(Duration::from_secs(2));
+        if let Next::After(wait) = next {
+            thread::sleep(wait);
+        }
     }
 }
 
@@ -943,6 +1010,70 @@ fn parse_devices(log: &str) -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn secs(s: u64) -> Next {
+        Next::After(Duration::from_secs(s))
+    }
+
+    #[test]
+    fn an_unreachable_stream_costs_one_try_per_round() {
+        let mut c = CardState::new(true);
+        assert_eq!(c.after(true, false, false), Next::Now, "nothing on the card: software at once");
+        assert!(!c.on_card);
+        assert_eq!(c.after(false, false, false), secs(4), "nothing in software either: wait");
+        assert!(c.on_card, "the card was not to blame");
+        // From now on one try per round, waiting longer each time.
+        assert_eq!(c.after(true, false, false), secs(8));
+        assert!(c.on_card, "no second software try in the same round");
+        assert_eq!(c.after(true, false, false), secs(16));
+        for _ in 0..5 {
+            c.after(true, false, false);
+        }
+        assert_eq!(c.after(true, false, false), secs(32), "growth stops");
+        // The stream shows up on the card: back to the normal rhythm.
+        assert_eq!(c.after(true, true, false), secs(2));
+        assert_eq!(c.after(true, false, false), Next::Now, "a lost stream is checked in software once");
+    }
+
+    #[test]
+    fn one_quiet_spell_does_not_blame_the_card_for_good() {
+        let mut c = CardState::new(true);
+        assert_eq!(c.after(true, true, true), Next::Now, "stall: software takes over");
+        assert!(!c.on_card);
+        // Software got pictures, then the stream was lost: the card is tried again.
+        assert_eq!(c.after(false, true, false), secs(2));
+        assert!(c.on_card, "a single stall is not held against the card");
+        // The card then runs well for a while.
+        assert_eq!(c.after(true, true, false), secs(2));
+        assert_eq!(c.stalls, 0);
+        // Two stalls in a row: the card is blamed for the run.
+        c.after(true, true, true);
+        c.after(false, true, false);
+        assert!(c.on_card);
+        c.after(true, true, true);
+        assert_eq!(c.after(false, true, false), secs(2));
+        assert!(!c.on_card, "stalling twice in a row blames the card");
+        assert_eq!(c.after(false, true, false), secs(2));
+        assert!(!c.on_card, "and software stays");
+    }
+
+    #[test]
+    fn a_decoder_that_hangs_or_fails_after_its_pipe_closed_is_bad() {
+        let rt = InputRt::new(false, false);
+        let spawn = |args: &[&str]| {
+            let child = Command::new(args[0]).args(&args[1..]).stdout(Stdio::null()).spawn().unwrap();
+            let pid = child.id();
+            rt.adopt(child);
+            pid
+        };
+        let failed = spawn(&["cmd", "/c", "exit", "3"]);
+        assert!(rt.ended_badly_within(failed, Duration::from_secs(30)), "exit code 3");
+        let fine = spawn(&["cmd", "/c", "exit", "0"]);
+        assert!(!rt.ended_badly_within(fine, Duration::from_secs(30)), "clean exit");
+        let hung = spawn(&["ping", "-n", "60", "127.0.0.1"]);
+        assert!(rt.ended_badly_within(hung, Duration::from_millis(300)), "still running: hung");
+        rt.shutdown();
+    }
 
     #[test]
     fn reads_file_length_from_log() {
