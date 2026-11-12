@@ -897,3 +897,67 @@ fn an_older_session_without_a_language_still_opens() {
             .unwrap();
     assert_eq!(again.language, "en");
 }
+
+/// For what sits low in a scrolled window: a click lands where it is shown.
+fn click_shown(h: &mut Harness<'static, App>, label: &str) {
+    h.get_by_label(label).scroll_to_me();
+    h.run_steps(3);
+    click(h, label);
+}
+
+fn settle(h: &mut Harness<'static, App>, what: &str, ok: impl Fn(&Harness<'static, App>) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ok(h) {
+        assert!(Instant::now() < deadline, "{what}");
+        wait(h, 40);
+    }
+}
+
+/// A plug-in picked from the list joins the input's chain and really treats
+/// its sound: turning its gain down turns the meter down by as much, and
+/// bypassing or removing it gives the sound back.
+#[test]
+fn a_plugin_added_in_the_audio_settings_treats_the_sound() {
+    use crate::plugins::{Owner, tests::test_plugin};
+    const TONE: u64 = 16;
+    let mut h = desk(small_project());
+    h.state().engine.plugins.set_catalog(vec![test_plugin()]);
+    let peak = |h: &Harness<'static, App>| h.state().engine.rt(TONE).unwrap().peak();
+    let chain = |h: &Harness<'static, App>| {
+        project(h).inputs.iter().find(|i| i.id == TONE).unwrap().audio.plugins.clone()
+    };
+    settle(&mut h, "the test tone plays", |h| peak(h) > 0.01);
+    let untreated = peak(&h);
+
+    h.state_mut().editing = Some(TONE);
+    h.state_mut().edit_tab = 8;
+    h.run_steps(3);
+    click_shown(&mut h, "Ajouter un plug-in");
+    click(&mut h, "LiveCraft Test Gain");
+    let slots = chain(&h);
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots[0].id, "org.livecraft.test-gain");
+    let key = slots[0].key;
+    let view = move |h: &Harness<'static, App>| h.state().engine.plugins.view(Owner::Input(TONE), key);
+    settle(&mut h, "the plug-in starts", |h| view(h).is_some_and(|v| v.running));
+    h.run_steps(3);
+    h.get_by_label("Latence : 32 échantillons (0.7 ms)");
+
+    // As a screen reader or a typed value would set it.
+    h.get_by_label("Gain").set_value_accesskit(-20.0);
+    h.run_steps(3);
+    let gain_db = |h: &Harness<'static, App>| view(h).unwrap().params[0].value as f32;
+    settle(&mut h, "the plug-in takes the new gain", |h| (gain_db(h) + 20.0).abs() < 0.01);
+    let expected = untreated * 0.1;
+    settle(&mut h, "the meter follows the plug-in's gain", |h| (peak(h) - expected).abs() < expected * 0.1);
+    settle(&mut h, "the state reaches the project", |h| !chain(h)[0].state.is_empty());
+
+    click_shown(&mut h, "Actif LiveCraft Test Gain");
+    assert!(chain(&h)[0].bypass);
+    settle(&mut h, "bypass gives the sound back", |h| (peak(h) - untreated).abs() < untreated * 0.05);
+
+    click_shown(&mut h, "Retirer LiveCraft Test Gain");
+    assert!(chain(&h).is_empty());
+    settle(&mut h, "the plug-in is let go", |h| view(h).is_none());
+    end(h);
+}
