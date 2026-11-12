@@ -495,7 +495,8 @@ mod tests {
         let engine = Engine::start(p);
         let rt = engine.rt(2).unwrap();
         let link = rt.call.clone().unwrap();
-        // The guest's voice: a steady level, easy to find in what comes back.
+        // The guest's voice: a steady level, easy to find in what comes back,
+        // kept a little ahead so a late wake-up does not make a gap in it.
         // Connected again each time, as the page opening meanwhile resets it.
         let voice = rt.audio.clone().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -503,12 +504,23 @@ mod tests {
         let talker = thread::spawn(move || {
             while !talking.load(Ordering::Relaxed) {
                 connection.set_connected(true);
-                voice.push(&[0.3f32; 960]);
-                thread::sleep(Duration::from_millis(10));
+                while voice.len() < 9600 {
+                    voice.push(&[0.3f32; 960]);
+                }
+                thread::sleep(Duration::from_millis(5));
             }
         });
-        // The sound thread first lists the devices, which takes its time on
-        // a busy machine: wait for sound to flow, then take a fresh stretch.
+        // The sound thread first lists the devices, and on a busy machine a
+        // source can start late: wait until the show's tone and the guest
+        // are both on their meters, then take a fresh stretch.
+        let tone = engine.rt(1).unwrap();
+        let (mut tone_seen, mut guest_seen) = (false, false);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(tone_seen && guest_seen) && Instant::now() < deadline {
+            tone_seen |= tone.peak() > 0.05;
+            guest_seen |= rt.peak() > 0.2;
+            thread::sleep(Duration::from_millis(5));
+        }
         // Master is read during that stretch, while the guest talks: read
         // after they stop, it only holds the rest of the show.
         let until = |enough: usize| {
@@ -523,7 +535,6 @@ mod tests {
             }
         };
         until(1);
-        thread::sleep(Duration::from_millis(100));
         link.sound.clear();
         let master_peak = until(9600);
         let mut back = vec![0f32; link.sound.len()];
