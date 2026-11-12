@@ -291,7 +291,7 @@ pub fn visca_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
 pub fn ptz_send(host: &str, seq: u32, cmd: Ptz) -> Result<(), String> {
     let host = host.trim();
     if host.is_empty() {
-        return Err("Adresse de la caméra manquante".into());
+        return Err(t!("extras.ptz_missing_address").into());
     }
     let target = if host.contains(':') { host.to_string() } else { format!("{host}:52381") };
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;

@@ -313,7 +313,7 @@ impl Engine {
             let id = {
                 let s = self.state.lock().unwrap();
                 let input = s.project.inputs.iter().find(|i| matches!(i.kind, Kind::Telestrator { .. }));
-                input.map(|i| i.id).ok_or("Aucun télestrateur")?
+                input.map(|i| i.id).ok_or(t!("api.no_telestrator"))?
             };
             match name {
                 "TelestratorStroke" => self.telestrator_stroke(id, args.value.as_deref().unwrap_or("")),
@@ -344,7 +344,7 @@ impl Engine {
                     }
                 });
             }
-            Err(_) => failed = Some(format!("Port {HTTP_PORT} déjà utilisé")),
+            Err(_) => failed = Some(t!("api.port_in_use", port = HTTP_PORT)),
         }
         match TcpListener::bind(SocketAddr::new(ip, TCP_PORT)) {
             Ok(l) => {
@@ -366,7 +366,7 @@ impl Engine {
                     }
                 });
             }
-            Err(_) => failed = Some(format!("Port {TCP_PORT} déjà utilisé")),
+            Err(_) => failed = Some(t!("api.port_in_use", port = TCP_PORT)),
         }
         failed
     }
@@ -499,9 +499,9 @@ impl Engine {
                     },
                 }
             }
-            "" => ("200 OK", "text/html; charset=utf-8", CONTROLLER_PAGE.to_string()),
-            "/telestrator" => ("200 OK", "text/html; charset=utf-8", TELESTRATOR_PAGE.to_string()),
-            _ => ("404 Not Found", "text/plain", "Introuvable".to_string()),
+            "" => ("200 OK", "text/html; charset=utf-8", controller_page()),
+            "/telestrator" => ("200 OK", "text/html; charset=utf-8", telestrator_page()),
+            _ => ("404 Not Found", "text/plain", t!("api.not_found").to_string()),
         }
     }
 
@@ -512,7 +512,7 @@ impl Engine {
         reader: &mut impl Read,
         length: usize,
     ) -> (&'static str, &'static str, String) {
-        let missing = ("404 Not Found", "text/plain", "Introuvable".to_string());
+        let missing = ("404 Not Found", "text/plain", t!("api.not_found").to_string());
         match ask {
             GuestAsk::Page(token) if verb == "GET" => match self.guest_page(token) {
                 Some(page) => ("200 OK", "text/html; charset=utf-8", page),
@@ -608,18 +608,56 @@ impl Engine {
                 "UNSUBSCRIBE OK TALLY\r\n".to_string()
             }
             "QUIT" => return None,
-            other => format!("{other} ER Commande non prise en charge\r\n"),
+            other => format!("{other} ER {}\r\n", t!("api.unsupported_command")),
         })
     }
 }
 
-const CONTROLLER_PAGE: &str = r#"<!doctype html><html lang="fr"><meta charset="utf-8">
+/// Fills the `{{word}}` slots of a remote-control page in the interface language.
+pub(crate) fn localize(page: &str, words: &[(&str, &str)]) -> String {
+    let mut out = page.replace("{{lang}}", crate::i18n::language().code());
+    for (slot, word) in words {
+        out = out.replace(&format!("{{{{{slot}}}}}"), &esc(word));
+    }
+    out
+}
+
+fn controller_page() -> String {
+    localize(
+        CONTROLLER_PAGE,
+        &[
+            ("cut", t!("api.page.cut")),
+            ("fade", t!("api.page.fade")),
+            ("ftb", t!("api.page.fade_to_black")),
+            ("telestrator", t!("api.page.telestrator")),
+        ],
+    )
+}
+
+fn telestrator_page() -> String {
+    localize(
+        TELESTRATOR_PAGE,
+        &[
+            ("telestrator", t!("api.page.telestrator")),
+            ("line", t!("api.page.line")),
+            ("rect", t!("api.page.rect")),
+            ("circle", t!("api.page.circle")),
+            ("thin", t!("api.page.thin")),
+            ("medium", t!("api.page.medium")),
+            ("thick", t!("api.page.thick")),
+            ("undo", t!("api.page.undo")),
+            ("clear", t!("api.page.clear")),
+        ],
+    )
+}
+
+const CONTROLLER_PAGE: &str = r#"<!doctype html><html lang="{{lang}}"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>LiveCraft</title>
 <style>body{background:#131314;color:#eee;font:16px system-ui;margin:0;padding:12px}
 button{background:#343538;color:#fff;border:0;border-radius:4px;padding:14px;margin:4px;font-size:16px}
 #i button{min-width:130px}.p{background:#f28c00}.o{background:#0a7a16}a{color:#8cf}</style>
-<h3>LiveCraft</h3><div><button onclick="f('Cut')">Coupe</button><button onclick="f('Fade')">Fondu</button>
-<button onclick="f('FadeToBlack')">Fondu au noir</button> <a href="/telestrator">Télestrateur</a></div>
+<h3>LiveCraft</h3><div><button onclick="f('Cut')">{{cut}}</button><button onclick="f('Fade')">{{fade}}</button>
+<button onclick="f('FadeToBlack')">{{ftb}}</button> <a href="/telestrator">{{telestrator}}</a></div>
 <div id="i"></div><script>
 function f(n,i){fetch('/api/?Function='+n+(i?'&Input='+i:'')).then(r)}
 function r(){fetch('/api/').then(x=>x.text()).then(t=>{let d=new DOMParser().parseFromString(t,'text/xml');
@@ -628,14 +666,14 @@ d.querySelectorAll('inputs>input').forEach(e=>{let n=e.getAttribute('number'),b=
 b.className=n==o?'o':n==p?'p':'';b.textContent=n+' '+e.getAttribute('title');b.onclick=()=>f('PreviewInput',n);l.push(b)});
 document.getElementById('i').replaceChildren(...l)})}r();setInterval(r,1000)</script></html>"#;
 
-const TELESTRATOR_PAGE: &str = r##"<!doctype html><html lang="fr"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Télestrateur</title>
+const TELESTRATOR_PAGE: &str = r##"<!doctype html><html lang="{{lang}}"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{{telestrator}}</title>
 <style>body{background:#131314;color:#eee;font:16px system-ui;margin:0;padding:8px}
 canvas{background:#222;width:100%;touch-action:none;display:block;margin-top:8px}
 button,select,input{font-size:16px;margin:2px}</style>
-<div><input type=color id=c value="#ff2020"><select id=s><option value=line>Ligne<option value=rect>Carré<option value=circle>Cercle</select>
-<select id=z><option value=0.006>Fin<option value=0.012 selected>Moyen<option value=0.025>Épais</select>
-<button onclick="a('TelestratorUndo')">Annuler</button><button onclick="a('TelestratorClear')">Effacer</button></div>
+<div><input type=color id=c value="#ff2020"><select id=s><option value=line>{{line}}<option value=rect>{{rect}}<option value=circle>{{circle}}</select>
+<select id=z><option value=0.006>{{thin}}<option value=0.012 selected>{{medium}}<option value=0.025>{{thick}}</select>
+<button onclick="a('TelestratorUndo')">{{undo}}</button><button onclick="a('TelestratorClear')">{{clear}}</button></div>
 <canvas id=v width=1280 height=720></canvas><script>
 let v=document.getElementById('v'),g=v.getContext('2d'),pts=[],on=false;
 function a(n,q){fetch('/api/?Function='+n+(q?'&Value='+encodeURIComponent(q):''))}

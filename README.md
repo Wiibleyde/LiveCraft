@@ -87,13 +87,15 @@ livecraft --project show.vmix             # open a project
 livecraft --import-report show.vmix       # say what a project keeps, without opening it
 livecraft --selftest some-folder          # real end-to-end run: plays, records, streams, replays
 livecraft --screenshot out.png            # start, save a picture of the window, quit
+livecraft --lang en                       # start in English (or fr), and keep that choice
 ```
 
 > [!IMPORTANT]
 > LiveCraft is **early alpha and not ready for a show that matters.** It has run on one Windows machine.
 > Tests cover the desk, the interface and real encoding to local files and a local stream, but it has
 > **not** been tried with physical cameras, capture cards, PTZ heads or a live streaming platform.
-> The interface is in French only for now.
+> The interface speaks French and English: it follows the system language, and Settings › Options
+> changes it.
 
 ### What is missing today
 
@@ -110,7 +112,7 @@ Contributions of every size are welcome, in English or in French. You do not nee
 
 - 🎥 **Try it with real gear** and tell us what happens. This is the most useful thing right now.
 - 🐛 **Open an issue** with your Windows version, your hardware and what you expected.
-- 🌍 **Translate the interface**, once strings are out of the code.
+- 🌍 **Translate the interface**: a language is one text file in [`locales/`](locales).
 - 🦀 **Take something from the [roadmap](ROADMAP.md).** A compositor on the GPU is the biggest one.
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md). AI coding agents should read [AGENTS.md](AGENTS.md) too.

@@ -63,8 +63,7 @@ impl CallLink {
     pub fn answer(&self, offer: String) -> Result<String, String> {
         let (tx, rx) = mpsc::channel();
         self.offers.lock().unwrap().push((offer, tx));
-        rx.recv_timeout(Duration::from_secs(20))
-            .map_err(|_| "La régie n'a pas pu répondre à l'appel".to_string())?
+        rx.recv_timeout(Duration::from_secs(20)).map_err(|_| t!("call.no_answer").to_string())?
     }
 
     fn offer_program(&self, seq: u64, frame: impl FnOnce() -> Arc<Frame>) {
@@ -164,10 +163,7 @@ fn jpeg(frame: &Frame, w: usize, h: usize) -> Option<Vec<u8>> {
 pub fn run_call(rt: &Arc<InputRt>, ice: &str, w: usize, h: usize, fps: u32) {
     let Some(link) = rt.call.clone() else { return };
     let (rw, rh) = return_size(w, h);
-    let page = RECEIVER_PAGE
-        .replace("__ICE__", ice)
-        .replace("__RW__", &rw.to_string())
-        .replace("__RH__", &rh.to_string());
+    let page = receiver_html(ice, rw, rh);
     let url = format!("data:text/html;base64,{}", base64(page.as_bytes()));
     let mut hook = CallPage {
         rt: rt.clone(),
@@ -246,7 +242,7 @@ impl CallPage {
         self.link.set_connected(state == "connected");
         match state {
             "connected" | "new" | "connecting" => self.rt.clear_status(),
-            _ => self.rt.set_status("Invité déconnecté"),
+            _ => self.rt.set_status(t!("call.guest_disconnected")),
         }
     }
 }
@@ -276,7 +272,7 @@ impl PageHook for CallPage {
                     self.answers.insert(n, tx);
                 }
                 None => {
-                    let _ = tx.send(Err("Navigateur indisponible".into()));
+                    let _ = tx.send(Err(t!("call.browser_unavailable").into()));
                 }
             }
         }
@@ -296,7 +292,7 @@ impl PageHook for CallPage {
             }
         } else if let Some(tx) = v["id"].as_u64().and_then(|n| self.answers.remove(&n)) {
             let sdp = v["result"]["result"]["value"].as_str().map(String::from);
-            let _ = tx.send(sdp.ok_or_else(|| "La régie a refusé l'appel".to_string()));
+            let _ = tx.send(sdp.ok_or_else(|| t!("call.refused").to_string()));
         }
     }
 }
@@ -320,7 +316,7 @@ impl Engine {
 
     pub fn guest_page(&self, token: &str) -> Option<String> {
         let (_, ice) = self.call_for(token)?;
-        Some(GUEST_PAGE.replace("__ICE__", &ice))
+        Some(guest_html(&ice))
     }
 
     /// None when no input has this link.
@@ -338,13 +334,66 @@ impl Engine {
     }
 }
 
+/// Texts a page's script shows, as a script value that cannot end the
+/// script element it sits in.
+fn script_text(words: &[(&str, &str)]) -> String {
+    let map = words.iter().map(|(k, v)| (k.to_string(), Value::from(*v))).collect();
+    Value::Object(map).to_string().replace('<', "\\u003c")
+}
+
+/// The page receiving the call, in the desk's language: its words are drawn
+/// on the input's picture.
+fn receiver_html(ice: &str, rw: usize, rh: usize) -> String {
+    let words = [
+        ("waiting", t!("call.receiver.waiting")),
+        ("connecting", t!("call.receiver.connecting")),
+        ("disconnected", t!("call.guest_disconnected")),
+    ];
+    // The operator's servers go in last, so nothing typed there is read
+    // again as a slot.
+    RECEIVER_PAGE
+        .replace("__TEXT__", &script_text(&words))
+        .replace("__RW__", &rw.to_string())
+        .replace("__RH__", &rh.to_string())
+        .replace("__ICE__", ice)
+}
+
+/// The guest's page, in the desk's language.
+fn guest_html(ice: &str) -> String {
+    let page = crate::api::localize(
+        GUEST_PAGE,
+        &[
+            ("title", t!("call.guest.title")),
+            ("intro", t!("call.guest.intro")),
+            ("join", t!("call.guest.join")),
+            ("mute_mic", t!("call.guest.mute_mic")),
+            ("mute_camera", t!("call.guest.mute_camera")),
+        ],
+    );
+    let words = [
+        ("mute_mic", t!("call.guest.mute_mic")),
+        ("unmute_mic", t!("call.guest.unmute_mic")),
+        ("mute_camera", t!("call.guest.mute_camera")),
+        ("unmute_camera", t!("call.guest.unmute_camera")),
+        ("needs_https", t!("call.guest.needs_https")),
+        ("refused", t!("call.guest.refused")),
+        ("retry", t!("call.guest.retry")),
+        ("connecting", t!("call.guest.connecting")),
+        ("connected", t!("call.guest.connected")),
+        ("lost", t!("call.guest.lost")),
+        ("reconnect", t!("call.guest.reconnect")),
+        ("no_answer", t!("call.guest.no_answer")),
+    ];
+    page.replace("__TEXT__", &script_text(&words)).replace("__ICE__", ice)
+}
+
 /// Runs in the windowless browser. What it draws is the input's picture.
 const RECEIVER_PAGE: &str = r#"<!doctype html><html><meta charset="utf-8"><style>
 html,body{margin:0;height:100%;background:#000;overflow:hidden}
 video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
 #w{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ccc;font:6vh system-ui,sans-serif}
-</style><video id=v autoplay playsinline muted></video><div id=w>En attente de l'invité…</div><script>
-const ICE=__ICE__,v=document.getElementById('v'),w=document.getElementById('w');
+</style><video id=v autoplay playsinline muted></video><div id=w></div><script>
+const T=__TEXT__,ICE=__ICE__,v=document.getElementById('v'),w=document.getElementById('w');w.textContent=T.waiting;
 const c=document.createElement('canvas');c.width=__RW__;c.height=__RH__;
 const g=c.getContext('2d');g.fillRect(0,0,c.width,c.height);
 const ac=new AudioContext({sampleRate:48000}),out=ac.createMediaStreamDestination();
@@ -376,7 +425,7 @@ const me=new RTCPeerConnection({iceServers:ICE});pc=me;
 me.ontrack=e=>{if(e.track.kind=='video')v.srcObject=new MediaStream([e.track]);else hear(e.track)};
 me.onconnectionstatechange=()=>{if(pc!==me)return;const s=me.connectionState;lcState(s);
 w.style.display=s=='connected'?'none':'flex';
-w.textContent=s=='new'||s=='connecting'?"Connexion de l'invité…":'Invité déconnecté'};
+w.textContent=s=='new'||s=='connecting'?T.connecting:T.disconnected};
 await me.setRemoteDescription({type:'offer',sdp});
 for(const t of back.getTracks())me.addTrack(t,back);
 await me.setLocalDescription(await me.createAnswer());
@@ -385,41 +434,41 @@ await gathered(me);return me.localDescription.sdp}
 
 /// What the guest opens. Served over https, without which their browser
 /// keeps the camera closed.
-const GUEST_PAGE: &str = r#"<!doctype html><html lang="fr"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>LiveCraft : invité</title>
+const GUEST_PAGE: &str = r#"<!doctype html><html lang="{{lang}}"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{{title}}</title>
 <style>body{background:#131314;color:#eee;font:16px system-ui,sans-serif;margin:0;padding:12px;text-align:center}
 video{background:#000;border-radius:6px;max-width:100%}#back{width:100%;max-width:960px;aspect-ratio:16/9}
 #me{width:240px;transform:scaleX(-1)}
 button{background:#343538;color:#fff;border:0;border-radius:4px;padding:14px 20px;margin:6px;font-size:16px}
 #j{background:#0a7a16}</style>
-<h2>LiveCraft</h2><p id=s>Vous êtes invité dans une émission. Votre navigateur va demander la caméra et le micro.</p>
-<div><button id=j onclick=join()>Rejoindre</button><button id=m onclick="mute('audio',this)" hidden>Couper le micro</button><button id=c onclick="mute('video',this)" hidden>Couper la caméra</button></div>
+<h2>LiveCraft</h2><p id=s>{{intro}}</p>
+<div><button id=j onclick=join()>{{join}}</button><button id=m onclick="mute('audio',this)" hidden>{{mute_mic}}</button><button id=c onclick="mute('video',this)" hidden>{{mute_camera}}</button></div>
 <video id=back autoplay playsinline></video><p><video id=me autoplay playsinline muted></video></p>
 <script>
-const ICE=__ICE__,$=i=>document.getElementById(i);let pc=null,media=null;
+const T=__TEXT__,ICE=__ICE__,$=i=>document.getElementById(i);let pc=null,media=null;
 function say(t){$('s').textContent=t}
 async function devices(){for(const want of [{video:true,audio:true},{audio:true},{video:true}]){
 try{return await navigator.mediaDevices.getUserMedia(want)}catch(e){}}return null}
 function mute(kind,b){const t=media.getTracks().filter(x=>x.kind==kind);if(!t.length)return;
-const on=!t[0].enabled;t.forEach(x=>x.enabled=on);b.textContent=(on?'Couper ':'Rétablir ')+(kind=='audio'?'le micro':'la caméra')}
+const on=!t[0].enabled;t.forEach(x=>x.enabled=on);b.textContent=T[(on?'mute_':'unmute_')+(kind=='audio'?'mic':'camera')]}
 function gathered(pc){return new Promise(r=>{if(pc.iceGatheringState=='complete')return r();
 pc.addEventListener('icegatheringstatechange',()=>{if(pc.iceGatheringState=='complete')r()});setTimeout(r,3000)})}
 function again(t,label){say(t);$('j').textContent=label;$('j').hidden=false}
 async function join(){$('j').hidden=true;
-if(!navigator.mediaDevices){say("Ce navigateur refuse la caméra sur cette adresse : il faut l'ouvrir en https.");return}
+if(!navigator.mediaDevices){say(T.needs_https);return}
 media=media||await devices();
-if(!media){again('La caméra et le micro sont refusés : autorisez-les, puis réessayez.','Réessayer');return}
-$('me').srcObject=media;say('Connexion à la régie…');document.body.dataset.state='connecting';
+if(!media){again(T.refused,T.retry);return}
+$('me').srcObject=media;say(T.connecting);document.body.dataset.state='connecting';
 if(pc)pc.close();const me=new RTCPeerConnection({iceServers:ICE});pc=me;
 for(const t of media.getTracks())me.addTrack(t,media);
 for(const k of ['audio','video'])if(!media.getTracks().some(t=>t.kind==k))me.addTransceiver(k,{direction:'recvonly'});
 me.ontrack=e=>{if($('back').srcObject!==e.streams[0])$('back').srcObject=e.streams[0]};
 me.onconnectionstatechange=()=>{if(pc!==me)return;const s=me.connectionState;document.body.dataset.state=s;
-if(s=='connected'){say('Vous êtes connecté à la régie. Ci-dessus, le programme.');$('m').hidden=$('c').hidden=false}
-if(s=='failed'||s=='closed')again('La connexion est perdue.','Se reconnecter')};
+if(s=='connected'){say(T.connected);$('m').hidden=$('c').hidden=false}
+if(s=='failed'||s=='closed')again(T.lost,T.reconnect)};
 await me.setLocalDescription(await me.createOffer());await gathered(me);
 let r=null;try{r=await fetch(location.pathname.replace(/\/+$/,'')+'/offer',{method:'POST',body:me.localDescription.sdp})}catch(e){}
-if(!r||!r.ok){again('La régie ne répond pas. Réessayez dans un instant.','Réessayer');return}
+if(!r||!r.ok){again(T.no_answer,T.retry);return}
 await me.setRemoteDescription({type:'answer',sdp:await r.text()})}
 </script></html>"#;
 
@@ -459,6 +508,36 @@ mod tests {
         assert_eq!(parsed[2]["credential"], "p</script>");
         assert!(!list.contains("</script>"));
         assert_eq!(ice_servers("", "", "", ""), "[]");
+    }
+
+    /// The words a page's script shows, as the page holds them.
+    fn script_words(page: &str) -> Value {
+        let start = page.find("const T=").unwrap() + "const T=".len();
+        let end = start + page[start..].find(",ICE=").unwrap();
+        serde_json::from_str(&page[start..end]).unwrap()
+    }
+
+    /// Both pages are filled from the catalog in the desk's language, and
+    /// what their scripts show cannot end the script it sits in.
+    #[test]
+    fn the_call_pages_speak_the_desk_language() {
+        use crate::i18n::{Lang, set_language};
+        for lang in Lang::ALL {
+            set_language(lang);
+            let (guest, receiver) = (guest_html("[]"), receiver_html("[]", 640, 360));
+            for page in [&guest, &receiver] {
+                assert!(!page.contains("{{") && !page.contains("__"), "{lang:?}: a slot is left");
+            }
+            assert!(guest.contains(&format!("<html lang=\"{}\">", lang.code())));
+            assert!(guest.contains(&format!(">{}</button>", t!("call.guest.join"))));
+            assert_eq!(script_words(&guest)["retry"], t!("call.guest.retry"));
+            assert_eq!(script_words(&guest)["unmute_camera"], t!("call.guest.unmute_camera"));
+            assert_eq!(script_words(&receiver)["waiting"], t!("call.receiver.waiting"));
+        }
+        set_language(Lang::Fr);
+        let hostile = script_text(&[("a", "</script><script>alert(1)")]);
+        assert!(!hostile.contains('<'));
+        assert_eq!(serde_json::from_str::<Value>(&hostile).unwrap()["a"], "</script><script>alert(1)");
     }
 
     #[test]
