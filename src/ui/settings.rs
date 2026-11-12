@@ -148,6 +148,10 @@ impl App {
         let line = match e.compositor.lock().unwrap().clone() {
             Compositor::Starting => t!("settings.compositor_starting").to_string(),
             Compositor::Gpu(name) => t!("settings.on_gpu", name = name),
+            // Wanted but refused or given up: it can be tried again.
+            Compositor::Cpu(why) if on => {
+                format!("{}\n{}", t!("settings.on_cpu", reason = why), t!("settings.gpu_try_again"))
+            }
             Compositor::Cpu(why) => t!("settings.on_cpu", reason = why),
         };
         ui.label(RichText::new(line).small().color(DIM));

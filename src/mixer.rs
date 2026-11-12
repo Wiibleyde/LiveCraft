@@ -142,6 +142,10 @@ struct Mixer {
     gpu: Option<Box<OnGpu>>,
     /// The card could not be used: not asked again until the setting changes.
     gpu_refused: bool,
+    /// Why the card was left during the last tick, to be said at the next.
+    gpu_lost: Option<String>,
+    /// The card was left with the output on its way back.
+    program_owed: bool,
     /// Card-sized pictures, which never touch the full-size compositing.
     small: HashMap<u64, Memo<Arc<Frame>>>,
     preview_sig: u64,
@@ -229,12 +233,8 @@ impl Mixer {
         wanted: bool,
         open: impl FnOnce() -> Option<Result<gpu::Painter, String>>,
     ) -> Option<Compositor> {
-        let failed = self.gpu.as_ref().and_then(|g| g.painter.failed());
-        if let Some(why) = failed {
-            self.gpu = None;
-            self.gpu_refused = true;
-            self.last_sig = 0;
-            self.preview_sig = 0;
+        self.leave_failed_card();
+        if let Some(why) = self.gpu_lost.take() {
             return Some(Compositor::Cpu(why));
         }
         if !wanted {
@@ -265,15 +265,28 @@ impl Mixer {
         }
     }
 
+    /// Leaves a card that has been given up, at once: what is still to be
+    /// made in this tick is made by the processor, and the next tick says why.
+    fn leave_failed_card(&mut self) -> bool {
+        let Some(why) = self.gpu.as_ref().and_then(|g| g.painter.failed()) else { return false };
+        self.program_owed |= self.gpu.take().is_some_and(|g| g.program.is_some());
+        self.gpu_refused = true;
+        self.gpu_lost = Some(why);
+        self.last_sig = 0;
+        self.preview_sig = 0;
+        true
+    }
+
     /// The input's finished picture as a frame in memory, wherever it was made.
     fn picture(&mut self, id: u64, c: &Ctx, depth: u8) -> Option<Arc<Frame>> {
-        match &mut self.gpu {
-            Some(g) => {
-                let pic = g.pics.picture(&mut g.painter, id, c, depth)?;
-                Some(g.painter.frame(&pic))
+        if let Some(g) = &mut self.gpu {
+            let pic = g.pics.picture(&mut g.painter, id, c, depth);
+            let frame = pic.map(|p| g.painter.frame(&p));
+            if !self.leave_failed_card() {
+                return frame;
             }
-            None => self.pics.picture(&mut self.cpu, id, c, depth),
         }
+        self.pics.picture(&mut self.cpu, id, c, depth)
     }
 
     /// Composes the output picture. From the processor it is ready at once;
@@ -292,11 +305,21 @@ impl Mixer {
         Some(out)
     }
 
-    fn collect_program(&mut self) -> Option<Frame> {
-        let back = self.gpu.as_mut()?.program.take()?;
-        let (w, h) = back.size();
-        let mut out = self.take_buffer(w, h);
-        self.gpu.as_mut()?.painter.finish_readback(back, &mut out);
+    /// The output picture back from the card. Had the card been left on the
+    /// way, the processor composes it again at once.
+    fn collect_program(&mut self, c: &Ctx) -> Option<Frame> {
+        let back = self.gpu.as_mut().and_then(|g| g.program.take());
+        if back.is_none() && !std::mem::take(&mut self.program_owed) {
+            return None;
+        }
+        let mut out = self.take_buffer(c.plan.snap.w, c.plan.snap.h);
+        if let (Some(back), Some(g)) = (back, &mut self.gpu) {
+            g.painter.finish_readback(back, &mut out);
+        }
+        if self.gpu.is_none() || self.leave_failed_card() {
+            self.program_owed = false;
+            self.pics.compose(&mut self.cpu, c, &mut out);
+        }
         Some(out)
     }
 
@@ -704,7 +727,7 @@ impl Engine {
             self.update_preview(&mut m, &c);
             if started {
                 let t1 = Instant::now();
-                self.collect_program(&mut m);
+                self.collect_program(&mut m, &c);
                 composed += 1;
                 let mix_us = compose_us + t1.elapsed().as_micros() as u64;
                 self.stats.mix_us.store(mix_us, Ordering::Relaxed);
@@ -927,8 +950,8 @@ impl Engine {
     }
 
     /// Waits for the output picture coming back from the graphics card.
-    fn collect_program(&self, m: &mut Mixer) {
-        if let Some(out) = m.collect_program() {
+    fn collect_program(&self, m: &mut Mixer, c: &Ctx) {
+        if let Some(out) = m.collect_program(c) {
             self.publish_program(m, out);
         }
     }

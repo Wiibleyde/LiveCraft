@@ -12,7 +12,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 
@@ -20,8 +20,10 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Room for one pass's settings: uniform offsets come in steps of 256.
 const SLOT: usize = 256;
 const SLOTS: usize = 2048;
-/// Free pictures kept on the card for the next frames.
-const SPARE_MOST: usize = 24;
+/// Pictures and upload buffers idle for this many batches count as spare,
+/// kept within `Device::spare_bytes`; those of the last few are about to be
+/// used again.
+const IDLE_AFTER: u64 = 4;
 /// Longest wait for the card before it counts as gone.
 const PATIENCE: Duration = Duration::from_secs(3);
 
@@ -103,22 +105,33 @@ struct Device {
     params_layout: wgpu::BindGroupLayout,
     images_layout: wgpu::BindGroupLayout,
     pipes: HashMap<Pass, wgpu::RenderPipeline>,
-    /// Why the card stopped working, from its own reports.
+    /// Why the card was given up, from its own reports or ours.
     broken: Arc<Mutex<Option<String>>>,
+    /// Bytes of idle pictures and buffers kept for later: a few 4K frames
+    /// on a card of its own, fewer on one sharing the computer's memory.
+    spare_bytes: usize,
 }
 
-static HARDWARE: OnceLock<Result<Arc<Device>, String>> = OnceLock::new();
-static ANY: LazyLock<Result<Arc<Device>, String>> = LazyLock::new(|| Device::open(true).map(Arc::new));
+/// The real card, shared by every engine in the process.
+static HARDWARE: Opening<Arc<Device>> = Opening::new();
+/// Any card, emulated ones included: enough to check pictures in tests.
+#[cfg(test)]
+static ANY: std::sync::LazyLock<Result<Arc<Device>, String>> =
+    std::sync::LazyLock::new(|| Device::open(true).map(Arc::new));
 
 impl Device {
-    fn hardware() -> &'static Result<Arc<Device>, String> {
-        HARDWARE.get_or_init(|| Device::open(false).map(Arc::new))
+    fn failure(&self) -> Option<String> {
+        self.broken.lock().unwrap().clone()
     }
 
-    fn shared(software: bool) -> Result<Arc<Device>, String> {
-        let device = if software { &*ANY } else { Device::hardware() }.clone()?;
-        let broken = device.broken.lock().unwrap().clone();
-        broken.map_or(Ok(device), Err)
+    /// From now on every painter on this card leaves it, and nothing waits
+    /// for it any more.
+    fn give_up(&self, why: impl FnOnce() -> String) {
+        self.broken.lock().unwrap().get_or_insert_with(why);
+    }
+
+    fn opened_real() -> Result<Arc<Device>, String> {
+        Device::open(false).map(Arc::new)
     }
 
     /// With `software`, an emulated card will do: enough to check pictures,
@@ -236,7 +249,51 @@ impl Device {
             return Err(why);
         }
         let name = format!("{} ({:?})", info.name, info.backend);
-        Ok(Device { device, queue, name, max_side, params_layout, images_layout, pipes, broken })
+        let spare_bytes =
+            if info.device_type == wgpu::DeviceType::DiscreteGpu { 256 << 20 } else { 128 << 20 };
+        Ok(Device { device, queue, name, max_side, params_layout, images_layout, pipes, broken, spare_bytes })
+    }
+}
+
+/// Something slow to open, opened on a thread of its own. Once it failed, or
+/// was found given up, the next request opens it anew: unticking and ticking
+/// the setting again tries the card again.
+struct Opening<T> {
+    slot: Mutex<Option<Arc<OnceLock<Result<T, String>>>>>,
+}
+
+impl<T: Clone + Send + Sync + 'static> Opening<T> {
+    const fn new() -> Self {
+        Opening { slot: Mutex::new(None) }
+    }
+
+    /// `None` while it opens. `gone` tells why an opened one cannot be used
+    /// any more, if it cannot.
+    fn get(
+        &self,
+        open: fn() -> Result<T, String>,
+        gone: impl Fn(&T) -> Option<String>,
+    ) -> Option<Result<T, String>> {
+        let mut slot = self.slot.lock().unwrap();
+        if let Some(Ok(t)) = slot.as_ref().and_then(|o| o.get())
+            && gone(t).is_some()
+        {
+            *slot = None;
+        }
+        let opening = slot.get_or_insert_with(|| {
+            let cell = Arc::new(OnceLock::new());
+            let fill = cell.clone();
+            std::thread::spawn(move || {
+                let _ = fill.set(open());
+            });
+            cell
+        });
+        let opened = opening.get()?.clone();
+        if opened.is_err() {
+            // Said once; asked again, it is tried anew.
+            *slot = None;
+        }
+        Some(opened)
     }
 }
 
@@ -252,6 +309,10 @@ struct Tex {
 }
 
 impl Tex {
+    fn bytes(&self) -> usize {
+        self.w * self.h * if self.format == FORMAT { 4 } else { 1 }
+    }
+
     fn extent(&self) -> wgpu::Extent3d {
         wgpu::Extent3d { width: self.w as u32, height: self.h as u32, depth_or_array_layers: 1 }
     }
@@ -281,12 +342,14 @@ impl Pic {
 
 struct Staging {
     buffer: wgpu::Buffer,
-    busy: bool,
+    /// From the copy until the picture is out of it. A picture lost on the
+    /// way leaves it busy for good, as it may still be mapped later.
+    busy: Cell<bool>,
 }
 
 /// A picture on its way back from the card.
 pub struct Readback {
-    slot: usize,
+    staging: Rc<Staging>,
     w: usize,
     h: usize,
     stride: usize,
@@ -299,12 +362,6 @@ const WAITING: u8 = 0;
 const MAPPED: u8 = 1;
 const FAILED: u8 = 2;
 
-impl Readback {
-    pub fn size(&self) -> (usize, usize) {
-        (self.w, self.h)
-    }
-}
-
 /// Commands being gathered for the card, and the pictures made for them.
 struct Work {
     dev: Arc<Device>,
@@ -316,7 +373,7 @@ struct Work {
     /// used in the batch still being gathered, since uploads run first.
     batch: Cell<u64>,
     textures: RefCell<Vec<Rc<Tex>>>,
-    staging: RefCell<Vec<Staging>>,
+    staging: RefCell<Vec<Rc<Staging>>>,
     /// Buffers source frames travel through, with the batch that last used each.
     uploads: RefCell<Vec<(wgpu::Buffer, Cell<u64>)>>,
     blank: Tex,
@@ -380,12 +437,6 @@ impl Work {
             t.used.set(batch);
             return t.clone();
         }
-        let spare = list.iter().filter(|t| Rc::strong_count(t) == 1).count();
-        if spare >= SPARE_MOST
-            && let Some(old) = list.iter().position(free)
-        {
-            list.remove(old);
-        }
         let t = Rc::new(new_tex(&self.dev.device, w, h, format, batch));
         list.push(t.clone());
         t
@@ -403,14 +454,7 @@ impl Work {
             self.clear(&t);
             return t;
         }
-        if f.w > max || f.h > max {
-            // Bigger than the card takes: it is drawn scaled anyway.
-            let k = max as f32 / f.w.max(f.h) as f32;
-            let (w, h) = (((f.w as f32 * k) as usize).max(1), ((f.h as f32 * k) as usize).max(1));
-            let mut small = Frame::new(w, h);
-            small.blit_region(f, [0.0; 4], 0.0, 0.0, w as f32, h as f32, 255, 0.0);
-            return self.upload(&small);
-        }
+        debug_assert!(f.w <= max && f.h <= max, "shrunk by `Painter::source`");
         let t = self.texture(f.w, f.h, FORMAT);
         let row = f.w * 4;
         let stride = row.div_ceil(256) * 256;
@@ -460,11 +504,6 @@ impl Work {
         if let Some((b, used)) = list.iter().find(|(b, used)| b.size() == size && used.get() != batch) {
             used.set(batch);
             return b.clone();
-        }
-        if list.len() >= SPARE_MOST
-            && let Some(old) = list.iter().position(|(_, used)| used.get() != batch)
-        {
-            list.remove(old);
         }
         let b = self.dev.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("upload"),
@@ -586,7 +625,44 @@ impl Work {
         let commands = self.encoder.borrow_mut().take().map(|e| e.finish());
         let index = self.dev.queue.submit(commands);
         self.batch.set(self.batch.get() + 1);
+        self.trim();
         index
+    }
+
+    /// Keeps idle pictures and upload buffers, together, within the card's
+    /// budget, letting the longest unused go first. At 4K each is 33 MB.
+    fn trim(&self) {
+        let idle_since = self.batch.get().saturating_sub(IDLE_AFTER);
+        let mut pics = self.textures.borrow_mut();
+        let mut bufs = self.uploads.borrow_mut();
+        let pic_idle = |t: &Rc<Tex>| Rc::strong_count(t) == 1 && t.used.get() < idle_since;
+        let buf_idle = |used: &Cell<u64>| used.get() < idle_since;
+        let mut spare = pics.iter().filter(|t| pic_idle(t)).map(|t| t.bytes()).sum::<usize>()
+            + bufs.iter().filter(|(_, u)| buf_idle(u)).map(|(b, _)| b.size() as usize).sum::<usize>();
+        while spare > self.dev.spare_bytes {
+            let pic = pics.iter().enumerate().filter(|(_, t)| pic_idle(t)).min_by_key(|(_, t)| t.used.get());
+            let pic = pic.map(|(at, t)| (at, t.used.get()));
+            let buf =
+                bufs.iter().enumerate().filter(|(_, (_, u))| buf_idle(u)).min_by_key(|(_, (_, u))| u.get());
+            let buf = buf.map(|(at, (_, u))| (at, u.get()));
+            spare -= match (pic, buf) {
+                (Some((at, a)), Some((_, b))) if a <= b => pics.remove(at).bytes(),
+                (_, Some((at, _))) => bufs.remove(at).0.size() as usize,
+                (Some((at, _)), None) => pics.remove(at).bytes(),
+                (None, None) => break,
+            };
+        }
+    }
+
+    /// Bytes of idle pictures and upload buffers, as `trim` counts them.
+    #[cfg(test)]
+    fn idle_bytes(&self) -> usize {
+        let idle_since = self.batch.get().saturating_sub(IDLE_AFTER);
+        let textures = self.textures.borrow();
+        let pics = textures.iter().filter(|t| Rc::strong_count(t) == 1 && t.used.get() < idle_since);
+        let uploads = self.uploads.borrow();
+        let bufs = uploads.iter().filter(|(_, u)| u.get() < idle_since);
+        pics.map(|t| t.bytes()).sum::<usize>() + bufs.map(|(b, _)| b.size() as usize).sum::<usize>()
     }
 
     /// See `Frame::blit_region`.
@@ -641,89 +717,92 @@ impl Work {
         let (w, h) = (tex.w, tex.h);
         let stride = (w * 4).div_ceil(256) * 256;
         let size = (stride * h) as u64;
-        let slot = {
+        let staging = {
             let mut list = self.staging.borrow_mut();
-            let found = list.iter().position(|s| !s.busy && s.buffer.size() == size);
-            let slot = found.unwrap_or_else(|| {
+            let found = list.iter().find(|s| !s.busy.get() && s.buffer.size() == size).cloned();
+            found.unwrap_or_else(|| {
                 // Buffers of a former size are of no more use.
-                list.retain(|s| s.busy || s.buffer.size() == size);
-                list.push(Staging {
+                list.retain(|s| s.busy.get() || s.buffer.size() == size);
+                let s = Rc::new(Staging {
                     buffer: self.dev.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("readback"),
                         size,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
-                    busy: false,
+                    busy: Cell::new(false),
                 });
-                list.len() - 1
-            });
-            list[slot].busy = true;
-            let buffer = list[slot].buffer.clone();
-            tex.used.set(self.batch.get());
-            self.encode(|e| {
-                let layout = wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(stride as u32),
-                    rows_per_image: Some(h as u32),
-                };
-                e.copy_texture_to_buffer(
-                    tex.texture.as_image_copy(),
-                    wgpu::TexelCopyBufferInfo { buffer: &buffer, layout },
-                    tex.extent(),
-                );
-            });
-            slot
+                list.push(s.clone());
+                s
+            })
         };
+        staging.busy.set(true);
+        tex.used.set(self.batch.get());
+        self.encode(|e| {
+            let layout = wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(stride as u32),
+                rows_per_image: Some(h as u32),
+            };
+            e.copy_texture_to_buffer(
+                tex.texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo { buffer: &staging.buffer, layout },
+                tex.extent(),
+            );
+        });
         let index = self.flush();
         let mapped = Arc::new(AtomicU8::new(WAITING));
         let done = mapped.clone();
-        self.staging.borrow()[slot].buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+        staging.buffer.map_async(wgpu::MapMode::Read, .., move |r| {
             done.store(if r.is_ok() { MAPPED } else { FAILED }, Ordering::Release)
         });
-        Readback { slot, w, h, stride, index, mapped }
+        Readback { staging, w, h, stride, index, mapped }
     }
 
-    /// Waits for a picture coming back and copies it into `out`. On failure
-    /// `out` keeps what it held, and the card is reported broken.
+    /// Waits for a picture coming back and copies it into `out`. A card
+    /// already given up is not waited for again, as each wait may last
+    /// `PATIENCE`. On failure `out` is black, never what its buffer held
+    /// before, and the card is given up.
     fn finish_readback(&self, back: Readback, out: &mut Frame) {
-        let wait = wgpu::PollType::Wait { submission_index: Some(back.index), timeout: Some(PATIENCE) };
-        match self.dev.device.poll(wait) {
-            Err(e) => {
-                self.dev.broken.lock().unwrap().get_or_insert_with(|| t!("gpu.not_responding", error = e));
-            }
-            Ok(_) => {
-                // Another thread polling the same card may have taken this
-                // picture's callback along with its own, and runs it as soon
-                // as it lets go of the card: the picture is there, its word
-                // is a moment away.
-                let until = Instant::now() + PATIENCE;
-                while back.mapped.load(Ordering::Acquire) == WAITING && Instant::now() < until {
-                    std::thread::yield_now();
-                }
-            }
+        if (out.w, out.h) != (back.w, back.h) {
+            *out = Frame::for_overwrite(back.w, back.h);
         }
-        let mut list = self.staging.borrow_mut();
-        let staging = &mut list[back.slot];
-        let copied = back.mapped.load(Ordering::Acquire) == MAPPED && {
-            if (out.w, out.h) != (back.w, back.h) {
-                *out = Frame::for_overwrite(back.w, back.h);
-            }
+        let copied = self.dev.failure().is_none() && self.arrived(&back) && {
             let row = back.w * 4;
-            let copied = staging.buffer.get_mapped_range(..).map(|view| {
+            let copied = back.staging.buffer.get_mapped_range(..).map(|view| {
                 out.data
                     .par_chunks_mut(row)
                     .zip(view.par_chunks(back.stride))
                     .with_min_len(ROWS)
                     .for_each(|(d, s)| d.copy_from_slice(&s[..row]));
             });
-            staging.buffer.unmap();
+            back.staging.buffer.unmap();
             copied.is_ok()
         };
-        if !copied {
-            self.dev.broken.lock().unwrap().get_or_insert_with(|| t!("gpu.picture_lost").into());
+        if copied {
+            back.staging.busy.set(false);
+        } else {
+            self.dev.give_up(|| t!("gpu.picture_lost").into());
+            out.data.fill(0);
         }
-        staging.busy = false;
+    }
+
+    /// Waits until the picture is ready to be read, or the card fails.
+    fn arrived(&self, back: &Readback) -> bool {
+        let wait =
+            wgpu::PollType::Wait { submission_index: Some(back.index.clone()), timeout: Some(PATIENCE) };
+        if let Err(e) = self.dev.device.poll(wait) {
+            self.dev.give_up(|| t!("gpu.not_responding", error = e));
+            return false;
+        }
+        // Another thread polling the same card may have taken this picture's
+        // callback along with its own, and runs it as soon as it lets go of
+        // the card: the picture is there, its word is a moment away.
+        let until = Instant::now() + PATIENCE;
+        while back.mapped.load(Ordering::Acquire) == WAITING && Instant::now() < until {
+            std::thread::yield_now();
+        }
+        back.mapped.load(Ordering::Acquire) == MAPPED
     }
 }
 
@@ -922,38 +1001,76 @@ pub struct Painter {
 }
 
 impl Painter {
-    /// The card if there is a suitable one, else why not.
+    /// The card if there is a suitable one, else why not, waiting for it.
+    #[cfg(test)]
     pub fn open(software: bool) -> Result<Painter, String> {
-        let dev = Device::shared(software)?;
-        Ok(Painter {
+        if software {
+            let dev = ANY.clone()?;
+            return dev.failure().map_or(Ok(Painter::on(dev)), Err);
+        }
+        loop {
+            if let Some(opened) = Painter::open_soon() {
+                return opened;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `open` for a real card, without waiting: opening one takes up to a
+    /// second (its programs are built for it), so it happens on a thread of
+    /// its own. `None` until it is done. A card that failed, or was given up
+    /// since, is opened anew when asked for again.
+    pub fn open_soon() -> Option<Result<Painter, String>> {
+        Some(HARDWARE.get(Device::opened_real, |d| d.failure())?.map(Painter::on))
+    }
+
+    fn on(dev: Arc<Device>) -> Painter {
+        Painter {
             work: Rc::new(Work::new(dev)),
             sources: HashMap::new(),
             black: None,
             tables: HashMap::new(),
             luts: HashMap::new(),
             masks: HashMap::new(),
-        })
+        }
     }
 
-    /// `open` for a real card, without waiting: opening one takes up to a
-    /// second (its programs are built for it), so it happens on a thread of
-    /// its own. `None` until it is done.
-    pub fn open_soon() -> Option<Result<Painter, String>> {
-        static STARTED: Once = Once::new();
-        STARTED.call_once(|| {
-            std::thread::spawn(Device::hardware);
-        });
-        HARDWARE.get()?;
-        Some(Painter::open(false))
+    /// On a card of its own, which a test may give up without disturbing
+    /// the others.
+    #[cfg(test)]
+    pub fn open_alone(software: bool) -> Result<Painter, String> {
+        Device::open(software).map(|d| Painter::on(Arc::new(d)))
+    }
+
+    #[cfg(test)]
+    pub fn give_up(&self, why: &str) {
+        self.work.dev.give_up(|| why.to_string());
+    }
+
+    /// Only on a card of its own, before anything was drawn.
+    #[cfg(test)]
+    pub fn set_spare_bytes(&mut self, bytes: usize) {
+        let work = Rc::get_mut(&mut self.work).expect("nothing drawn yet");
+        Arc::get_mut(&mut work.dev).expect("a card of its own").spare_bytes = bytes;
+    }
+
+    #[cfg(test)]
+    pub fn idle_bytes(&self) -> usize {
+        self.work.idle_bytes()
+    }
+
+    #[cfg(test)]
+    pub fn max_side(&self) -> usize {
+        self.work.dev.max_side
     }
 
     pub fn adapter_name(&self) -> &str {
         &self.work.dev.name
     }
 
-    /// Set once the card has reported an error or gone away.
+    /// Set once the card has been given up.
     pub fn failed(&self) -> Option<String> {
-        self.work.dev.broken.lock().unwrap().clone()
+        self.work.dev.failure()
     }
 
     /// The picture in memory, brought back from the card if it was made there.
@@ -1114,6 +1231,18 @@ impl canvas::Painter for Painter {
     type Canvas = Canvas;
 
     fn source(&mut self, f: Arc<Frame>) -> Pic {
+        let max = self.work.dev.max_side;
+        if f.w > max || f.h > max {
+            // Bigger than the card takes, and drawn scaled anyway: made
+            // smaller here, so that the picture is the size of its copy on
+            // the card. Too rare to be worth remembering.
+            let k = max as f32 / f.w.max(f.h) as f32;
+            let fit = |side: usize| ((side as f32 * k) as usize).clamp(1, max);
+            let (w, h) = (fit(f.w), fit(f.h));
+            let mut small = Frame::new(w, h);
+            small.blit_region(&f, [0.0; 4], 0.0, 0.0, w as f32, h as f32, 255, 0.0);
+            return Pic::of_frame(Arc::new(small));
+        }
         let key = Arc::as_ptr(&f) as usize;
         // While the entry lives it holds the frame, so the address is its own.
         if let Some(p) = self.sources.get(&key).and_then(Weak::upgrade) {
@@ -1196,5 +1325,38 @@ impl canvas::Painter for Painter {
             }
         }
         Pic::of_tex(cur)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    static TRIES: AtomicUsize = AtomicUsize::new(0);
+
+    fn first_fails() -> Result<usize, String> {
+        let n = TRIES.fetch_add(1, Ordering::SeqCst) + 1;
+        if n == 1 { Err("pas encore".into()) } else { Ok(n) }
+    }
+
+    /// A card that could not be opened, or was given up since, is opened
+    /// anew when asked for again; one that works is opened once.
+    #[test]
+    fn a_failed_or_given_up_card_is_opened_anew_when_asked_again() {
+        let opening: Opening<usize> = Opening::new();
+        let ask = |gone: &dyn Fn(&usize) -> Option<String>| loop {
+            if let Some(opened) = opening.get(first_fails, gone) {
+                return opened;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let fine = |_: &usize| None;
+        assert_eq!(ask(&fine), Err("pas encore".to_string()));
+        assert_eq!(ask(&fine), Ok(2), "asked again, it is opened anew");
+        assert_eq!(ask(&fine), Ok(2), "kept while it works");
+        let second_given_up = |n: &usize| (*n == 2).then(|| "perdue".to_string());
+        assert_eq!(ask(&second_given_up), Ok(3), "given up, it is opened anew");
+        assert_eq!(TRIES.load(Ordering::SeqCst), 3);
     }
 }

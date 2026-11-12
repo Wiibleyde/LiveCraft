@@ -223,7 +223,7 @@ fn assert_close(what: &str, cpu: &Frame, gpu: &Frame) {
 }
 
 fn program(m: &mut Mixer, c: &Ctx) -> Frame {
-    m.compose_program(c).or_else(|| m.collect_program()).unwrap()
+    m.compose_program(c).or_else(|| m.collect_program(c)).unwrap()
 }
 
 #[test]
@@ -349,6 +349,136 @@ fn painters_on_several_threads_each_get_their_own_pictures_back() {
     }
 }
 
+/// A card given up is left at once: the rest of the tick is made by the
+/// processor, nothing waits on the card again, the next tick says why, and
+/// ticking the setting again tries a card anew.
+#[test]
+fn a_card_given_up_leaves_the_rest_of_the_tick_to_the_processor() {
+    if card().is_none() {
+        return;
+    }
+    let mut d = desk(334, 190);
+    let plan = d.state.plan(Instant::now(), Vec::new());
+    let c = Ctx { plan: &plan, rts: &d.rts };
+    let mut cpu = Mixer::default();
+    let (out, preview) = (program(&mut cpu, &c), cpu.picture(ALL_SETTINGS, &c, 0).unwrap());
+    let mut m = on_card(gpu::Painter::open_alone(true).expect("a card of its own"));
+    assert!(m.compose_program(&c).is_none(), "on its way back from the card");
+    m.gpu.as_ref().unwrap().painter.give_up("ne répond plus");
+    let back = m.collect_program(&c).unwrap();
+    assert!(m.gpu.is_none(), "the card is left at once");
+    assert!(back.data == out.data, "the output is made again by the processor");
+    assert!(m.picture(ALL_SETTINGS, &c, 0).unwrap().data == preview.data);
+    let said = m.choose_painter(true, || panic!("not asked again until the setting changes"));
+    assert_eq!(said, Some(Compositor::Cpu("ne répond plus".into())));
+    assert_eq!(m.choose_painter(true, || panic!("still not asked")), None);
+    assert_eq!(m.choose_painter(false, || None), Some(Compositor::Cpu(t!("mixer.cpu_chosen").into())));
+    let again = card().unwrap();
+    assert!(matches!(m.choose_painter(true, || Some(Ok(again))), Some(Compositor::Gpu(_))));
+
+    // Found gone by the preview while the output is on its way back: the
+    // output still comes, made by the processor.
+    let mut m = on_card(gpu::Painter::open_alone(true).expect("a card of its own"));
+    assert!(m.compose_program(&c).is_none());
+    m.gpu.as_ref().unwrap().painter.give_up("perdue");
+    assert!(m.picture(ALL_SETTINGS, &c, 0).unwrap().data == preview.data);
+    assert!(m.collect_program(&c).expect("the output of this tick").data == out.data);
+    assert!(m.collect_program(&c).is_none(), "owed once only");
+}
+
+/// Once the card is given up, a picture asked of it comes back black at
+/// once, never the leftovers of the buffer it lands in.
+#[test]
+fn a_picture_asked_of_a_card_given_up_is_black() {
+    if card().is_none() {
+        return;
+    }
+    let mut p = gpu::Painter::open_alone(true).expect("a card of its own");
+    let mut c = p.canvas(640, 480);
+    c.fill_round(0.0, 0.0, 640.0, 480.0, 0.0, [200, 30, 30], 255);
+    let pic = p.done(c);
+    p.give_up("ne répond plus");
+    // Leftovers of that size, ready to be taken again.
+    drop(Frame::solid(640, 480, [255, 0, 255]));
+    let f = p.frame(&pic);
+    assert!(f.data.iter().all(|&v| v == 0), "black");
+}
+
+/// Pictures of several sizes on their way back at once each arrive whole,
+/// however the buffers they travel through are reshuffled meanwhile.
+#[test]
+fn pictures_of_several_sizes_on_their_way_back_each_arrive() {
+    fn solid(p: &mut gpu::Painter, w: usize, h: usize, rgb: [u8; 3]) -> gpu::Readback {
+        let mut c = p.canvas(w, h);
+        c.fill_round(0.0, 0.0, w as f32, h as f32, 0.0, rgb, 255);
+        p.start_readback(c)
+    }
+    if card().is_none() {
+        return;
+    }
+    let mut p = gpu::Painter::open_alone(true).expect("a card of its own");
+    let first = solid(&mut p, 32, 32, [9, 9, 9]);
+    let red = solid(&mut p, 48, 27, [200, 0, 0]);
+    p.finish_readback(first, &mut Frame::new(1, 1));
+    // A third size: the buffer of the first, free again, is let go.
+    let blue = solid(&mut p, 64, 36, [0, 0, 200]);
+    let (mut fr, mut fb) = (Frame::new(1, 1), Frame::new(1, 1));
+    p.finish_readback(red, &mut fr);
+    p.finish_readback(blue, &mut fb);
+    assert_eq!(p.failed(), None);
+    assert!((fr.w, fr.h) == (48, 27) && fr.data.chunks(4).all(|px| px == [200, 0, 0, 255]));
+    assert!((fb.w, fb.h) == (64, 36) && fb.data.chunks(4).all(|px| px == [0, 0, 200, 255]));
+}
+
+/// Idle pictures and upload buffers are let go beyond the card's budget: a
+/// burst of large pictures does not keep the card's memory afterwards.
+#[test]
+fn idle_pictures_on_the_card_stay_within_its_budget() {
+    if card().is_none() {
+        return;
+    }
+    let mut p = gpu::Painter::open_alone(true).expect("a card of its own");
+    let budget = 1 << 20;
+    p.set_spare_bytes(budget);
+    // Twelve 256 x 256 sources and pictures alive at once, 256 KB each.
+    let frames: Vec<_> = (0..12).map(|n| Arc::new(picture(256, 256, n, false))).collect();
+    let mut held = Vec::new();
+    for f in &frames {
+        let mut c = p.canvas(256, 256);
+        c.copy_from(&p.source(f.clone()));
+        held.push(p.done(c));
+    }
+    p.frame(&held[0]);
+    drop((held, frames));
+    // Quieter frames follow.
+    for _ in 0..6 {
+        let c = p.canvas(16, 16);
+        let pic = p.done(c);
+        p.frame(&pic);
+    }
+    assert!(p.idle_bytes() <= budget, "{} bytes idle", p.idle_bytes());
+}
+
+/// A frame larger than the card takes is made smaller on the way, and the
+/// picture has the size of its copy on the card.
+#[test]
+fn a_frame_too_large_for_the_card_has_the_size_of_its_copy() {
+    if card().is_none() {
+        return;
+    }
+    let mut p = gpu::Painter::open_alone(true).expect("a card of its own");
+    let max = p.max_side();
+    let pic = p.source(Arc::new(Frame::solid(max + 64, 2, [200, 0, 0])));
+    let (w, h) = gpu::Canvas::pic_size(&pic);
+    assert!(w <= max && h >= 1, "{w} x {h}");
+    let mut c = p.canvas(w, h);
+    c.copy_from(&pic);
+    let made = p.done(c);
+    let back = p.frame(&made);
+    assert_eq!(p.failed(), None);
+    assert_eq!((back.w, back.h), (w, h));
+}
+
 /// The comparison itself must see a wrong picture: one that always passes
 /// would let the card show anything.
 #[test]
@@ -426,7 +556,7 @@ fn mixer_cost() {
                         let c = Ctx { plan: &plan, rts: &d.rts };
                         let out = m.compose_program(&c);
                         let preview = m.picture(10, &c, 0);
-                        let out = out.or_else(|| m.collect_program());
+                        let out = out.or_else(|| m.collect_program(&c));
                         assert!(out.is_some() && preview.is_some());
                         m.pool.extend(out.map(Arc::new));
                     }

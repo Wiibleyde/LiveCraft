@@ -415,6 +415,7 @@ settings.compose_on_gpu = Compose on the graphics card
 settings.compositor_starting = Starting…
 settings.on_gpu = On the graphics card: {name}
 settings.on_cpu = On the processor: {reason}
+settings.gpu_try_again = Untick and tick the box again to try the card again.
 
 # src/ui/windows.rs
 windows.overlays_title = Overlays and stingers

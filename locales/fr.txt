@@ -415,6 +415,7 @@ settings.compose_on_gpu = Composer sur la carte graphique
 settings.compositor_starting = Démarrage…
 settings.on_gpu = Sur la carte graphique : {name}
 settings.on_cpu = Sur le processeur : {reason}
+settings.gpu_try_again = Décochez puis recochez la case pour réessayer la carte.
 
 # src/ui/windows.rs
 windows.overlays_title = Incrustations et stingers
