@@ -215,7 +215,7 @@ impl Encoder {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|_| "ffmpeg est introuvable : installez-le pour cette sortie".to_string())?;
+            .map_err(|_| t!("output.ffmpeg_missing").to_string())?;
 
         let failed = Arc::new(AtomicBool::new(false));
         let log = Arc::new(Mutex::new(String::new()));
@@ -227,7 +227,7 @@ impl Encoder {
                 for line in BufReader::new(err).lines().map_while(Result::ok) {
                     // One tee destination dropping out leaves the others running.
                     if line.contains("Slave") && line.to_lowercase().contains("fail") {
-                        *warn.lock().unwrap() = Some("une destination ne répond plus".to_string());
+                        *warn.lock().unwrap() = Some(t!("output.destination_not_responding").to_string());
                     }
                     if is_cause(&line) && !found_cause {
                         found_cause = true;

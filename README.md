@@ -85,14 +85,17 @@ Other ways to start it:
 livecraft --project show.vmix             # open a project
 livecraft --import-report show.vmix       # say what a project keeps, without opening it
 livecraft --selftest some-folder          # real end-to-end run: plays, records, streams, replays
+livecraft --livecheck some-folder         # virtual camera and microphone, streamed and read back
 livecraft --screenshot out.png            # start, save a picture of the window, quit
+livecraft --lang en                       # start in English (or fr), and keep that choice
 ```
 
 > [!IMPORTANT]
 > LiveCraft is **early alpha and not ready for a show that matters.** It has run on one Windows machine.
 > Tests cover the desk, the interface and real encoding to local files and a local stream, but it has
 > **not** been tried with physical cameras, capture cards, PTZ heads or a live streaming platform.
-> The interface is in French only for now.
+> The interface speaks French and English: it follows the system language, and Settings › Options
+> changes it.
 
 ### What is missing today
 
@@ -103,13 +106,36 @@ livecraft --screenshot out.png            # start, save a picture of the window,
 
 The full list is in the [roadmap](ROADMAP.md).
 
+### Live check
+
+`--livecheck` runs the path of a real show through devices Windows sees as real. A
+[Softcam](https://github.com/tshino/softcam) virtual camera shows a counting pattern and
+[VB-CABLE](https://vb-audio.com/Cable/) carries a 1 kHz tone; LiveCraft opens them as a camera and a
+microphone, streams program over RTMP and SRT to its own [MediaMTX](https://github.com/bluenviron/mediamtx)
+on free local ports, then reads both streams back and checks that the count keeps moving and the tone
+is there. CI runs it on every pull request, along with three deliberately broken runs
+(`--break freeze`, `--break silence`, `--break drop`) that must fail.
+
+To run it yourself, install VB-CABLE once (it needs an administrator and plays the tone into
+`CABLE Input` while the check runs), then fetch the other tools with Visual Studio or its Build Tools
+installed:
+
+```powershell
+./scripts/livecheck-tools.ps1     # prints LIVECRAFT_MEDIAMTX=... and LIVECRAFT_SOFTCAM=...
+$env:LIVECRAFT_MEDIAMTX = '<printed path>'; $env:LIVECRAFT_SOFTCAM = '<printed path>'
+cargo run -- --livecheck target/livecheck
+```
+
+Softcam is registered for the current user only while the check runs, so no administrator is needed
+for it. Close other programs using a Softcam camera first: only one can exist at a time.
+
 ## Come build it with us
 
 Contributions of every size are welcome, in English or in French. You do not need to write code:
 
 - 🎥 **Try it with real gear** and tell us what happens. This is the most useful thing right now.
 - 🐛 **Open an issue** with your Windows version, your hardware and what you expected.
-- 🌍 **Translate the interface**, once strings are out of the code.
+- 🌍 **Translate the interface**: a language is one text file in [`locales/`](locales).
 - 🦀 **Take something from the [roadmap](ROADMAP.md).** A compositor on the GPU is the biggest one.
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md). AI coding agents should read [AGENTS.md](AGENTS.md) too.

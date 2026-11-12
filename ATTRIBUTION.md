@@ -28,6 +28,9 @@ cargo metadata --format-version 1
 | --- | --- | --- |
 | [FFmpeg](https://ffmpeg.org) | Decoding, capture, encoding, recording, streaming | Started as a separate process. Installed by the user, under its own license. |
 | Microsoft Edge or Google Chrome | Web page inputs | Started as a separate process with no window. |
+| [Softcam](https://github.com/tshino/softcam) | The virtual camera of `--livecheck` | MIT. Built from its sources by `scripts/livecheck-tools.ps1` and loaded at run time; not shipped. |
+| [MediaMTX](https://github.com/bluenviron/mediamtx) | The local streaming server of `--livecheck` | MIT. Downloaded by `scripts/livecheck-tools.ps1`; not shipped. |
+| [VB-CABLE](https://vb-audio.com/Cable/) | The virtual microphone of `--livecheck` | Donationware by VB-Audio, installed separately; not shipped. |
 
 ## Design references
 
