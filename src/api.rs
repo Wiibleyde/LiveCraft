@@ -301,11 +301,13 @@ impl Engine {
         let flag = |b: bool| if b { "True" } else { "False" };
         x.push_str(&format!(
             "<recording>{}</recording><external>False</external><streaming>{}</streaming>\
-             <playList>{}</playList><multiCorder>{}</multiCorder>",
+             <playList>{}</playList><multiCorder>{}</multiCorder>             <clock running=\"{}\">{}</clock>",
             flag(self.is_recording()),
             flag(self.is_streaming()),
             flag(s.playlist_on),
             flag(self.is_multi()),
+            flag(s.clock.running()),
+            s.clock.text(Instant::now()),
         ));
         x.push_str("</vmix>");
         x
@@ -701,6 +703,8 @@ fn controller_page() -> String {
             ("fade", t!("api.page.fade")),
             ("ftb", t!("api.page.fade_to_black")),
             ("telestrator", t!("api.page.telestrator")),
+            ("clock", t!("api.page.clock")),
+            ("clock_reset", t!("api.page.clock_reset")),
         ],
     )
 }
@@ -729,9 +733,11 @@ button{background:#343538;color:#fff;border:0;border-radius:4px;padding:14px;mar
 #i button{min-width:130px}.p{background:#f28c00}.o{background:#0a7a16}a{color:#8cf}</style>
 <h3>LiveCraft</h3><div><button onclick="f('Cut')">{{cut}}</button><button onclick="f('Fade')">{{fade}}</button>
 <button onclick="f('FadeToBlack')">{{ftb}}</button> <a href="/telestrator">{{telestrator}}</a></div>
+<div><button onclick="f('StartPauseClock')">{{clock}} <span id="k">00:00:00</span></button><button onclick="f('ResetClock')">{{clock_reset}}</button></div>
 <div id="i"></div><script>
 function f(n,i){fetch('/api/?Function='+n+(i?'&Input='+i:'')).then(r)}
 function r(){fetch('/api/').then(x=>x.text()).then(t=>{let d=new DOMParser().parseFromString(t,'text/xml');
+document.getElementById('k').textContent=d.querySelector('clock').textContent;
 let p=d.querySelector('preview').textContent,o=d.querySelector('active').textContent,l=[];
 d.querySelectorAll('inputs>input').forEach(e=>{let n=e.getAttribute('number'),b=document.createElement('button');
 b.className=n==o?'o':n==p?'p':'';b.textContent=n+' '+e.getAttribute('title');b.onclick=()=>f('PreviewInput',n);l.push(b)});

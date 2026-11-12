@@ -173,6 +173,28 @@ fn fade_to_black_turns_on_and_off() {
 }
 
 #[test]
+fn the_show_clock_buttons_start_pause_and_reset_it() {
+    let mut h = desk(small_project());
+    assert!(!h.state().with(|s| s.clock.running()));
+    click(&mut h, "Horloge");
+    assert!(h.state().with(|s| s.clock.running()), "the first click starts it");
+    wait(&mut h, 1100);
+    let seen = h.state().with(|s| s.clock.elapsed(Instant::now()));
+    assert!(seen >= Duration::from_secs(1), "it counts: {seen:?}");
+    click(&mut h, "Horloge");
+    assert!(!h.state().with(|s| s.clock.running()), "the second click pauses it");
+    let paused = h.state().with(|s| s.clock.elapsed(Instant::now()));
+    wait(&mut h, 200);
+    assert_eq!(h.state().with(|s| s.clock.elapsed(Instant::now())), paused, "paused time does not count");
+    click(&mut h, "Horloge");
+    assert!(h.state().with(|s| s.clock.running()), "and the third resumes it");
+    click(&mut h, "Zéro");
+    let (running, shown) = h.state().with(|s| (s.clock.running(), s.clock.text(Instant::now())));
+    assert!(!running && shown == "00:00:00", "reset stops it at zero");
+    end(h);
+}
+
+#[test]
 fn tabs_filter_and_search_narrow_the_cards() {
     let mut h = desk(small_project());
     click(&mut h, "TEXTES");

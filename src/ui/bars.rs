@@ -286,6 +286,15 @@ impl App {
                 let name = if playlist_on { "StopPlayList" } else { "StartPlayList" };
                 self.call(name, &Args::new());
             }
+            ui.add_space(4.0);
+            let (running, shown) = self.with(|s| (s.clock.running(), s.clock.text(Instant::now())));
+            let clock = bar_button(ui, &format!("{}  {shown}", t!("bars.clock")), running);
+            if named(clock, t!("bars.clock")).on_hover_text(t!("bars.clock_tip")).clicked() {
+                self.call("StartPauseClock", &Args::new());
+            }
+            if named(bar_button(ui, t!("bars.clock_reset"), false), t!("bars.clock_reset")).clicked() {
+                self.call("ResetClock", &Args::new());
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let locked_icon = Icon::Lock(locked);
