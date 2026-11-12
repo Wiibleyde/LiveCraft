@@ -265,6 +265,7 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
         Kind::List { items: Vec::new(), auto_next: true, auto_first: false, looped: false, shuffle: false },
         Kind::Photos { folder: "x".into(), seconds: 0.0 },
         Kind::ImageSequence { first: "x0001.png".into(), fps: 30.0, looped: true },
+        Kind::PowerPoint { path: "x.pptx".into() },
         Kind::Camera { device: "x".into(), ptz_host: String::new() },
         Kind::Network { url: "srt://127.0.0.1:1".into(), buffer_ms: 0 },
         Kind::Browser { url: "about:blank".into(), alpha: false },
@@ -447,6 +448,73 @@ fn the_old_name_still_opens_old_files() {
     end(h);
 }
 
+/// What a double-clicked .livecraft file does: the installer's file type
+/// starts LiveCraft with `--project <file>`.
+/// Opening a project by name replaces the desk, which the session file held:
+/// one copy is kept, and saving a project never leaves it half written.
+#[test]
+fn opening_a_project_keeps_the_session_and_saving_swaps_atomically() {
+    let dir = std::env::temp_dir().join(format!("livecraft-backup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = dir.join("session.json");
+    assert!(!super::back_up_session(&session), "nothing to keep");
+    std::fs::write(&session, b"first").unwrap();
+    assert!(super::back_up_session(&session));
+    std::fs::write(&session, b"second").unwrap();
+    assert!(super::back_up_session(&session));
+    assert_eq!(std::fs::read(dir.join("session.prev.json")).unwrap(), b"second", "the last one is kept");
+
+    let file = dir.join("show.livecraft");
+    std::fs::write(&file, b"old").unwrap();
+    super::bars::write_beside_then_swap(&file, b"new").unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"new");
+    assert!(!dir.join("show.livecraft.tmp").exists(), "no leftover");
+    let missing = dir.join("no").join("show.livecraft");
+    assert!(super::bars::write_beside_then_swap(&missing, b"x").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_project_opened_from_explorer_saves_back_to_its_own_file() {
+    let dir = std::env::temp_dir().join(format!("livecraft-start-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("emission.livecraft");
+    let mut on_disk = small_project();
+    on_disk.inputs.iter_mut().find(|i| i.id == 1).unwrap().name = "Caméra du public".into();
+    std::fs::write(&file, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+    let start = |path: std::path::PathBuf| {
+        let path = path.to_string_lossy().into_owned();
+        let mut h = Harness::builder()
+            .with_size(vec2(2200.0, 1100.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::start(cc, saved(Project::blank()), None, "", Some(path), false));
+        h.run_steps(4);
+        h
+    };
+
+    let mut h = start(file.clone());
+    assert!(project(&h).inputs.iter().any(|i| i.name == "Caméra du public"), "the file, not the session");
+    h.get_by_label("emission");
+    click(&mut h, "Entrée CAM 2");
+    // The output bar's record button has the same name; this is the top bar's.
+    h.get_all_by_label("Enregistrer")
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .unwrap()
+        .click();
+    h.run_steps(3);
+    assert!(!h.state().engine.is_recording());
+    let back: Project = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(back.preview, Some(2), "saved into the file it came from, without asking where");
+    end(h);
+
+    let h = start(dir.join("absente.livecraft"));
+    assert!(project(&h).inputs.is_empty(), "the session's desk stays");
+    let said = h.state().message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said.starts_with("Projet illisible"), "{said}");
+    end(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_dragged_card_lands_just_before_its_target() {
     let mut h = desk(small_project());
@@ -595,6 +663,61 @@ fn every_named_function_is_known_and_leaves_the_desk_working() {
     engine.call("RemoveInput", &Args::new().input("2")).unwrap();
     assert!(engine.state.lock().unwrap().input(2).is_none());
     end(h);
+}
+
+/// A presentation dropped on the desk becomes a PowerPoint input, and the
+/// card's buttons walk through its slides without going past either end.
+/// Needs PowerPoint or LibreOffice; skipped where neither is installed.
+#[test]
+fn a_presentation_is_added_and_its_card_buttons_turn_the_slides() {
+    if crate::slides::Converter::find().is_none() {
+        eprintln!("ni PowerPoint ni LibreOffice : essai sauté");
+        return;
+    }
+    const COLOURS: [[u8; 3]; 3] = [[230, 20, 20], [20, 200, 40], [30, 40, 220]];
+    let dir = std::env::temp_dir().join(format!("livecraft-ui-deck-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let deck = dir.join("Conférence.pptx");
+    crate::slides::write_test_deck(&deck, &COLOURS);
+    let mut p = Project::blank();
+    p.out_w = 320;
+    p.out_h = 180;
+    let mut h = desk(p);
+    h.state_mut().add_file(&deck);
+    h.run_steps(2);
+    let input = project(&h).inputs.last().cloned().unwrap();
+    assert!(matches!(&input.kind, Kind::PowerPoint { path } if path.ends_with("Conférence.pptx")));
+    let rt = h.state().engine.rt(input.id).unwrap();
+    let on_screen = |want: usize| {
+        let f = rt.latest()?;
+        let at = (f.h / 2 * f.w + f.w / 2) * 4;
+        let near = f.data[at..at + 3].iter().zip(COLOURS[want]).all(|(a, b)| a.abs_diff(b) < 12);
+        Some(near && rt.item.load(Ordering::Relaxed) as usize == want)
+    };
+    let until = |h: &mut Harness<'static, App>, what: &str, secs: u64, want: usize| {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while on_screen(want) != Some(true) || rt.items.load(Ordering::Relaxed) != 3 {
+            let failed = rt.status().filter(|s| s.contains("illisible") || s.contains("arrêté"));
+            assert!(failed.is_none(), "{what} : {failed:?}");
+            assert!(Instant::now() < deadline, "{what} : {:?}", rt.status());
+            wait(h, 50);
+        }
+    };
+    // A first start of the converter can take a while.
+    until(&mut h, "première diapositive", 180, 0);
+    assert!(h.query_by_label("1/3").is_some(), "the card counts the slides");
+    click(&mut h, "Diapositive suivante Conférence");
+    until(&mut h, "deuxième diapositive", 5, 1);
+    click(&mut h, "Diapositive suivante Conférence");
+    until(&mut h, "troisième diapositive", 5, 2);
+    click(&mut h, "Diapositive suivante Conférence");
+    wait(&mut h, 200);
+    until(&mut h, "toujours la dernière", 1, 2);
+    click(&mut h, "Diapositive précédente Conférence");
+    until(&mut h, "retour à la deuxième", 5, 1);
+    assert!(h.query_by_label("2/3").is_some());
+    end(h);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn preview_red_at(h: &Harness<'static, App>, x: f32, y: f32) -> Option<bool> {
