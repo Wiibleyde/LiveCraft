@@ -85,10 +85,34 @@ fn evaluate(ws: &mut browser::Socket, id: &mut u64, expression: &str) -> Result<
         let Ok(Message::Text(text)) = ws.read() else { continue };
         let Ok(v) = serde_json::from_str::<Value>(text.as_str()) else { continue };
         if v["id"] == *id {
+            // A script that throws would otherwise look like one that
+            // returned nothing, and the check would go on blind.
+            if let Some(e) = v["result"]["exceptionDetails"].as_object().or(v["error"].as_object()) {
+                let text = e.get("exception").and_then(|x| x["description"].as_str());
+                let text = text.or(e.get("text").and_then(Value::as_str));
+                let text = text.or(e.get("message").and_then(Value::as_str)).unwrap_or("?");
+                return Err(format!("{expression} : {text}"));
+            }
             return Ok(v["result"]["result"]["value"].clone());
         }
     }
     Err(format!("pas de réponse à {expression}"))
+}
+
+/// The page is listed as soon as its address is asked for, well before its
+/// script has run: until then there is nothing to call.
+fn wait_for_script(ws: &mut browser::Socket, id: &mut u64) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let ready = "document.readyState=='complete'&&typeof join=='function'";
+    while Instant::now() < deadline {
+        // While the page loads, its context may be replaced under the call.
+        if evaluate(ws, id, ready) == Ok(Value::Bool(true)) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(200));
+    }
+    let seen = evaluate(ws, id, "location.href+' / '+document.title")?;
+    Err(format!("la page de l'invité ne se charge pas : {seen}"))
 }
 
 pub fn check(engine: &Arc<Engine>) -> Result<String, String> {
@@ -106,6 +130,7 @@ pub fn check(engine: &Arc<Engine>) -> Result<String, String> {
     let (_guest, port) = start_guest(&link)?;
     let mut ws = guest_page(port)?;
     let mut n = 0;
+    wait_for_script(&mut ws, &mut n)?;
     evaluate(&mut ws, &mut n, "join()")?;
     let deadline = Instant::now() + Duration::from_secs(20);
     while !link_state.is_connected() {
