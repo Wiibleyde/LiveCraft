@@ -322,6 +322,9 @@ impl Engine {
         for (_, enc) in self.srt.lock().unwrap().iter() {
             enc.push_audio(pcm(enc.pick));
         }
+        for out in self.net.lock().unwrap().iter() {
+            out.push_audio(&buses[0]);
+        }
         for cam in self.replay.lock().unwrap().cams.iter() {
             cam.encoder.push_audio(pcm(cam.encoder.pick));
         }
@@ -418,6 +421,8 @@ fn is_always_on(kind: &Kind) -> bool {
             | Kind::SystemAudio
             | Kind::Tone
             | Kind::Network { .. }
+            | Kind::Ndi { .. }
+            | Kind::Omt { .. }
             | Kind::VideoCall { .. }
     )
 }

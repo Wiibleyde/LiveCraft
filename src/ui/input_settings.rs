@@ -395,6 +395,8 @@ impl App {
                 ui.text_edit_singleline(url);
                 ui.add(egui::Slider::new(buffer_ms, 0..=5000).text(t!("input_settings.buffer_ms")));
             }
+            Kind::Ndi { source } => self.net_source_editor(ui, Net::Ndi, source),
+            Kind::Omt { source } => self.net_source_editor(ui, Net::Omt, source),
             Kind::Browser { url, alpha } => {
                 ui.label(t!("input_settings.page_address"));
                 ui.text_edit_singleline(url);
@@ -476,6 +478,28 @@ impl App {
                 ui.label(RichText::new(other.label()).color(DIM));
             }
         }
+    }
+
+    /// A source picked from those seen on the network, or typed in full for
+    /// one that is not on yet.
+    fn net_source_editor(&mut self, ui: &mut egui::Ui, net: Net, source: &mut String) {
+        self.look_for_net_sources();
+        let found = self.net_found(net);
+        let list = found.as_ref().and_then(|f| f.as_ref().ok()).cloned().unwrap_or_default();
+        device_combo(ui, t!("input_settings.net_source"), source, &list);
+        ui.horizontal(|ui| {
+            ui.label(t!("input_settings.net_exact_name"));
+            ui.add(egui::TextEdit::singleline(source).desired_width(320.0));
+        });
+        let note = match found {
+            None => t!("input_settings.net_searching").to_string(),
+            Some(Err(missing)) => missing,
+            Some(Ok(list)) if list.is_empty() => {
+                t!("input_settings.net_none_yet", name = net.label())
+            }
+            Some(Ok(_)) => return,
+        };
+        ui.label(RichText::new(note).small().color(DIM));
     }
 
     fn tab_key(&mut self, ui: &mut egui::Ui, input: &mut Input, project: &Project) {
