@@ -346,6 +346,31 @@ fn a_video_call_shows_the_link_that_lets_its_guest_in() {
     end(h);
 }
 
+/// In English, a video call's settings say nothing in French, and the way to
+/// the network setting is named as that window names it.
+#[test]
+fn a_video_call_is_set_up_in_english_too() {
+    use crate::i18n::{Lang, set_language};
+    // Before the desk, so the demo inputs are named in English; after it, as
+    // the window starts in the language saved with it.
+    set_language(Lang::En);
+    let mut h = desk(small_project());
+    set_language(Lang::En);
+    h.run_steps(2);
+    click(&mut h, "Add input");
+    click(&mut h, "Video call");
+    for shown in
+        ["Link to send the guest", "Copy link", "New link", "Waiting for the guest", "Address in the link"]
+    {
+        assert!(h.query_by_label(shown).is_some(), "{shown}");
+    }
+    let way = "Only this computer can open this link. For a guest elsewhere, tick “Reachable from the local network” \
+               in Settings, Web control, then restart.";
+    assert!(h.query_by_label(way).is_some(), "{way}");
+    assert_eq!(french_left(&h), Vec::<String>::new(), "French left on screen");
+    end(h);
+}
+
 #[test]
 fn every_settings_tab_and_tool_window_opens() {
     let mut h = desk(small_project());
