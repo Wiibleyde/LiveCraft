@@ -17,6 +17,7 @@ mod windows;
 use crate::api::ApiConfig;
 use crate::engine::{Compositor, Engine, ROUTES, State};
 use crate::functions::Args;
+use crate::i18n::{Lang, language, set_language};
 use crate::model::*;
 use crate::output;
 use crate::secret;
@@ -47,6 +48,8 @@ struct Saved {
     last_file: Option<String>,
     remote_lan: bool,
     remote_password: String,
+    /// Interface language code; empty follows the system's.
+    language: String,
 }
 
 fn user_dir(sub: &str) -> PathBuf {
@@ -105,6 +108,7 @@ impl Saved {
             last_file: None,
             remote_lan: false,
             remote_password: String::new(),
+            language: String::new(),
         }
     }
 
@@ -219,6 +223,7 @@ impl App {
         shot_path: Option<String>,
         open: Option<String>,
         project_file: Option<String>,
+        lang: Option<Lang>,
     ) -> Self {
         let open = open.as_deref().unwrap_or("");
         apply_style(&cc.egui_ctx);
@@ -236,6 +241,10 @@ impl App {
         } else {
             Saved::load()
         };
+        let mut saved = saved;
+        if let Some(lang) = lang {
+            saved.language = lang.code().into();
+        }
         let remote = shot_path.is_none();
         Self::assemble(cc, saved, shot_path, open, imported, import_report, remote)
     }
@@ -250,6 +259,7 @@ impl App {
         import_report: Option<crate::vmix_import::Report>,
         remote: bool,
     ) -> Self {
+        set_language(Lang::from_code(&saved.language).unwrap_or_else(Lang::system));
         let engine = Engine::start(saved.project.clone());
         engine.set_repaint(cc.egui_ctx.clone());
         let mut message = None;
@@ -291,8 +301,8 @@ impl App {
             edit_tab,
             selected_layer: 0,
             picking_colour: false,
-            settings_open: open == "reglages",
-            settings_tab: 0,
+            settings_open: open == "reglages" || open == "options",
+            settings_tab: usize::from(open == "options"),
             playlist_open: open == "playlist",
             overlays_open: open == "incrustations",
             overlay_pick: 0,
@@ -349,6 +359,12 @@ impl App {
 
     fn with<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
         f(&mut self.engine.state.lock().unwrap())
+    }
+
+    /// Takes effect on the next frame: every text is looked up as it is drawn.
+    fn set_language(&mut self, lang: Lang) {
+        self.saved.language = lang.code().into();
+        set_language(lang);
     }
 
     fn say(&mut self, msg: impl Into<String>) {
@@ -537,7 +553,7 @@ impl App {
                 let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
                 let (w, h) = (img.size[0] as u32, img.size[1] as u32);
                 if let Err(e) = image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8) {
-                    eprintln!("Capture impossible : {e}");
+                    eprintln!("{}", t!("app.capture_failed", error = e));
                 }
                 done.store(true, Ordering::Relaxed);
                 waker.request_repaint();
