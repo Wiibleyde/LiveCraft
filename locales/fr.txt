@@ -763,6 +763,57 @@ gpu.lost = carte graphique perdue : {reason}
 gpu.not_responding = la carte graphique ne répond plus : {error}
 gpu.picture_lost = image perdue en revenant de la carte graphique
 
+# src/ui/plugin_chain.rs
+plugin_chain.title = Plug-ins
+plugin_chain.button_named = Plug-ins {name}
+plugin_chain.window_title = Plug-ins — {name}
+plugin_chain.owner_input = entrée {id}
+plugin_chain.heading = Plug-ins (CLAP)
+plugin_chain.empty = Aucun plug-in dans cette chaîne
+plugin_chain.active_named = Actif {name}
+plugin_chain.bypass_tip = Décocher pour contourner
+plugin_chain.up_named = Monter {name}
+plugin_chain.down_named = Descendre {name}
+plugin_chain.window = Fenêtre
+plugin_chain.close_window = Fermer la fenêtre
+plugin_chain.window_named = Fenêtre {name}
+plugin_chain.no_window_tip = Ce plug-in n'a pas de fenêtre
+plugin_chain.remove = Retirer
+plugin_chain.remove_named = Retirer {name}
+plugin_chain.starting = Démarrage…
+plugin_chain.no_latency = Sans latence
+plugin_chain.latency = Latence : {samples} échantillons ({ms} ms)
+plugin_chain.add = Ajouter un plug-in
+plugin_chain.searching = Recherche des plug-ins…
+plugin_chain.none_found = Aucun plug-in CLAP trouvé
+plugin_chain.rescan = Rechercher à nouveau
+plugin_chain.pick_file = Choisir un fichier…
+plugin_chain.file_filter = Plug-in CLAP
+plugin_chain.unreadable = {count} fichier(s) de plug-in illisible(s)
+plugin_chain.params_of = Paramètres de {name}
+
+# src/clap.rs
+clap.refused_start = le plug-in a refusé de démarrer
+clap.offers_nothing = le plug-in ne propose rien
+clap.not_in_file = le plug-in {id} est introuvable dans ce fichier
+clap.init_failed = le plug-in n'a pas pu s'initialiser
+clap.refused_activate = le plug-in a refusé de s'activer
+clap.no_window = ce plug-in n'a pas de fenêtre
+clap.window_not_opened = le plug-in n'a pas ouvert sa fenêtre
+clap.window_not_shown = le plug-in n'a pas montré sa fenêtre
+clap.cannot_open_window = impossible d'ouvrir une fenêtre
+clap.cannot_embed = le plug-in n'a pas pu se placer dans sa fenêtre
+clap.cannot_load = impossible de charger {path} : {error}
+clap.not_clap = ce fichier n'est pas un plug-in CLAP
+clap.bad_version = version de CLAP non prise en charge
+clap.incomplete = plug-in incomplet
+
+# src/plugins.rs
+plugins.no_output = pas de sortie
+plugins.no_answer = le plug-in ne répond pas
+plugins.crashed_scan = le plug-in a planté pendant l'examen
+plugins.not_trusted = Ce fichier n'a pas été choisi sur cet ordinateur : choisissez-le à nouveau ou relancez la recherche pour l'autoriser
+
 # NDI and OMT (src/ndi.rs, src/omt.rs, src/netvideo.rs, src/outputs.rs, inputs and settings)
 ndi.missing = Runtime NDI introuvable : installez NDI Tools ou le runtime NDI (ndi.video/tools), puis relancez LiveCraft
 ndi.cpu = Le runtime NDI ne prend pas en charge ce processeur

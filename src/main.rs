@@ -8,6 +8,7 @@ mod api;
 mod audio;
 mod browser;
 mod canvas;
+mod clap;
 mod desk;
 mod dsp;
 mod dvd;
@@ -29,6 +30,7 @@ mod output;
 mod outputs;
 mod playback;
 mod playtest;
+mod plugins;
 mod replay;
 mod secret;
 mod selftest;
@@ -64,6 +66,10 @@ fn main() -> eframe::Result {
     i18n::set_language(lang.unwrap_or_else(i18n::Lang::system));
     if let Some(file) = value_of("--import-report") {
         std::process::exit(import_report(&file));
+    }
+    // Run by the program itself to look inside a plug-in file safely apart.
+    if let Some(file) = value_of("--scan-clap") {
+        std::process::exit(plugins::scan_one_and_print(&file));
     }
     // One thread per physical core: the second half would only fight over the
     // same units, and the window, ffmpeg and the browser need their share.

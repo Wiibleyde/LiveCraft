@@ -7,6 +7,7 @@ use crate::frame::Frame;
 use crate::model::*;
 use crate::netvideo::NetOut;
 use crate::output::Encoder;
+use crate::plugins::PluginHost;
 use crate::replay::ReplayState;
 use crate::sources::{self, InputRt};
 use std::collections::HashMap;
@@ -59,6 +60,7 @@ pub struct Engine {
     pub stats: Stats,
     pub bus_peaks: [AtomicU32; 8],
     pub audio_devices: Mutex<Vec<String>>,
+    pub plugins: PluginHost,
     pub recorders: Mutex<Vec<Encoder>>,
     pub streamers: Mutex<Vec<Encoder>>,
     pub multi: Mutex<Vec<(u64, Encoder)>>,
@@ -76,6 +78,8 @@ pub struct Engine {
     pub use_gpu: AtomicBool,
     pub compositor: Mutex<Compositor>,
     next_id: AtomicU64,
+    /// Counts the projects opened, so that what ran for the last one is not kept.
+    pub(crate) project_generation: AtomicU64,
     pub(crate) thumb_clock: AtomicU64,
     pub script_stop: AtomicU64,
 }
@@ -99,6 +103,7 @@ impl Engine {
             stats: Stats::default(),
             bus_peaks: Default::default(),
             audio_devices: Mutex::new(Vec::new()),
+            plugins: PluginHost::default(),
             recorders: Mutex::new(Vec::new()),
             streamers: Mutex::new(Vec::new()),
             multi: Mutex::new(Vec::new()),
@@ -113,12 +118,13 @@ impl Engine {
             next_id: AtomicU64::new(next),
             use_gpu: AtomicBool::new(true),
             compositor: Mutex::new(Compositor::Starting),
+            project_generation: AtomicU64::new(0),
             thumb_clock: AtomicU64::new(0),
             script_stop: AtomicU64::new(0),
         });
         engine.start_all_inputs(false);
         engine.state.lock().unwrap().note_project_on_air();
-        for job in [Self::video_loop, Self::audio_loop, Self::cpu_loop, Self::data_loop] {
+        for job in [Self::video_loop, Self::audio_loop, Self::cpu_loop, Self::data_loop, Self::plugin_loop] {
             let e = engine.clone();
             thread::spawn(move || job(e));
         }
@@ -264,6 +270,8 @@ impl Engine {
         *self.program.lock().unwrap() = Arc::new(Frame::solid(w, h, [0, 0, 0]));
         self.program_seq.fetch_add(1, Ordering::Release);
         self.thumbs.lock().unwrap().clear();
+        // After the new project is in place, so that the plug-ins read its states.
+        self.project_generation.fetch_add(1, Ordering::Release);
         self.start_all_inputs(false);
         self.state.lock().unwrap().version += 1;
     }
