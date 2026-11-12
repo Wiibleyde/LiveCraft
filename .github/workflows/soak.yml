@@ -35,9 +35,12 @@ jobs:
       - run: cargo build
       - name: Run the show
         shell: bash
+        # Through the environment, so the typed length is never read as script.
+        env:
+          LENGTH: ${{ inputs.length || '45m' }}
         run: |
           mkdir -p target/soak
-          cargo run -- --soak target/soak "${{ inputs.length || '45m' }}" 2>&1 | tee target/soak/console.txt
+          cargo run -- --soak target/soak "$LENGTH" 2>&1 | tee target/soak/console.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
