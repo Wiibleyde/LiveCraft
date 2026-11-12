@@ -38,7 +38,8 @@ audio routing and the state you left them in. Your file is never changed; you sa
 ### ⚡ Light on purpose
 
 What nobody is watching costs next to nothing. Cards are drawn at card size, pages off air slow down
-on their own, and all web inputs share a single browser.
+on their own, and all web inputs share a single browser. Files heavier than 1080p60 and network
+streams are decoded by the graphics card, with software taking over by itself if the card fails.
 
 ### 🔌 Scriptable from the start
 
