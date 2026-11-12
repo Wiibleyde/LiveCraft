@@ -5,15 +5,23 @@
 //! ffprobe starts from the path resolved here.
 
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::process::{Child, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// The variable naming the ffmpeg executable.
 pub const VARIABLE: &str = "LIVECRAFT_FFMPEG";
 
-/// How long one question to ffmpeg may take, a hardware encoder test included.
+/// How long one question to ffmpeg may take, an encoder test included.
 const ASK_LIMIT: Duration = Duration::from_secs(15);
+
+/// How long a child that was told to end, or that closed its output, may take
+/// to be gone before it is given up on: one stuck in a driver call cannot exit.
+const GRACE: Duration = Duration::from_secs(3);
 
 /// Encoders that need particular hardware: listed does not mean working.
 const HARDWARE: [&str; 7] =
@@ -38,77 +46,130 @@ pub struct Located {
     pub how: How,
 }
 
+/// What the lookup came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Lookup {
+    Found(Located),
+    /// The variable is set (this is its cleaned value) and names nothing usable:
+    /// the search stops there, so a wrong setting is never hidden by `PATH`.
+    BadVariable(String),
+    NotFound,
+}
+
+/// A file that can be run: on Unix it must carry an execute bit, as `execvp`
+/// requires, so a plain file of that name does not stop the search.
+fn usable(p: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(p) else { return false };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    true
+}
+
+fn absolute(p: PathBuf) -> PathBuf {
+    std::path::absolute(&p).unwrap_or(p)
+}
+
+/// The variable without the quotes and spaces people paste around a path.
+fn clean(raw: &OsStr) -> String {
+    raw.to_string_lossy().trim().trim_matches('"').trim().to_string()
+}
+
 /// The lookup itself, from its inputs: `variable` is the value of
 /// `LIVECRAFT_FFMPEG`, `own_dir` the folder of LiveCraft, `path` the value of `PATH`.
-pub fn locate_in(variable: Option<&OsStr>, own_dir: Option<&Path>, path: Option<&OsStr>) -> Option<Located> {
+/// Only absolute places count: an empty or relative `PATH` entry (a trailing
+/// separator, `.`) would otherwise make the current folder a source of programs.
+pub fn locate_in(variable: Option<&OsStr>, own_dir: Option<&Path>, path: Option<&OsStr>) -> Lookup {
     let name = crate::platform::exe_name("ffmpeg");
-    if let Some(v) = variable.filter(|v| !v.is_empty()) {
-        let p = PathBuf::from(v);
-        if p.is_file() {
-            return Some(Located { path: p, how: How::Variable });
-        }
-        // A folder holding ffmpeg is a natural thing to give.
-        let inside = p.join(&name);
-        if inside.is_file() {
-            return Some(Located { path: inside, how: How::Variable });
-        }
+    if let Some(v) = variable.map(clean).filter(|v| !v.is_empty()) {
+        let p = PathBuf::from(&v);
+        // A folder holding ffmpeg is a natural thing to give; a bare name is relative.
+        let found =
+            if p.is_absolute() { [p.clone(), p.join(&name)].into_iter().find(|c| usable(c)) } else { None };
+        return match found {
+            Some(f) => Lookup::Found(Located { path: absolute(f), how: How::Variable }),
+            None => Lookup::BadVariable(v),
+        };
     }
-    if let Some(dir) = own_dir {
+    if let Some(dir) = own_dir.filter(|d| d.is_absolute()) {
         let p = dir.join(&name);
-        if p.is_file() {
-            return Some(Located { path: p, how: How::Beside });
+        if usable(&p) {
+            return Lookup::Found(Located { path: absolute(p), how: How::Beside });
         }
     }
-    let path = path?;
+    let Some(path) = path else { return Lookup::NotFound };
     std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(&name))
-        .find(|p| p.is_file())
-        .map(|path| Located { path, how: How::Path })
+        .find(|p| usable(p))
+        .map_or(Lookup::NotFound, |p| Lookup::Found(Located { path: absolute(p), how: How::Path }))
 }
 
 /// Where ffmpeg is, resolved on the first question and kept.
-pub fn located() -> Option<&'static Located> {
-    static FOUND: OnceLock<Option<Located>> = OnceLock::new();
-    FOUND
-        .get_or_init(|| {
-            let own = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
-            locate_in(
-                std::env::var_os(VARIABLE).as_deref(),
-                own.as_deref(),
-                std::env::var_os("PATH").as_deref(),
-            )
-        })
-        .as_ref()
+pub fn lookup() -> &'static Lookup {
+    static FOUND: OnceLock<Lookup> = OnceLock::new();
+    FOUND.get_or_init(|| {
+        let own = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
+        locate_in(std::env::var_os(VARIABLE).as_deref(), own.as_deref(), std::env::var_os("PATH").as_deref())
+    })
 }
 
-/// The program to start for `tool` (`ffmpeg`, `ffprobe`): the one beside the
-/// ffmpeg that was found, else the bare name, left to the system.
-pub fn program(tool: &str) -> OsString {
-    let name = crate::platform::exe_name(tool);
-    match located() {
-        Some(found) if tool == "ffmpeg" => found.path.clone().into_os_string(),
-        Some(found) => match found.path.parent().map(|d| d.join(&name)) {
-            Some(beside) if beside.is_file() => beside.into_os_string(),
-            _ => OsString::from(name),
-        },
-        None => OsString::from(name),
+/// The ffmpeg that was found, if one was.
+pub fn located() -> Option<&'static Located> {
+    match lookup() {
+        Lookup::Found(f) => Some(f),
+        _ => None,
     }
 }
 
-/// What the ffmpeg found can do.
+/// The program to start for `tool` (`ffmpeg`, `ffprobe`): the one beside the
+/// ffmpeg that was found, else the bare name, left to the system. A variable
+/// that names nothing usable is passed on as it is, so starting fails there
+/// and ffmpeg is not quietly taken from elsewhere.
+pub fn program(tool: &str) -> OsString {
+    let name = crate::platform::exe_name(tool);
+    match lookup() {
+        Lookup::Found(found) if tool == "ffmpeg" => found.path.clone().into_os_string(),
+        Lookup::Found(found) => match found.path.parent().map(|d| d.join(&name)) {
+            Some(beside) if usable(&beside) => beside.into_os_string(),
+            _ => OsString::from(name),
+        },
+        Lookup::BadVariable(v) if tool == "ffmpeg" => OsString::from(v),
+        _ => OsString::from(name),
+    }
+}
+
+/// What the ffmpeg found says it can do, from questions that cost nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
+    /// `None` when ffmpeg did not answer `-version`: it did not start, or
+    /// crashed (missing libraries), or hung.
     pub version: Option<String>,
     /// `srt` is among its protocols.
     pub srt: bool,
-    /// Encoders that start, software ones first, libx264 leading.
+    /// Encoders it lists, software ones first, libx264 leading. Listed is not
+    /// proven to work: hardware ones are only tried when asked.
     pub encoders: Vec<String>,
 }
 
 impl Capabilities {
-    /// The encoders tied to hardware that really started.
+    pub fn answered(&self) -> bool {
+        self.version.is_some()
+    }
+
+    /// The listed encoders that are tied to hardware.
     pub fn hardware(&self) -> Vec<String> {
         self.encoders.iter().filter(|e| HARDWARE.contains(&e.as_str())).cloned().collect()
+    }
+
+    fn silent() -> Self {
+        Self { encoders: vec!["libx264".into()], ..Self::default() }
     }
 }
 
@@ -130,54 +191,47 @@ pub fn parse_encoders(text: &str) -> Vec<String> {
     lines.filter_map(|l| l.split_whitespace().nth(1)).map(str::to_string).collect()
 }
 
+/// Waits for a child that has been told to end, or has closed its output, but
+/// only so long: `None` means it is abandoned, and nothing waits on it again.
+pub(crate) fn finish(child: &mut Child, grace: Duration) -> Option<ExitStatus> {
+    let end = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < end => thread::sleep(Duration::from_millis(20)),
+            _ => return None,
+        }
+    }
+}
+
 fn ask(args: &[&str]) -> Option<String> {
     let mut cmd = crate::sources::ffmpeg();
     cmd.args(args);
     crate::decode::run_limited(cmd, ASK_LIMIT)
 }
 
-/// Whether an encoder produces a picture at all: a card that is absent or a
-/// driver that is too old lists the encoder and fails here.
-fn starts(encoder: &str) -> bool {
-    let args = [
-        "-f",
-        "lavfi",
-        "-i",
-        "color=black:s=256x256:d=0.1",
-        "-frames:v",
-        "1",
-        "-c:v",
-        encoder,
-        "-f",
-        "null",
-        "-",
-    ];
-    ask(&args).is_some()
-}
-
 fn probe() -> Capabilities {
     if located().is_none() {
-        return Capabilities { encoders: vec!["libx264".into()], ..Capabilities::default() };
+        return Capabilities::silent();
     }
-    let version = ask(&["-version"]).and_then(|t| parse_version(&t));
+    let Some(version) = ask(&["-version"]).and_then(|t| parse_version(&t)) else {
+        return Capabilities::silent();
+    };
     let srt = ask(&["-protocols"]).is_some_and(|t| parse_srt(&t));
     let listed = ask(&["-encoders"]).map(|t| parse_encoders(&t)).unwrap_or_default();
+    let has = |n: &&&str| listed.iter().any(|l| l == **n);
     let mut encoders = vec!["libx264".to_string()];
-    encoders.extend(SOFTWARE.iter().filter(|n| listed.iter().any(|l| l == *n)).map(|n| n.to_string()));
-    for name in HARDWARE.iter().filter(|n| listed.iter().any(|l| l == *n)) {
-        if starts(name) {
-            encoders.push(name.to_string());
-        }
-    }
-    Capabilities { version, srt, encoders }
+    encoders.extend(SOFTWARE.iter().filter(has).chain(HARDWARE.iter().filter(has)).map(|n| n.to_string()));
+    Capabilities { version: Some(version), srt, encoders }
 }
 
 static CAPABILITIES: OnceLock<Capabilities> = OnceLock::new();
 
-/// Asks ffmpeg once and keeps the answer; the first caller waits for it, so
-/// call this off the interface thread.
+/// Asks ffmpeg once (`-version`, `-protocols`, `-encoders`) and keeps the
+/// answer; the first caller waits for it, so call this off the interface
+/// thread. Whatever happens it ends, and the answer is then known.
 pub fn capabilities() -> &'static Capabilities {
-    CAPABILITIES.get_or_init(probe)
+    CAPABILITIES.get_or_init(|| std::panic::catch_unwind(probe).unwrap_or_else(|_| Capabilities::silent()))
 }
 
 /// The answer if it is in already; never waits.
@@ -185,24 +239,116 @@ pub fn capabilities_if_known() -> Option<&'static Capabilities> {
     CAPABILITIES.get()
 }
 
+/// How one hardware encoder did when it was really tried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Test {
+    Works,
+    /// With the first line ffmpeg said (empty when it said nothing).
+    Failed(String),
+}
+
+struct Tests {
+    started: bool,
+    running: bool,
+    results: Vec<(String, Test)>,
+}
+
+static TESTS: Mutex<Tests> = Mutex::new(Tests { started: false, running: false, results: Vec::new() });
+
+#[derive(Clone, Debug, Default)]
+pub struct TestView {
+    /// Tried at least once since the start.
+    pub started: bool,
+    pub running: bool,
+    pub results: Vec<(String, Test)>,
+}
+
+pub fn test_view() -> TestView {
+    let t = TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    TestView { started: t.started, running: t.running, results: t.results.clone() }
+}
+
+/// First line of what ffmpeg said, shortened.
+pub fn first_line(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    line.chars().take(160).collect()
+}
+
+/// Opens each listed hardware encoder on a small picture, on a thread of its
+/// own, and keeps what came of it. Real encoders are heavy and may fail once
+/// (a session limit while another program encodes), so this runs only when
+/// asked, and a failure only annotates: the encoder stays on offer. Does
+/// nothing while a run is going or before `capabilities()` is in.
+pub fn start_tests() {
+    let Some(caps) = capabilities_if_known() else { return };
+    let names = caps.hardware();
+    {
+        let mut t = TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        if t.running {
+            return;
+        }
+        t.started = true;
+        t.running = true;
+    }
+    thread::spawn(move || {
+        let done = std::panic::catch_unwind(|| {
+            names.iter().map(|n| (n.clone(), test_encoder(n))).collect::<Vec<_>>()
+        });
+        let mut t = TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        t.results = done.unwrap_or_default();
+        t.running = false;
+    });
+}
+
+fn test_encoder(encoder: &str) -> Test {
+    let mut cmd = crate::sources::ffmpeg();
+    cmd.args(["-v", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1", "-frames:v", "1", "-c:v"])
+        .arg(encoder)
+        .args(["-f", "null", "-"]);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    let Ok(mut child) = cmd.spawn() else { return Test::Failed(String::new()) };
+    let Some(mut err) = child.stderr.take() else { return Test::Failed(String::new()) };
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = err.read_to_end(&mut bytes);
+        let _ = tx.send(String::from_utf8_lossy(&bytes).into_owned());
+    });
+    let Ok(said) = rx.recv_timeout(ASK_LIMIT) else {
+        crate::platform::end_process_tree(&mut child);
+        let _ = finish(&mut child, GRACE);
+        return Test::Failed(String::new());
+    };
+    match finish(&mut child, GRACE) {
+        Some(status) if status.success() => Test::Works,
+        _ => Test::Failed(first_line(&said)),
+    }
+}
+
 /// What the person should be told about, when something is wrong.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Problem {
     /// No ffmpeg anywhere it is looked for.
     Missing,
+    /// The variable is set and names nothing usable (its value).
+    BadVariable(String),
+    /// Found, but it did not answer: broken file, missing libraries, hung.
+    NoAnswer,
     /// An SRT input or output is set up and this ffmpeg cannot do SRT.
     NoSrt,
 }
 
-/// `found` is whether ffmpeg was located, `caps` what it said it can do (when
-/// it has said), `srt_used` whether the project has an SRT input or output.
-pub fn problem(found: bool, caps: Option<&Capabilities>, srt_used: bool) -> Option<Problem> {
-    if !found {
-        Some(Problem::Missing)
-    } else if srt_used && caps.is_some_and(|c| !c.srt) {
-        Some(Problem::NoSrt)
-    } else {
-        None
+/// `caps` is what ffmpeg said it can do (when it has said), `srt_used`
+/// whether the project has an SRT input or output.
+pub fn problem(lookup: &Lookup, caps: Option<&Capabilities>, srt_used: bool) -> Option<Problem> {
+    match lookup {
+        Lookup::NotFound => Some(Problem::Missing),
+        Lookup::BadVariable(v) => Some(Problem::BadVariable(v.clone())),
+        Lookup::Found(_) => match caps {
+            Some(c) if !c.answered() => Some(Problem::NoAnswer),
+            Some(c) if srt_used && !c.srt => Some(Problem::NoSrt),
+            _ => None,
+        },
     }
 }
 
@@ -214,6 +360,11 @@ mod tests {
     fn exe(dir: &Path) -> PathBuf {
         let p = dir.join(crate::platform::exe_name("ffmpeg"));
         fs::write(&p, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         p
     }
 
@@ -224,28 +375,58 @@ mod tests {
         d
     }
 
+    fn found(path: PathBuf, how: How) -> Lookup {
+        Lookup::Found(Located { path, how })
+    }
+
     #[test]
     fn the_variable_beats_the_own_folder_and_path() {
         let (v, own, on_path) = (dir("v1"), dir("o1"), dir("p1"));
         let (want, _, _) = (exe(&v), exe(&own), exe(&on_path));
-        let found = locate_in(Some(want.as_os_str()), Some(&own), Some(on_path.as_os_str())).unwrap();
-        assert_eq!(found, Located { path: want, how: How::Variable });
+        let got = locate_in(Some(want.as_os_str()), Some(&own), Some(on_path.as_os_str()));
+        assert_eq!(got, found(want, How::Variable));
     }
 
     #[test]
     fn a_folder_in_the_variable_is_searched() {
         let v = dir("v2");
         let want = exe(&v);
-        assert_eq!(locate_in(Some(v.as_os_str()), None, None).unwrap().path, want);
+        assert_eq!(locate_in(Some(v.as_os_str()), None, None), found(want, How::Variable));
     }
 
     #[test]
-    fn a_wrong_variable_falls_through_to_the_own_folder() {
-        let own = dir("o3");
-        let want = exe(&own);
+    fn quotes_and_spaces_around_the_variable_are_dropped() {
+        let v = dir("v7");
+        let want = exe(&v);
+        let pasted = format!("  \"{}\" ", want.display());
+        assert_eq!(locate_in(Some(OsStr::new(&pasted)), None, None), found(want, How::Variable));
+    }
+
+    #[test]
+    fn a_wrong_variable_stops_the_search_instead_of_falling_through() {
+        let (own, on_path) = (dir("o3"), dir("p3"));
+        exe(&own);
+        exe(&on_path);
         let nothing = dir("v3").join("missing");
-        let found = locate_in(Some(nothing.as_os_str()), Some(&own), None).unwrap();
-        assert_eq!(found, Located { path: want, how: How::Beside });
+        let joined = std::env::join_paths([&on_path]).unwrap();
+        let got = locate_in(Some(nothing.as_os_str()), Some(&own), Some(&joined));
+        assert_eq!(got, Lookup::BadVariable(nothing.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn a_bare_name_in_the_variable_is_relative_and_rejected() {
+        let on_path = dir("p8");
+        exe(&on_path);
+        let joined = std::env::join_paths([&on_path]).unwrap();
+        let got = locate_in(Some(OsStr::new("ffmpeg")), None, Some(&joined));
+        assert_eq!(got, Lookup::BadVariable("ffmpeg".into()));
+    }
+
+    #[test]
+    fn a_blank_variable_counts_as_unset() {
+        let own = dir("o9");
+        let want = exe(&own);
+        assert_eq!(locate_in(Some(OsStr::new("  \"\" ")), Some(&own), None), found(want, How::Beside));
     }
 
     #[test]
@@ -253,19 +434,49 @@ mod tests {
         let (own, on_path) = (dir("o4"), dir("p4"));
         let (want, _) = (exe(&own), exe(&on_path));
         let joined = std::env::join_paths([&on_path]).unwrap();
-        let found = locate_in(None, Some(&own), Some(&joined)).unwrap();
-        assert_eq!(found, Located { path: want, how: How::Beside });
+        assert_eq!(locate_in(None, Some(&own), Some(&joined)), found(want, How::Beside));
     }
 
     #[test]
-    fn path_is_the_last_resort_and_nothing_is_none() {
+    fn path_is_the_last_resort_and_nothing_is_not_found() {
         let (empty, on_path) = (dir("e5"), dir("p5"));
         let want = exe(&on_path);
         let joined = std::env::join_paths([&empty, &on_path]).unwrap();
-        let found = locate_in(None, Some(&empty), Some(&joined)).unwrap();
-        assert_eq!(found, Located { path: want, how: How::Path });
-        assert_eq!(locate_in(None, Some(&empty), Some(empty.as_os_str())), None);
-        assert_eq!(locate_in(Some(OsStr::new("")), None, None), None);
+        assert_eq!(locate_in(None, Some(&empty), Some(&joined)), found(want, How::Path));
+        assert_eq!(locate_in(None, Some(&empty), Some(empty.as_os_str())), Lookup::NotFound);
+        assert_eq!(locate_in(Some(OsStr::new("")), None, None), Lookup::NotFound);
+    }
+
+    #[test]
+    fn empty_and_relative_path_entries_are_skipped() {
+        // The current folder holds an ffmpeg: a trailing separator or a dot must not find it.
+        let here = std::env::current_dir().unwrap();
+        let name = crate::platform::exe_name("ffmpeg");
+        let planted = here.join(&name);
+        let made = !planted.exists() && fs::write(&planted, b"x").is_ok();
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let value = format!("{sep}.{sep}relative{sep}");
+        let got = locate_in(None, None, Some(OsStr::new(&value)));
+        if made {
+            let _ = fs::remove_file(&planted);
+        }
+        assert_eq!(got, Lookup::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_without_the_execute_bit_does_not_count() {
+        use std::os::unix::fs::PermissionsExt;
+        let (own, on_path) = (dir("o10"), dir("p10"));
+        let plain = exe(&own);
+        fs::set_permissions(&plain, fs::Permissions::from_mode(0o644)).unwrap();
+        let want = exe(&on_path);
+        let joined = std::env::join_paths([&on_path]).unwrap();
+        assert_eq!(locate_in(None, Some(&own), Some(&joined)), found(want, How::Path));
+        assert_eq!(
+            locate_in(Some(plain.as_os_str()), None, None),
+            Lookup::BadVariable(plain.to_string_lossy().into())
+        );
     }
 
     // Captured from ffmpeg 9.0.2 (gyan.dev full build), shortened.
@@ -293,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn only_working_hardware_counts_as_hardware() {
+    fn hardware_means_the_listed_hardware_encoders() {
         let c = Capabilities {
             version: None,
             srt: true,
@@ -303,13 +514,33 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_first_line_of_an_error() {
+        let said = "\n[h264_nvenc @ 0x1] OpenEncodeSessionEx failed: out of memory (10)\n[vost#0:0] Error\n";
+        assert_eq!(first_line(said), "[h264_nvenc @ 0x1] OpenEncodeSessionEx failed: out of memory (10)");
+        assert_eq!(first_line(""), "");
+        assert_eq!(first_line(&"x".repeat(500)).len(), 160);
+    }
+
+    #[test]
     fn says_what_is_wrong_only_when_it_matters() {
-        let with = Capabilities { srt: true, ..Capabilities::default() };
-        let without = Capabilities::default();
-        assert_eq!(problem(false, None, false), Some(Problem::Missing));
-        assert_eq!(problem(true, Some(&without), true), Some(Problem::NoSrt));
-        assert_eq!(problem(true, Some(&without), false), None);
-        assert_eq!(problem(true, Some(&with), true), None);
-        assert_eq!(problem(true, None, true), None, "not asked yet is not a fault");
+        let here = found(PathBuf::from("/x/ffmpeg"), How::Path);
+        let with = Capabilities { version: Some("9".into()), srt: true, ..Capabilities::default() };
+        let without = Capabilities { version: Some("9".into()), ..Capabilities::default() };
+        let silent = Capabilities::default();
+        assert_eq!(problem(&Lookup::NotFound, None, false), Some(Problem::Missing));
+        assert_eq!(
+            problem(&Lookup::BadVariable("v".into()), None, false),
+            Some(Problem::BadVariable("v".into()))
+        );
+        assert_eq!(problem(&here, Some(&without), true), Some(Problem::NoSrt));
+        assert_eq!(problem(&here, Some(&without), false), None);
+        assert_eq!(problem(&here, Some(&with), true), None);
+        assert_eq!(problem(&here, None, true), None, "not asked yet is not a fault");
+        assert_eq!(
+            problem(&here, Some(&silent), false),
+            Some(Problem::NoAnswer),
+            "no answer is its own fault"
+        );
+        assert_eq!(problem(&here, Some(&silent), true), Some(Problem::NoAnswer), "and not a missing SRT");
     }
 }

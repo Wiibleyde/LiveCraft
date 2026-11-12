@@ -105,13 +105,22 @@ Filename: "{app}\livecraft.exe"; Description: "{cm:LaunchProgram,LiveCraft}"; Fl
 var
   FfmpegPage: TOutputMsgWizardPage;
 
-{ LiveCraft looks for ffmpeg in the file named by LIVECRAFT_FFMPEG, then in the
-  program's folder, then in PATH. The same places are searched here. }
+{ LiveCraft looks for ffmpeg in the file (or folder) named by LIVECRAFT_FFMPEG,
+  then in the program's folder, then in PATH. The same places are searched here. }
 function FfmpegMissing: Boolean;
 var
-  Dirs, Dir: String;
+  Dirs, Dir, Named: String;
   P: Integer;
 begin
+  Result := True;
+  { A variable that is set decides on its own, as in LiveCraft: when it names
+    nothing usable, LiveCraft does not look further and neither does the page. }
+  Named := Trim(RemoveQuotes(Trim(GetEnv('LIVECRAFT_FFMPEG'))));
+  if Named <> '' then
+  begin
+    Result := not (FileExists(Named) or FileExists(AddBackslash(Named) + 'ffmpeg.exe'));
+    Exit;
+  end;
   Result := not FileExists(ExpandConstant('{app}\ffmpeg.exe'));
   Dirs := GetEnv('PATH');
   while Result and (Dirs <> '') do

@@ -62,7 +62,7 @@ impl App {
                             7 => self.tab_scripts(ui, &mut p),
                             8 => tab_data(ui, &mut p),
                             9 => self.tab_remote(ui),
-                            _ => tab_about(ui, &p),
+                            _ => self.tab_about(ui, &p),
                         }
                     });
                 });
@@ -496,59 +496,93 @@ fn uses_srt(p: &Project) -> bool {
             .any(|i| matches!(&i.kind, Kind::Network { url, .. } if url.trim_start().starts_with("srt:")))
 }
 
-fn tab_about(ui: &mut egui::Ui, p: &Project) {
-    ui.label(RichText::new("LiveCraft").strong());
-    ui.label(t!("settings.about_tagline"));
-    ui.label(RichText::new(t!("settings.about_ffmpeg")).small().color(DIM));
-    ui.label(RichText::new(t!("settings.about_ndi")).small().color(DIM));
-    ui.separator();
-    ffmpeg_section(ui, p);
-}
+impl App {
+    fn tab_about(&mut self, ui: &mut egui::Ui, p: &Project) {
+        ui.label(RichText::new("LiveCraft").strong());
+        ui.label(t!("settings.about_tagline"));
+        ui.label(RichText::new(t!("settings.about_ffmpeg")).small().color(DIM));
+        ui.label(RichText::new(t!("settings.about_ndi")).small().color(DIM));
+        ui.separator();
+        self.ffmpeg_section(ui, p);
+    }
 
-fn ffmpeg_section(ui: &mut egui::Ui, p: &Project) {
-    use crate::ffmpeg::{self, How, Problem};
-    ui.label(RichText::new("FFmpeg").strong());
-    let found = ffmpeg::located();
-    let caps = ffmpeg::capabilities_if_known();
-    if let Some(f) = found {
-        let how = match f.how {
-            How::Variable => t!("settings.ffmpeg_how_variable", name = ffmpeg::VARIABLE),
-            How::Beside => t!("settings.ffmpeg_how_beside").to_string(),
-            How::Path => t!("settings.ffmpeg_how_path").to_string(),
+    /// ffmpeg is only asked when this is a real run: tests and screenshots
+    /// start no ffmpeg of their own to ask about.
+    fn ffmpeg_section(&mut self, ui: &mut egui::Ui, p: &Project) {
+        use crate::ffmpeg::{self, How, Problem};
+        ui.label(RichText::new("FFmpeg").strong());
+        let lookup = ffmpeg::lookup();
+        let caps = ffmpeg::capabilities_if_known();
+        if let Some(f) = ffmpeg::located() {
+            let how = match f.how {
+                How::Variable => t!("settings.ffmpeg_how_variable", name = ffmpeg::VARIABLE),
+                How::Beside => t!("settings.ffmpeg_how_beside").to_string(),
+                How::Path => t!("settings.ffmpeg_how_path").to_string(),
+            };
+            ui.label(t!("settings.ffmpeg_path", path = f.path.display().to_string(), how = how));
+            match caps {
+                None if !self.asks_ffmpeg => {
+                    ui.label(RichText::new(t!("settings.ffmpeg_not_asked")).small().color(DIM));
+                }
+                None => {
+                    ui.label(RichText::new(t!("settings.ffmpeg_asking")).small().color(DIM));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                }
+                Some(c) if c.answered() => {
+                    ui.label(t!("settings.ffmpeg_version", version = c.version.clone().unwrap_or_default()));
+                    let answer = if c.srt { t!("settings.ffmpeg_yes") } else { t!("settings.ffmpeg_no") };
+                    ui.label(t!("settings.ffmpeg_srt", answer = answer));
+                    self.hardware_tests(ui, c);
+                }
+                Some(_) => {}
+            }
+        }
+        let message = match ffmpeg::problem(lookup, caps, uses_srt(p)) {
+            Some(Problem::Missing) => Some(t!("settings.ffmpeg_missing", name = ffmpeg::VARIABLE)),
+            Some(Problem::BadVariable(v)) => {
+                Some(t!("settings.ffmpeg_bad_variable", name = ffmpeg::VARIABLE, value = v))
+            }
+            Some(Problem::NoAnswer) => Some(t!("settings.ffmpeg_no_answer", name = ffmpeg::VARIABLE)),
+            Some(Problem::NoSrt) => Some(t!("settings.ffmpeg_no_srt", name = ffmpeg::VARIABLE)),
+            None => None,
         };
-        ui.label(t!("settings.ffmpeg_path", path = f.path.display().to_string(), how = how));
-        match caps {
-            None => {
-                ui.label(RichText::new(t!("settings.ffmpeg_asking")).small().color(DIM));
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-            }
-            Some(c) => {
-                ui.label(t!(
-                    "settings.ffmpeg_version",
-                    version = c.version.clone().unwrap_or_else(|| "?".into())
-                ));
-                let yes_no = if c.srt { t!("settings.ffmpeg_yes") } else { t!("settings.ffmpeg_no") };
-                ui.label(t!("settings.ffmpeg_srt", answer = yes_no));
-                let hardware = c.hardware();
-                let list = if hardware.is_empty() {
-                    t!("settings.ffmpeg_none").to_string()
-                } else {
-                    hardware.join(", ")
-                };
-                ui.label(t!("settings.ffmpeg_hardware", list = list));
-            }
+        if let Some(m) = message {
+            ui.colored_label(egui::Color32::LIGHT_RED, m);
         }
     }
-    match ffmpeg::problem(found.is_some(), caps, uses_srt(p)) {
-        Some(Problem::Missing) => {
-            ui.colored_label(
-                egui::Color32::LIGHT_RED,
-                t!("settings.ffmpeg_missing", name = ffmpeg::VARIABLE),
-            );
+
+    /// The hardware encoders ffmpeg lists, each with what happened when it was
+    /// really tried. Trying is heavy, so it starts when this is first looked
+    /// at, and again on request.
+    fn hardware_tests(&self, ui: &mut egui::Ui, caps: &crate::ffmpeg::Capabilities) {
+        use crate::ffmpeg::{self, Test};
+        let listed = caps.hardware();
+        if listed.is_empty() {
+            ui.label(t!("settings.ffmpeg_hw_none"));
+            return;
         }
-        Some(Problem::NoSrt) => {
-            ui.colored_label(egui::Color32::LIGHT_RED, t!("settings.ffmpeg_no_srt", name = ffmpeg::VARIABLE));
+        if self.asks_ffmpeg && !ffmpeg::test_view().started {
+            ffmpeg::start_tests();
         }
-        None => {}
+        let view = ffmpeg::test_view();
+        ui.label(t!("settings.ffmpeg_hw_title"));
+        for name in &listed {
+            let text = match view.results.iter().find(|(n, _)| n == name) {
+                Some((_, Test::Works)) => t!("settings.ffmpeg_hw_works", name = name),
+                Some((_, Test::Failed(why))) if why.is_empty() => {
+                    t!("settings.ffmpeg_hw_failed", name = name, why = t!("settings.ffmpeg_hw_no_detail"))
+                }
+                Some((_, Test::Failed(why))) => t!("settings.ffmpeg_hw_failed", name = name, why = why),
+                None if view.running => t!("settings.ffmpeg_hw_trying", name = name),
+                None => t!("settings.ffmpeg_hw_unknown", name = name),
+            };
+            ui.label(format!("  {text}"));
+        }
+        ui.label(RichText::new(t!("settings.ffmpeg_hw_note")).small().color(DIM));
+        if view.running {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+        } else if self.asks_ffmpeg && ui.button(t!("settings.ffmpeg_hw_recheck")).clicked() {
+            ffmpeg::start_tests();
+        }
     }
 }

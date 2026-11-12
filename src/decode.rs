@@ -112,7 +112,8 @@ pub(crate) fn run_limited(mut cmd: Command, limit: Duration) -> Option<String> {
     if text.is_none() {
         crate::platform::end_process_tree(&mut child);
     }
-    let status = child.wait().ok()?;
+    // Never wait without a limit: a process stuck in a driver call cannot exit.
+    let status = crate::ffmpeg::finish(&mut child, Duration::from_secs(3))?;
     if status.success() { text } else { None }
 }
 
