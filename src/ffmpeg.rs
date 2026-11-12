@@ -59,16 +59,17 @@ pub enum Lookup {
 /// A file that can be run: on Unix it must carry an execute bit, as `execvp`
 /// requires, so a plain file of that name does not stop the search.
 fn usable(p: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(p) else { return false };
-    if !meta.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
+    std::fs::metadata(p).is_ok_and(|meta| meta.is_file() && executable(&meta))
+}
+
+#[cfg(unix)]
+fn executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn executable(_: &std::fs::Metadata) -> bool {
     true
 }
 
