@@ -106,6 +106,7 @@ Other ways to start it:
 livecraft --project show.vmix             # open a project, .vmix or .livecraft
 livecraft --import-report show.vmix       # say what a project keeps, without opening it
 livecraft --selftest some-folder          # real end-to-end run: plays, records, streams, replays
+livecraft --soak some-folder 45m          # a whole show for 45 minutes, memory and timing watched
 livecraft --livecheck some-folder         # virtual camera and microphone, streamed and read back
 livecraft --screenshot out.png            # start, save a picture of the window, quit
 livecraft --lang en                       # start in English (or fr), and keep that choice

@@ -756,6 +756,7 @@ impl Engine {
                 m.forget_closed(&plan.snap);
             }
 
+            self.stats.tick_times.record(now.elapsed());
             let period = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
             next += period;
             let now = Instant::now();
