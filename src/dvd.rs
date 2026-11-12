@@ -352,6 +352,8 @@ mod tests {
         assert_eq!(recognise(&dir.join("Disque")), Some(holder.clone()));
         assert_eq!(recognise(&video_ts), Some(holder), "picking VIDEO_TS itself opens the disc");
         assert_eq!(recognise(&dir), None, "a folder above the disc is not one");
+        // A drive letter only means something to Windows.
+        #[cfg(windows)]
         assert_eq!(display_name("D:\\"), "DVD D:");
         assert_eq!(display_name("C:/films/vacances.iso"), "vacances");
         std::fs::remove_dir_all(&dir).unwrap();
