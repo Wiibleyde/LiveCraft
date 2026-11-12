@@ -100,7 +100,8 @@ input, SRT output, the program with sound as an NDI or OMT source, fullscreen an
 multiview. NVENC, Quick Sync and AMF are used when your FFmpeg offers them.
 
 **Show tools.** Instant replay with events and tags and marks that stay exact when frames are dropped, playlists, triggers, data sources from CSV,
-scripts, VISCA PTZ control, a telestrator, and a web controller for phones and tablets.
+scripts, VISCA PTZ control, a telestrator, video delays that show an input again with its sound up to
+ten seconds later, and a web controller for phones and tablets.
 
 ## Why LiveCraft
 

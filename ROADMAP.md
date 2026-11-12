@@ -22,7 +22,7 @@ Nothing here has a date. Open an issue before starting something large; the
 - [x] Hardware decoding where it pays off (#8)
 - [x] Audio plug-ins (CLAP, #11)
 - [ ] Keep NDI/OMT inputs and video-call guests on the shared clock (#26)
-- [ ] Video Delay input (#29)
+- [x] Video Delay input (#29)
 - [ ] One encoder shared by stream destinations with identical settings (#28)
 - [ ] Recording profiles for editing: ProRes, DNxHR, MagicYUV (#31)
 - [ ] Encode straight from the graphics card, without a trip through memory
