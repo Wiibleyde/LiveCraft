@@ -391,7 +391,7 @@ fn read_any(path: &str) -> Result<Project, String> {
     read_project(path)
 }
 
-fn read_project(path: &str) -> Result<Project, String> {
+pub(super) fn read_project(path: &str) -> Result<Project, String> {
     std::fs::read(path)
         .map_err(|e| e.to_string())
         .and_then(|b| serde_json::from_slice::<Project>(&b).map_err(|e| e.to_string()))
