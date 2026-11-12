@@ -345,16 +345,26 @@ fn stream_page(
     let mut ok = send(&mut ws, 1, "Page.enable", json!({}));
     ok &= send(&mut ws, 2, "Emulation.setDeviceMetricsOverride", metrics);
     ok &= send(&mut ws, 3, "Emulation.setFocusEmulationEnabled", json!({"enabled": true}));
+    let mut asked = vec![1, 2, 3];
     if alpha {
         let clear = json!({"color": {"r": 0, "g": 0, "b": 0, "a": 0}});
         ok &= send(&mut ws, 4, "Emulation.setDefaultBackgroundColorOverride", clear);
+        asked.push(4);
+    }
+    let mut id = 10;
+    ok &= hook.prepare(&mut ws, &mut id);
+    asked.extend(11..=id);
+    if !ok {
+        rt.set_status(t!("browser.command_refused"));
+        return;
+    }
+    if !answered(&mut ws, rt, asked, hook) {
+        return;
     }
     // Pictures with transparency need PNG, which is heavier than JPEG.
     let format = if alpha { "png" } else { "jpeg" };
     let cast = json!({"format": format, "quality": 85, "maxWidth": w, "maxHeight": h, "everyNthFrame": 1});
-    ok &= send(&mut ws, 5, "Page.startScreencast", cast);
-    let mut id = 10;
-    ok &= hook.prepare(&mut ws, &mut id);
+    let mut ok = send(&mut ws, 5, "Page.startScreencast", cast);
     ok &= send(&mut ws, 6, "Page.navigate", json!({"url": url}));
     if !ok {
         rt.set_status(t!("browser.command_refused"));
@@ -394,19 +404,69 @@ fn stream_page(
                 } else if let Some(data) = v["result"]["data"].as_str() {
                     last_picture = Instant::now();
                     got_one |= show(rt, data, (w, h), &mut last_hash);
+                } else if crashed(rt, &v) {
+                    return;
                 } else {
                     hook.message(&v);
                 }
             }
             Ok(_) => {}
-            Err(tungstenite::Error::Io(e))
-                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(e) if timed_out(&e) => {}
             Err(e) => {
                 rt.set_status(t!("browser.page_lost", error = e));
                 return;
             }
         }
     }
+}
+
+/// Reads until the page has answered each command in `asked`, handing all it
+/// says to the hook. A page sent elsewhere before answering moves to a new
+/// renderer without them: Edge then never draws it, and crashes it moments
+/// later. False if the page is lost, or the input stopped, first.
+fn answered(ws: &mut Socket, rt: &InputRt, mut asked: Vec<u64>, hook: &mut dyn PageHook) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !asked.is_empty() {
+        if rt.stopped() {
+            return false;
+        }
+        if Instant::now() > deadline {
+            rt.set_status(t!("browser.page_silent"));
+            return false;
+        }
+        match ws.read() {
+            Ok(Message::Text(text)) => {
+                let Ok(v) = serde_json::from_str::<Value>(text.as_str()) else { continue };
+                if crashed(rt, &v) {
+                    return false;
+                }
+                asked.retain(|&id| v["id"].as_u64() != Some(id));
+                hook.message(&v);
+            }
+            Ok(_) => {}
+            Err(e) if timed_out(&e) => {}
+            Err(e) => {
+                rt.set_status(t!("browser.page_lost", error = e));
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// A page whose renderer died stays blank and answers nothing again: it must
+/// be opened anew.
+fn crashed(rt: &InputRt, v: &Value) -> bool {
+    let dead = v["method"] == "Inspector.targetCrashed";
+    if dead {
+        rt.set_status(t!("browser.page_crashed"));
+    }
+    dead
+}
+
+fn timed_out(e: &tungstenite::Error) -> bool {
+    matches!(e, tungstenite::Error::Io(e)
+        if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
 }
 
 /// Decodes and publishes a picture, unless it is the same one as before: the
@@ -423,4 +483,186 @@ fn show(rt: &InputRt, data: &str, size: (usize, usize), last_hash: &mut u64) -> 
     rt.clear_status();
     rt.publish(f);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    type Browser = WebSocket<TcpStream>;
+
+    /// A page to talk to in place of Edge or Chrome: `script` plays the
+    /// browser's part on the connection `stream_page` opens.
+    fn fake_page<T: Send + 'static>(
+        script: impl FnOnce(&mut Browser) -> T + Send + 'static,
+    ) -> (String, thread::JoinHandle<T>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("ws://{}/devtools/page/test", listener.local_addr().unwrap());
+        let browser = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut page = tungstenite::accept(stream).unwrap();
+            page.get_ref().set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+            script(&mut page)
+        });
+        (address, browser)
+    }
+
+    /// The next command, if one comes before `wait` is over.
+    fn command(page: &mut Browser, wait: Duration) -> Option<(u64, String)> {
+        let end = Instant::now() + wait;
+        while Instant::now() < end {
+            match page.read() {
+                Ok(Message::Text(text)) => {
+                    let v: Value = serde_json::from_str(text.as_str()).unwrap();
+                    return Some((v["id"].as_u64().unwrap(), v["method"].as_str().unwrap().to_string()));
+                }
+                Err(e) if !timed_out(&e) => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn say(page: &mut Browser, v: Value) {
+        page.send(Message::text(v.to_string())).unwrap();
+    }
+
+    fn picture() -> String {
+        use base64::Engine as _;
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 40, 40, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        base64::prelude::BASE64_STANDARD.encode(png.into_inner())
+    }
+
+    /// Runs `stream_page` as a web input does, until `done` or a few seconds.
+    /// Also tells whether it returned by itself.
+    fn stream(address: String, done: impl Fn(&InputRt) -> bool) -> (Arc<InputRt>, bool) {
+        let rt = InputRt::new(false, true);
+        let (tx, rx) = mpsc::channel();
+        let page = rt.clone();
+        thread::spawn(move || {
+            stream_page(&page, &address, "data:text/html,x", false, (4, 4), 30, &mut PlainPage);
+            let _ = tx.send(());
+        });
+        let end = Instant::now() + Duration::from_secs(5);
+        let mut returned = false;
+        while !returned && Instant::now() < end && !done(&rt) {
+            returned = rx.try_recv().is_ok();
+            thread::sleep(Duration::from_millis(10));
+        }
+        rt.shutdown();
+        let _ = rx.recv_timeout(Duration::from_secs(1));
+        (rt, returned)
+    }
+
+    /// The bug behind pages that never showed: told where to go before it had
+    /// answered its first commands, a page just opened by a browser still
+    /// starting moved to a new renderer without them. Edge then never drew it
+    /// and crashed it a few seconds later, leaving the window on about:blank.
+    /// Here the page answers late, as such a renderer does.
+    #[test]
+    fn a_page_is_sent_to_its_address_only_once_it_has_answered() {
+        let (address, browser) = fake_page(|page| {
+            let mut asked = Vec::new();
+            while let Some(command) = command(page, Duration::from_millis(300)) {
+                asked.push(command);
+            }
+            let early = asked.iter().any(|(_, method)| method == "Page.navigate");
+            for (id, _) in &asked {
+                say(page, json!({"id": id, "result": {}}));
+            }
+            let mut navigated = early;
+            while let Some((id, method)) = command(page, Duration::from_secs(2)) {
+                say(page, json!({"id": id, "result": {}}));
+                if method == "Page.navigate" {
+                    navigated = true;
+                    let frame = json!({"data": picture(), "sessionId": 1, "metadata": {}});
+                    say(page, json!({"method": "Page.screencastFrame", "params": frame}));
+                }
+            }
+            (asked, early, navigated)
+        });
+        let (rt, _) = stream(address, |rt| rt.seq() > 0);
+        let (asked, early, navigated) = browser.join().unwrap();
+        assert!(!early, "sent to its address before answering: {asked:?}");
+        assert!(navigated, "never sent to its address");
+        assert!(rt.seq() > 0, "the page never drew: {:?}", rt.status());
+    }
+
+    /// A page whose renderer died says so once, then answers every request
+    /// with an error: it must be opened again, not waited on forever.
+    #[test]
+    fn a_crashed_page_is_given_up_with_a_status() {
+        let (address, browser) = fake_page(|page| {
+            while let Some((id, method)) = command(page, Duration::from_secs(2)) {
+                if method == "Page.navigate" {
+                    say(page, json!({"id": id, "result": {}}));
+                    say(page, json!({"method": "Inspector.targetCrashed", "params": {}}));
+                } else if method == "Page.captureScreenshot" {
+                    say(page, json!({"id": id, "error": {"code": -32603, "message": "Internal error"}}));
+                } else {
+                    say(page, json!({"id": id, "result": {}}));
+                }
+            }
+        });
+        let (rt, returned) = stream(address, |_| false);
+        browser.join().unwrap();
+        assert!(returned, "still waiting on a dead page");
+        assert!(rt.status().is_some());
+        assert_eq!(rt.seq(), 0);
+    }
+
+    /// Web pages started again and again, each time in a browser just
+    /// launched, as `--selftest` and the soak do: each must draw, and none
+    /// may need opening twice. Needs Edge or Chrome, and the machine to
+    /// itself; `ROUNDS` and `PAGES` set the size.
+    #[test]
+    #[ignore]
+    fn web_pages_draw_every_time() {
+        let number = |name: &str, default: usize| {
+            std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+        };
+        let (rounds, pages) = (number("ROUNDS", 20), number("PAGES", 2));
+        let page = "data:text/html,<body style='margin:0'><div id=a style='width:100vw;height:100vh'></div>\
+            <script>let n=0;setInterval(()=>{a.style.background='rgb('+(n++%25200+40)+',40,40)'},33)</script>";
+        let (mut silent, mut troubled) = (0, 0);
+        for round in 0..rounds {
+            let start = Instant::now();
+            let rts: Vec<_> = (0..pages).map(|_| InputRt::new(false, true)).collect();
+            let threads: Vec<_> = rts
+                .iter()
+                .map(|rt| {
+                    let rt = rt.clone();
+                    thread::spawn(move || run_browser(&rt, page, false, 640, 360, 30))
+                })
+                .collect();
+            let mut first = vec![None; pages];
+            let mut statuses = vec![None; pages];
+            while start.elapsed() < Duration::from_secs(20) && first.iter().any(Option::is_none) {
+                for (i, rt) in rts.iter().enumerate() {
+                    if first[i].is_none() && rt.seq() >= 2 {
+                        first[i] = Some(start.elapsed().as_millis());
+                    }
+                    statuses[i] = statuses[i].take().or(rt.status());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            silent += first.iter().filter(|f| f.is_none()).count();
+            troubled += statuses.iter().filter(|s| s.is_some()).count();
+            eprintln!("round {round}: first pictures after {first:?} ms, statuses {statuses:?}");
+            for rt in &rts {
+                rt.shutdown();
+            }
+            for t in threads {
+                t.join().unwrap();
+            }
+            while HOST.lock().unwrap().is_some() {
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+        eprintln!("{silent} silent and {troubled} troubled of {} pages", rounds * pages);
+        assert_eq!((silent, troubled), (0, 0));
+    }
 }
