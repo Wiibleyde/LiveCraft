@@ -446,7 +446,7 @@ fn the_settings_show_and_switch_what_composes_the_picture() {
     assert!(!engine.use_gpu.load(Ordering::Relaxed));
     let deadline = Instant::now() + Duration::from_secs(5);
     while *engine.compositor.lock().unwrap() != Compositor::Cpu("choisi dans les réglages".into()) {
-        assert!(Instant::now() < deadline, "still composing on the card");
+        assert!(Instant::now() < deadline, "still {:?}", engine.compositor.lock().unwrap());
         wait(&mut h, 20);
     }
     h.run_steps(2);
@@ -463,6 +463,12 @@ fn the_settings_show_and_switch_what_composes_the_picture() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while *engine.compositor.lock().unwrap() == Compositor::Cpu("choisi dans les réglages".into()) {
         assert!(Instant::now() < deadline, "ticking it again changes nothing");
+        wait(&mut h, 20);
+    }
+    // The card again, or why not.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while *engine.compositor.lock().unwrap() == Compositor::Starting {
+        assert!(Instant::now() < deadline, "the card never opened again");
         wait(&mut h, 20);
     }
     end(h);

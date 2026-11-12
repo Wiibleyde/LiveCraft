@@ -250,15 +250,16 @@ impl Mixer {
         }
         // Opening the card takes up to a second: the processor composes
         // meanwhile, so the picture never waits for it.
-        match open()? {
-            Ok(painter) => {
+        match open() {
+            None => Some(Compositor::Starting),
+            Some(Ok(painter)) => {
                 self.last_sig = 0;
                 self.preview_sig = 0;
                 let name = painter.adapter_name().to_string();
                 self.gpu = Some(Box::new(OnGpu { painter, pics: Pictures::default(), program: None }));
                 Some(Compositor::Gpu(name))
             }
-            Err(why) => {
+            Some(Err(why)) => {
                 self.gpu_refused = true;
                 Some(Compositor::Cpu(why))
             }

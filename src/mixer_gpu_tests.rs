@@ -289,7 +289,7 @@ fn the_processor_composes_until_the_card_is_open() {
     let plan = d.state.plan(Instant::now(), Vec::new());
     let c = Ctx { plan: &plan, rts: &d.rts };
     let mut m = Mixer::default();
-    assert_eq!(m.choose_painter(true, || None), None, "still starting");
+    assert_eq!(m.choose_painter(true, || None), Some(Compositor::Starting));
     assert!(m.gpu.is_none() && !m.gpu_refused, "the card is still awaited");
     let meanwhile = m.compose_program(&c).expect("composed at once by the processor");
     let Some(painter) = card() else { return };
