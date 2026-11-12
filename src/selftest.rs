@@ -238,23 +238,34 @@ fn check(dir: &str) -> Result<String, String> {
         ));
     }
 
-    // A web page draws through the windowless browser.
-    let web = engine.new_id();
+    // A web page draws through the windowless browser, every time it starts:
+    // closing the last page ends the browser, so each start launches one. A
+    // page shown only after being opened twice has failed too.
     let page = "data:text/html,<body style='background:rgb(200,40,40)'><h1>LiveCraft</h1></body>";
-    engine.add_input(Input::new(web, "Web", Kind::Browser { url: page.into(), alpha: false }));
-    let web_rt = engine.rt(web).ok_or("page absente")?;
-    for _ in 0..150 {
-        if web_rt.seq() > 0 {
-            break;
+    for start in 1..=5 {
+        let web = engine.new_id();
+        engine.add_input(Input::new(web, "Web", Kind::Browser { url: page.into(), alpha: false }));
+        let web_rt = engine.rt(web).ok_or("page absente")?;
+        for _ in 0..150 {
+            if web_rt.seq() > 0 {
+                break;
+            }
+            if let Some(status) = web_rt.status() {
+                return Err(format!("page web, départ {start} : {status}"));
+            }
+            sleep(Duration::from_millis(100));
         }
-        sleep(Duration::from_millis(100));
+        let picture = web_rt
+            .latest()
+            .ok_or_else(|| format!("page web muette, départ {start} : {:?}", web_rt.status()))?;
+        let middle = (picture.h / 2 * picture.w + picture.w / 2) * 4;
+        if picture.data[middle] < 150 {
+            return Err(format!("page web mal rendue : {:?}", &picture.data[middle..middle + 3]));
+        }
+        engine.close_input(web);
+        // Long enough for the browser to be gone before the next start.
+        sleep(Duration::from_millis(500));
     }
-    let picture = web_rt.latest().ok_or_else(|| format!("page web muette : {:?}", web_rt.status()))?;
-    let middle = (picture.h / 2 * picture.w + picture.w / 2) * 4;
-    if picture.data[middle] < 150 {
-        return Err(format!("page web mal rendue : {:?}", &picture.data[middle..middle + 3]));
-    }
-    engine.close_input(web);
     let call = crate::calltest::check(&engine)?;
 
     // Remote control drives the desk and auto-play starts the video.
