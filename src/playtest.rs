@@ -625,7 +625,7 @@ pub fn check(dir: &str) -> Result<String, String> {
     })();
     desk.engine.shutdown();
     steps.map(|()| {
-        "marques, reprise, boucle, liste, son, compte à rebours, incrustation, carte graphique et repli          logiciel, plateau virtuel, pages web, ralenti malgré les pertes"
+        "marques, reprise, boucle, liste, son, compte à rebours, incrustation, carte graphique et repli logiciel, plateau virtuel, pages web, ralenti malgré les pertes"
             .to_string()
     })
 }
