@@ -370,10 +370,11 @@ impl App {
             edit_tab,
             selected_layer: 0,
             picking_colour: false,
-            settings_open: open == "reglages" || open == "options" || open == "sorties",
+            settings_open: open == "reglages" || open == "options" || open == "sorties" || open == "apropos",
             settings_tab: match open {
                 "options" => 1,
                 "sorties" => 2,
+                "apropos" => 10,
                 _ => 0,
             },
             playlist_open: open == "playlist",

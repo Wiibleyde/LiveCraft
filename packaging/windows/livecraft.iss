@@ -105,8 +105,8 @@ Filename: "{app}\livecraft.exe"; Description: "{cm:LaunchProgram,LiveCraft}"; Fl
 var
   FfmpegPage: TOutputMsgWizardPage;
 
-{ LiveCraft starts ffmpeg by name, so Windows looks in the program's folder,
-  then in PATH. The same places are searched here. }
+{ LiveCraft looks for ffmpeg in the file named by LIVECRAFT_FFMPEG, then in the
+  program's folder, then in PATH. The same places are searched here. }
 function FfmpegMissing: Boolean;
 var
   Dirs, Dir: String;

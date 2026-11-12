@@ -974,3 +974,16 @@ dvd.no_root = unreadable root directory
 
 # src/secret.rs
 secret.not_saved = Keys and passwords could not be protected: they are not saved and must be typed again at the next start
+settings.ffmpeg_how_variable = variable {name}
+settings.ffmpeg_how_beside = beside LiveCraft
+settings.ffmpeg_how_path = on the PATH
+settings.ffmpeg_path = Found: {path} ({how})
+settings.ffmpeg_asking = Checking what ffmpeg can do…
+settings.ffmpeg_version = Version: {version}
+settings.ffmpeg_yes = yes
+settings.ffmpeg_no = no
+settings.ffmpeg_srt = SRT: {answer}
+settings.ffmpeg_none = none
+settings.ffmpeg_hardware = Hardware encoders that work: {list}
+settings.ffmpeg_missing = ffmpeg was not found. Install it (winget install Gyan.FFmpeg), copy ffmpeg next to LiveCraft, or give its path in the {name} variable, then restart LiveCraft.
+settings.ffmpeg_no_srt = An SRT input or output is set up, but this ffmpeg cannot do SRT (an older ffmpeg may come first on the PATH). Install a recent ffmpeg with SRT, or give its path in the {name} variable, then restart LiveCraft.

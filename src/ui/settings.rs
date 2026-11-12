@@ -62,7 +62,7 @@ impl App {
                             7 => self.tab_scripts(ui, &mut p),
                             8 => tab_data(ui, &mut p),
                             9 => self.tab_remote(ui),
-                            _ => tab_about(ui),
+                            _ => tab_about(ui, &p),
                         }
                     });
                 });
@@ -488,9 +488,67 @@ fn tab_data(ui: &mut egui::Ui, p: &mut Project) {
     }
 }
 
-fn tab_about(ui: &mut egui::Ui) {
+/// Whether the project has an SRT output on or an SRT input.
+fn uses_srt(p: &Project) -> bool {
+    p.srt.iter().any(|o| o.enabled)
+        || p.inputs
+            .iter()
+            .any(|i| matches!(&i.kind, Kind::Network { url, .. } if url.trim_start().starts_with("srt:")))
+}
+
+fn tab_about(ui: &mut egui::Ui, p: &Project) {
     ui.label(RichText::new("LiveCraft").strong());
     ui.label(t!("settings.about_tagline"));
     ui.label(RichText::new(t!("settings.about_ffmpeg")).small().color(DIM));
     ui.label(RichText::new(t!("settings.about_ndi")).small().color(DIM));
+    ui.separator();
+    ffmpeg_section(ui, p);
+}
+
+fn ffmpeg_section(ui: &mut egui::Ui, p: &Project) {
+    use crate::ffmpeg::{self, How, Problem};
+    ui.label(RichText::new("FFmpeg").strong());
+    let found = ffmpeg::located();
+    let caps = ffmpeg::capabilities_if_known();
+    if let Some(f) = found {
+        let how = match f.how {
+            How::Variable => t!("settings.ffmpeg_how_variable", name = ffmpeg::VARIABLE),
+            How::Beside => t!("settings.ffmpeg_how_beside").to_string(),
+            How::Path => t!("settings.ffmpeg_how_path").to_string(),
+        };
+        ui.label(t!("settings.ffmpeg_path", path = f.path.display().to_string(), how = how));
+        match caps {
+            None => {
+                ui.label(RichText::new(t!("settings.ffmpeg_asking")).small().color(DIM));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+            }
+            Some(c) => {
+                ui.label(t!(
+                    "settings.ffmpeg_version",
+                    version = c.version.clone().unwrap_or_else(|| "?".into())
+                ));
+                let yes_no = if c.srt { t!("settings.ffmpeg_yes") } else { t!("settings.ffmpeg_no") };
+                ui.label(t!("settings.ffmpeg_srt", answer = yes_no));
+                let hardware = c.hardware();
+                let list = if hardware.is_empty() {
+                    t!("settings.ffmpeg_none").to_string()
+                } else {
+                    hardware.join(", ")
+                };
+                ui.label(t!("settings.ffmpeg_hardware", list = list));
+            }
+        }
+    }
+    match ffmpeg::problem(found.is_some(), caps, uses_srt(p)) {
+        Some(Problem::Missing) => {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                t!("settings.ffmpeg_missing", name = ffmpeg::VARIABLE),
+            );
+        }
+        Some(Problem::NoSrt) => {
+            ui.colored_label(egui::Color32::LIGHT_RED, t!("settings.ffmpeg_no_srt", name = ffmpeg::VARIABLE));
+        }
+        None => {}
+    }
 }
