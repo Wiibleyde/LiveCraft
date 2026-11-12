@@ -166,23 +166,38 @@ pub fn even_end(frames: u64, samples: u64, fps: u32) -> (u64, u64) {
 
 /// Sound a live input holds beyond the block about to be taken, in frames:
 /// enough to ride out uneven deliveries, little enough to stay with the picture.
-const SPARE_LOW: i64 = AUDIO_RATE as i64 / 200; // 5 ms
-const SPARE_HIGH: i64 = AUDIO_RATE as i64 * 3 / 200; // 15 ms
-const SPARE_TARGET: i64 = (SPARE_LOW + SPARE_HIGH) / 2;
+const SPARE_TARGET: i64 = AUDIO_RATE as i64 / 100; // 10 ms
 /// Beyond this, the input is cut back at once rather than eased back.
 const SPARE_CUT: i64 = AUDIO_RATE as i64 / 10; // 100 ms
 /// Blocks watched before deciding: devices deliver in bursts, and only the
 /// least sound left over a whole second says how much is really extra.
 const WINDOW: u32 = 50;
+/// Seconds whose least sound is remembered: a device that runs late now and
+/// then needs that margin, and easing it away would make it run dry again.
+const MEMORY: usize = 10;
+/// How strongly the speed follows the margin, per second: about a 40 s time
+/// constant. Fast enough to follow a device 300 ppm off, slow enough that the
+/// speed changes by a few dozen ppm at a time. A tone keeps its pitch, which a
+/// whole second taken a frame per block off (a thousandth) would not.
+const PULL: f64 = 0.05;
+/// Frames per block of speed change per frame the margin is off.
+const GAIN_P: f64 = PULL / WINDOW as f64;
+/// Frames per block the learnt speed moves per frame off, each second: with
+/// `GAIN_P`, critically damped, so it settles without swinging.
+const GAIN_I: f64 = PULL * PULL / 4.0 / WINDOW as f64;
 
 /// What to take from a live input's ring for one block.
 #[derive(Debug, PartialEq)]
 pub struct Take {
     /// Old frames to throw away first.
     pub discard: usize,
-    /// Frames to spread over the block: one more or one less than a block
-    /// changes the speed by a thousandth, which nobody hears.
+    /// Frames to take and spread over the block after its silence: one more
+    /// or one less than that changes the speed by a thousandth, which nobody
+    /// hears.
     pub frames: usize,
+    /// Frames of silence the block starts with: the margin the input lacked,
+    /// rebuilt at once.
+    pub silence: usize,
 }
 
 /// Keeps a live input in step with the clock. A microphone or a network
@@ -193,13 +208,29 @@ pub struct Drift {
     low: i64,
     seen: u32,
     held: bool,
-    step: i64,
+    lows: Vec<i64>,
+    /// The input's speed against our clock as learnt, in frames per block.
+    rate: f64,
+    /// Frames per block taken beyond the block: the speed, plus a pull back
+    /// towards the margin.
+    adjust: f64,
+    /// The part of a frame not taken yet.
+    owed: f64,
     resync: bool,
 }
 
 impl Default for Drift {
     fn default() -> Self {
-        Self { low: i64::MAX, seen: 0, held: false, step: 0, resync: false }
+        Self {
+            low: i64::MAX,
+            seen: 0,
+            held: false,
+            lows: Vec::new(),
+            rate: 0.0,
+            adjust: 0.0,
+            owed: 0.0,
+            resync: false,
+        }
     }
 }
 
@@ -216,29 +247,54 @@ impl Drift {
     /// come, like a file's, and none of it is cut.
     pub fn take(&mut self, queued: usize, block: usize, held: bool) -> Take {
         let spare = queued as i64 - block as i64;
+        let mut take = Take { discard: 0, frames: block, silence: 0 };
         if std::mem::take(&mut self.resync) && !held {
-            *self = Self::default();
-            let discard = (spare - SPARE_TARGET).max(0) as usize;
-            return Take { discard, frames: block };
+            // The device's clock did not change: its speed is kept.
+            self.restart_window(SPARE_TARGET);
+            take.discard = (spare - SPARE_TARGET).max(0) as usize;
+            return take;
         }
         self.low = self.low.min(spare);
         self.held |= held;
         self.seen += 1;
-        let mut discard = 0;
         if self.seen == WINDOW {
-            self.step = match self.low {
-                _ if self.held => 0,
-                low if low > SPARE_CUT => {
-                    discard = (low - SPARE_TARGET) as usize;
-                    0
-                }
-                low if low > SPARE_HIGH => 1,
-                low if low < SPARE_LOW => -1,
-                _ => 0,
-            };
+            let (low, held) = (self.low, self.held);
             (self.low, self.seen, self.held) = (i64::MAX, 0, false);
+            if held {
+                self.adjust = 0.0;
+                self.lows.clear();
+            } else if low > SPARE_CUT {
+                take.discard = (low - SPARE_TARGET) as usize;
+                self.restart_window(SPARE_TARGET);
+            } else if low < 0 {
+                // It ran dry, at the start or after a late delivery: that gap
+                // is there already, and taking the margin with it spares the
+                // seconds a frame per block would take to build it up.
+                take.silence = (SPARE_TARGET as usize).min(block);
+                take.frames = block - take.silence;
+                self.restart_window(SPARE_TARGET);
+            } else {
+                self.lows.push(low);
+                if self.lows.len() > MEMORY {
+                    self.lows.remove(0);
+                }
+                let off = (self.lows.iter().min().copied().unwrap_or(low) - SPARE_TARGET) as f64;
+                self.rate = (self.rate + GAIN_I * off).clamp(-1.0, 1.0);
+                self.adjust = (self.rate + GAIN_P * off).clamp(-1.0, 1.0);
+            }
         }
-        Take { discard, frames: (block as i64 + self.step) as usize }
+        if take.silence == 0 {
+            self.owed += self.adjust;
+            let step = self.owed.trunc();
+            self.owed -= step;
+            take.frames = (block as i64 + step as i64) as usize;
+        }
+        take
+    }
+
+    fn restart_window(&mut self, margin: i64) {
+        (self.low, self.seen, self.held) = (i64::MAX, 0, false);
+        self.lows = vec![margin];
     }
 }
 
@@ -341,7 +397,7 @@ mod tests {
                 let gone = (take.discard as u64).min(queued);
                 (head, queued) = (head + gone, queued - gone);
                 let have = (take.frames as u64).min(queued);
-                let first = (have > 0).then_some(head);
+                let first = (have > 0 && take.silence == 0).then_some(head);
                 (head, queued) = (head + have, queued - have);
 
                 let mut done = t + 200_000;
@@ -484,19 +540,52 @@ mod tests {
 
     #[test]
     fn a_live_input_that_piled_up_is_cut_back_then_eased() {
+        let block = Take { discard: 0, frames: 960, silence: 0 };
         let mut d = Drift::default();
         let mut takes: Vec<Take> = (0..WINDOW).map(|_| d.take(960 + 9600, 960, false)).collect();
         let last = takes.pop().unwrap();
-        assert!(takes.iter().all(|t| *t == Take { discard: 0, frames: 960 }));
-        assert_eq!(last, Take { discard: 9600 - SPARE_TARGET as usize, frames: 960 });
-        for _ in 0..WINDOW {
-            d.take(960 + 1000, 960, false);
+        assert!(takes.iter().all(|t| *t == block));
+        assert_eq!(last, Take { discard: 9600 - SPARE_TARGET as usize, ..block });
+        let eased: Vec<usize> =
+            (0..WINDOW * 2 * MEMORY as u32).map(|_| d.take(960 + 1000, 960, false).frames).collect();
+        assert!(eased.iter().all(|&f| f == 960 || f == 961), "a frame at a time at most");
+        assert!(eased[eased.len() - WINDOW as usize..].contains(&961), "a little extra is eased away");
+        let dry: Vec<Take> = (0..WINDOW).map(|_| d.take(900, 960, false)).collect();
+        let margin = SPARE_TARGET as usize;
+        assert_eq!(dry[WINDOW as usize - 1], Take { discard: 0, frames: 960 - margin, silence: margin });
+    }
+
+    /// The speed moves a few dozen ppm at a time, never a frame per block for
+    /// a whole second: a microphone 300 ppm fast, delivering 10 ms at a time,
+    /// is followed within a minute and then kept to the margin.
+    #[test]
+    fn a_fast_device_is_followed_without_swinging() {
+        let per_block = AUDIO_RATE as f64 * 1.0003 / 50.0;
+        let mut d = Drift::default();
+        let (mut queued, mut sent, mut delivered) = (0usize, 0f64, 0usize);
+        let mut extra = Vec::new();
+        for n in 0..50 * 600 {
+            sent += per_block;
+            while delivered + 480 <= sent as usize {
+                (delivered, queued) = (delivered + 480, queued + 480);
+            }
+            let take = d.take(queued, BLOCK, false);
+            queued -= take.discard.min(queued);
+            queued -= take.frames.min(queued);
+            if n % WINDOW as usize == 0 {
+                extra.push(0);
+            }
+            *extra.last_mut().unwrap() += take.frames as i64 - BLOCK as i64 + take.silence as i64;
+            if n >= 50 * 590 {
+                let spare_ms = queued as i64 * 1000 / AUDIO_RATE as i64;
+                assert!((0..30).contains(&spare_ms), "{spare_ms} ms waiting");
+            }
         }
-        assert_eq!(d.take(960 + 1000, 960, false).frames, 961, "a little extra is eased away");
-        for _ in 0..WINDOW {
-            d.take(900, 960, false);
-        }
-        assert_eq!(d.take(900, 960, false).frames, 959, "running dry stretches");
+        // 300 ppm is 14.4 frames a second.
+        let late: Vec<i64> = extra[60..].to_vec();
+        assert!(late.iter().all(|&e| (0..=40).contains(&e)), "{late:?}");
+        let mean = late.iter().sum::<i64>() as f64 / late.len() as f64;
+        assert!((mean - 14.4).abs() < 1.0, "{mean}");
     }
 
     /// A sender streaming a recording runs ahead until its ring is full and
@@ -504,11 +593,11 @@ mod tests {
     #[test]
     fn a_sender_waiting_for_room_is_left_alone() {
         let mut d = Drift::default();
+        let block = Take { discard: 0, frames: 960, silence: 0 };
         for n in 0..3 * WINDOW {
-            let take = d.take(48_000, 960, n % 7 == 0);
-            assert_eq!(take, Take { discard: 0, frames: 960 });
+            assert_eq!(d.take(48_000, 960, n % 7 == 0), block);
         }
         d.resync();
-        assert_eq!(d.take(48_000, 960, true), Take { discard: 0, frames: 960 });
+        assert_eq!(d.take(48_000, 960, true), block);
     }
 }

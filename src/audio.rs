@@ -240,16 +240,10 @@ impl Engine {
                     }
                     None => {
                         ring.discard(skipped as usize * FRAMES);
-                        Take { discard: 0, frames: FRAMES }
+                        Take { discard: 0, frames: FRAMES, silence: 0 }
                     }
                 };
-                ring.discard(take.discard);
-                if take.frames == FRAMES {
-                    ring.pull(&mut tmp);
-                } else {
-                    ring.pull(&mut raw[..take.frames * 2]);
-                    fit(&raw[..take.frames * 2], &mut tmp);
-                }
+                fill(ring, &take, &mut raw, &mut tmp);
                 let chain = chains.entry(strip.id).or_default();
                 chain.process(&mut tmp, &strip.cfg);
                 let fader = strip.cfg.volume * strip.cfg.volume;
@@ -421,6 +415,21 @@ fn balance(b: f32) -> (f32, f32) {
     ((1.0 - b).min(1.0), (1.0 + b).min(1.0))
 }
 
+/// Makes one block of an input's sound in `out` as `take` says: old sound
+/// thrown away, silence first if any, then the frames taken spread over the rest.
+fn fill(ring: &Ring, take: &Take, raw: &mut [f32], out: &mut [f32]) {
+    ring.discard(take.discard);
+    let (quiet, rest) = out.split_at_mut(take.silence * 2);
+    quiet.fill(0.0);
+    if take.frames * 2 == rest.len() {
+        ring.pull(rest);
+    } else {
+        let raw = &mut raw[..take.frames * 2];
+        ring.pull(raw);
+        fit(raw, rest);
+    }
+}
+
 /// Spreads stereo `src` over `out` by linear interpolation. Taking one frame
 /// more or less than a block then plays a thousandth faster or slower for
 /// 20 ms instead of jumping, and the block's first and last frames stay put
@@ -536,7 +545,7 @@ mod tests {
         let ring = Ring::new(1.0);
         let mut drift = Drift::default();
         let chunk = [0f32; 960];
-        let mut out = [0f32; BLOCK + 2];
+        let (mut raw, mut out) = ([0f32; BLOCK + 2], [0f32; BLOCK]);
         let (mut sent, mut pushed) = (0f64, 0usize);
         for n in 0..3500 {
             sent += FRAMES as f64 * 1.0005;
@@ -551,8 +560,7 @@ mod tests {
                 drift.resync();
             }
             let take = drift.take(ring.queued(), FRAMES, held(&ring, may_run_ahead(url)));
-            ring.discard(take.discard);
-            ring.pull(&mut out[..take.frames * 2]);
+            fill(&ring, &take, &mut raw, &mut out);
         }
         ring.queued()
     }
@@ -564,5 +572,45 @@ mod tests {
         let ms = |frames: usize| frames * 1000 / AUDIO_RATE;
         assert!(ms(waiting_after_a_stall("udp://127.0.0.1:5000")) < 30);
         assert!(ms(waiting_after_a_stall("https://h/show.m3u8")) > 900);
+    }
+
+    /// A 1 kHz tone from a device 100 ppm fast that delivers 40 ms at a time,
+    /// up to 10 ms late and now and then 45 ms late, as a virtual cable on a
+    /// busy machine does, through the loop's own path. Read back as the live
+    /// check reads its streams, it must still be one steady tone: correcting
+    /// a frame per block for a whole second would leave it a third of the sound.
+    #[test]
+    fn a_tone_from_an_uneven_device_keeps_its_pitch() {
+        let ring = Ring::new(1.0);
+        let mut drift = Drift::default();
+        let (mut raw, mut out) = ([0f32; BLOCK + 2], [0f32; BLOCK]);
+        let mut dice = 7u64;
+        let mut roll = |n: u64| {
+            dice = dice.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (dice >> 33) % n
+        };
+        let w = 1000.0 * std::f64::consts::TAU / AUDIO_RATE as f64;
+        let device_rate = AUDIO_RATE as f64 * 1.0001;
+        let (mut chunks, mut due) = (0u64, 0f64);
+        let mut heard = Vec::new();
+        for n in 0..50 * 10 {
+            let now = n as f64 * 0.02;
+            while due <= now {
+                let first = chunks * 1920;
+                let chunk: Vec<f32> =
+                    (first..first + 1920).flat_map(|i| [((i as f64 * w).sin() * 0.25) as f32; 2]).collect();
+                ring.push(&chunk);
+                chunks += 1;
+                let late = if chunks % 37 == 0 { 0.045 } else { roll(10_000) as f64 / 1e6 };
+                due = due.max((chunks + 1) as f64 * 1920.0 / device_rate + late);
+            }
+            let take = drift.take(ring.queued(), FRAMES, held(&ring, false));
+            fill(&ring, &take, &mut raw, &mut out);
+            heard.extend(out.iter().step_by(2));
+        }
+        let read = &heard[5 * AUDIO_RATE..9 * AUDIO_RATE];
+        if let Err(e) = crate::livecheck::judge_tone(read, AUDIO_RATE) {
+            panic!("{e}");
+        }
     }
 }
