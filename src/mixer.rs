@@ -5,6 +5,7 @@ use crate::engine::*;
 use crate::frame::Frame;
 use crate::fx;
 use crate::model::*;
+use crate::sets;
 use crate::sources::InputRt;
 use crate::text;
 use crate::transitions;
@@ -37,6 +38,8 @@ struct Plan {
     ftb: f32,
     preview: Option<u64>,
     fades: HashMap<u64, (Option<u64>, f32)>,
+    /// Virtual set cameras part way through a move.
+    set_views: HashMap<u64, SetView>,
     /// Every input someone can see or hear right now, however deep.
     showing: HashSet<u64>,
 }
@@ -83,6 +86,8 @@ impl State {
                 (*id, (f.from, t.min(1.0)))
             })
             .collect();
+        let set_views =
+            self.set_moves.keys().filter_map(|id| Some((*id, self.set_view(*id, now)?))).collect();
         let mut seen = self.on_air();
         seen.extend(self.project.preview);
         seen.extend(watched);
@@ -96,6 +101,7 @@ impl State {
             ftb: self.ftb_level,
             preview: self.project.preview,
             fades,
+            set_views,
         }
     }
 }
@@ -118,6 +124,8 @@ struct Mixer {
     black: Option<Arc<Frame>>,
     completions: HashMap<u64, u64>,
     positions: HashMap<u64, u64>,
+    /// Built-in set decors, by look, back or front, and size.
+    looks: HashMap<(SetLook, bool, usize, usize), Arc<Frame>>,
 }
 
 struct Ctx<'a> {
@@ -180,6 +188,14 @@ impl Mixer {
                 t.to_bits().hash(&mut h);
             }
         }
+        if let Kind::VirtualSet { background, foreground, .. } = input.kind {
+            for part in [background, foreground].into_iter().flatten() {
+                self.sig(part, c, depth + 1).hash(&mut h);
+            }
+            if let Some(v) = c.plan.set_views.get(&id) {
+                [v.zoom, v.x, v.y].map(f32::to_bits).hash(&mut h);
+            }
+        }
         if let Some(fill) = input.key.fill_input.filter(|_| input.key.mode == KeyMode::Fill) {
             self.sig(fill, c, depth + 1).hash(&mut h);
         }
@@ -226,6 +242,7 @@ impl Mixer {
         let mut base = match input.kind {
             Kind::Scene => None,
             Kind::Mix { output, .. } => output.and_then(|o| self.small_picture(o, c, depth + 1, size)),
+            Kind::VirtualSet { .. } => self.set_picture(id, c, depth, Some(size)),
             _ => c.rts.get(&id).and_then(|r| r.latest()).map(|f| Arc::new(f.thumbnail(w, h))),
         };
         if let (true, Some(src)) = (input.needs_processing(), &base) {
@@ -236,7 +253,7 @@ impl Mixer {
                 .and_then(|f| self.small_picture(f, c, depth + 1, size));
             base = Some(Arc::new(processed(src, input, fill.as_deref())));
         }
-        if !input.layers.iter().any(|l| l.visible) {
+        if !draws_layers_on_top(input) {
             return base;
         }
         let mut out = base.map_or_else(|| Frame::new(w, h), |b| (*b).clone());
@@ -256,6 +273,7 @@ impl Mixer {
         let mut base = match input.kind {
             Kind::Scene => None,
             Kind::Mix { output, .. } => self.mix_picture(id, output, c, depth),
+            Kind::VirtualSet { .. } => self.set_picture(id, c, depth, None),
             _ => c.rts.get(&id).and_then(|r| r.latest()),
         };
         if input.needs_processing()
@@ -285,10 +303,74 @@ impl Mixer {
         Some(Arc::new(out))
     }
 
+    /// A virtual set through its camera: backdrop, presenters, then the desk
+    /// in front, each moved and enlarged by the camera. `card` asks for it at
+    /// card size, made from card-size pictures.
+    fn set_picture(
+        &mut self,
+        id: u64,
+        c: &Ctx,
+        depth: u8,
+        card: Option<(usize, usize)>,
+    ) -> Option<Arc<Frame>> {
+        let input = c.plan.snap.inputs.get(&id)?;
+        let Kind::VirtualSet { look, background, foreground, .. } = input.kind else { return None };
+        let view = c.plan.set_views.get(&id).copied().or_else(|| sets::resting_view(&input.kind))?;
+        let (w, h) = card.unwrap_or((c.plan.snap.w, c.plan.snap.h));
+        let draw = |out: &mut Frame, pic: &Frame, l: &Layer| {
+            let mut seen = *l;
+            seen.placement = view.place(l.placement);
+            draw_layer(out, pic, &seen, 255);
+        };
+        let mut out = Frame::new(w, h);
+        let back = match background {
+            Some(b) => self.part(b, c, depth, card),
+            None => self.look(look, false, w, h),
+        };
+        if let Some(p) = back {
+            draw(&mut out, &p, &Layer::new(id, Placement::FULL));
+        }
+        for l in input.layers.iter().filter(|l| l.visible && l.input != id) {
+            if let Some(p) = self.part(l.input, c, depth, card) {
+                draw(&mut out, &p, l);
+            }
+        }
+        let front = match foreground {
+            Some(f) => self.part(f, c, depth, card),
+            None => self.look(look, true, w, h),
+        };
+        if let Some(p) = front {
+            draw(&mut out, &p, &Layer::new(id, Placement::FULL));
+        }
+        Some(Arc::new(out))
+    }
+
+    fn part(&mut self, id: u64, c: &Ctx, depth: u8, card: Option<(usize, usize)>) -> Option<Arc<Frame>> {
+        match card {
+            Some(size) => self.small_picture(id, c, depth + 1, size),
+            None => self.picture(id, c, depth + 1),
+        }
+    }
+
+    /// A built-in decor is drawn once per size, then reused.
+    fn look(&mut self, look: SetLook, front: bool, w: usize, h: usize) -> Option<Arc<Frame>> {
+        let key = (look, front, w, h);
+        if let Some(f) = self.looks.get(&key) {
+            return Some(f.clone());
+        }
+        let f = Arc::new(if front { sets::desk(look, w, h) } else { sets::backdrop(look, w, h) }?);
+        // Sizes left behind by a change of format are not worth keeping.
+        if self.looks.len() >= 8 {
+            self.looks.clear();
+        }
+        self.looks.insert(key, f.clone());
+        Some(f)
+    }
+
     fn render(&mut self, id: u64, c: &Ctx, depth: u8) -> Option<Arc<Frame>> {
         let input = c.plan.snap.inputs.get(&id)?;
         let base = self.base_picture(id, c, depth);
-        if !input.layers.iter().any(|l| l.visible) {
+        if !draws_layers_on_top(input) {
             return base;
         }
         let scene = matches!(input.kind, Kind::Scene);
@@ -318,7 +400,9 @@ impl Mixer {
             if !matches!(input.kind, Kind::Scene) {
                 v.push(Layer::new(input.id, Placement::FULL));
             }
-            v.extend(input.layers.iter().filter(|l| l.visible));
+            if !matches!(input.kind, Kind::VirtualSet { .. }) {
+                v.extend(input.layers.iter().filter(|l| l.visible));
+            }
             v
         };
         let (a, b) = (items(from), items(to));
@@ -364,6 +448,12 @@ impl Mixer {
 fn processed(src: &Frame, input: &Input, fill: Option<&Frame>) -> Frame {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fx::process(src, input, fill)))
         .unwrap_or_else(|_| src.clone())
+}
+
+/// A virtual set's layers are its presenters, already drawn inside it under
+/// its camera; everywhere else layers go on top of the input's picture.
+fn draws_layers_on_top(input: &Input) -> bool {
+    !matches!(input.kind, Kind::VirtualSet { .. }) && input.layers.iter().any(|l| l.visible)
 }
 
 fn draw_layer(out: &mut Frame, pic: &Frame, l: &Layer, opacity: u8) {
@@ -1017,5 +1107,106 @@ mod tests {
         draw_overlay(&mut out, &pic, &OverlayDraw { id: 1, t: 1.0, cfg });
         assert_eq!(out.data[(60 * 100 + 60) * 4 + 1], 255);
         assert_eq!(out.data[(10 * 100 + 10) * 4 + 1], 0);
+    }
+
+    /// Someone in front of a green screen, standing in the middle.
+    fn presenter(w: usize, h: usize) -> Frame {
+        let mut f = Frame::solid(w, h, [0, 255, 0]);
+        f.fill_round(0.4 * w as f32, 0.2 * h as f32, 0.2 * w as f32, 0.8 * h as f32, 0.0, [200, 30, 30], 255);
+        f
+    }
+
+    fn set_desk(camera: usize) -> (State, HashMap<u64, Arc<InputRt>>) {
+        let mut p = Project::blank();
+        p.out_w = 320;
+        p.out_h = 180;
+        let mut person = Input::new(1, "Présentatrice", Kind::Bars);
+        person.key.mode = KeyMode::Chroma;
+        let mut kind = sets::new_set(SetLook::Studio);
+        if let Kind::VirtualSet { camera: c, .. } = &mut kind {
+            *c = camera;
+        }
+        let set = Input::new(2, "Plateau", kind).with_layers(vec![Layer::new(1, sets::presenter_spot(0))]);
+        p.inputs = vec![person, set];
+        let rt = InputRt::new(false, true);
+        rt.publish(presenter(320, 180));
+        (State::new(p), HashMap::from([(1, rt)]))
+    }
+
+    fn px(f: &Frame, x: f32, y: f32) -> [u8; 4] {
+        let i = (((y * f.h as f32) as usize) * f.w + (x * f.w as f32) as usize) * 4;
+        [f.data[i], f.data[i + 1], f.data[i + 2], f.data[i + 3]]
+    }
+
+    fn red(p: [u8; 4]) -> bool {
+        p[0] > 150 && p[1] < 80 && p[2] < 80
+    }
+
+    /// Width of the presenter across the middle row, in pixels.
+    fn body_width(f: &Frame) -> usize {
+        (0..f.w).filter(|&x| red(px(f, (x as f32 + 0.5) / f.w as f32, 0.5))).count()
+    }
+
+    fn set_picture_at(s: &mut State, rts: &HashMap<u64, Arc<InputRt>>, now: Instant) -> Arc<Frame> {
+        let plan = s.plan(now, Vec::new());
+        let c = Ctx { plan: &plan, rts };
+        Mixer::default().picture(2, &c, 0).unwrap()
+    }
+
+    #[test]
+    fn a_keyed_presenter_stands_between_the_decor_and_the_desk() {
+        let (mut s, rts) = set_desk(0);
+        let f = set_picture_at(&mut s, &rts, Instant::now());
+        let back = sets::backdrop(SetLook::Studio, 320, 180).unwrap();
+        assert!(red(px(&f, 0.5, 0.5)), "the presenter shows: {:?}", px(&f, 0.5, 0.5));
+        assert_eq!(px(&f, 0.3, 0.5), px(&back, 0.3, 0.5), "the green around the presenter is gone");
+        assert_eq!(&px(&f, 0.5, 0.72)[..3], &[226, 230, 238], "the desk hides the presenter's legs");
+        assert!(f.data.chunks(4).all(|p| p[3] == 255), "a set is opaque");
+        let width = body_width(&f);
+        assert!((36..=40).contains(&width), "at full width the body is 12 % of the set: {width}");
+
+        let plan = s.plan(Instant::now(), Vec::new());
+        let c = Ctx { plan: &plan, rts: &rts };
+        let card = Mixer::default().small_picture(2, &c, 0, (64, 36)).unwrap();
+        assert!(red(px(&card, 0.5, 0.5)) && !red(px(&card, 0.3, 0.5)), "the card shows the same set");
+    }
+
+    #[test]
+    fn a_close_preset_enlarges_the_set_around_its_centre() {
+        let (mut wide, rts) = set_desk(0);
+        let (mut close, _) = set_desk(2);
+        let a = set_picture_at(&mut wide, &rts, Instant::now());
+        let b = set_picture_at(&mut close, &rts, Instant::now());
+        let ratio = body_width(&b) as f32 / body_width(&a) as f32;
+        assert!((ratio - 2.4).abs() < 0.15, "the close-up zooms 2.4 times: {ratio}");
+        assert!(red(px(&b, 0.38, 0.45)) && !red(px(&a, 0.38, 0.45)));
+        assert!(b.data.chunks(4).all(|p| p[3] == 255), "no edge of the set shows when zoomed");
+    }
+
+    /// Each frame of a move is a little closer than the last, with no jump,
+    /// and the last one is the preset itself.
+    #[test]
+    fn a_camera_move_passes_smoothly_through_the_views_between() {
+        let (mut s, rts) = set_desk(0);
+        let (mut close, _) = set_desk(2);
+        let target = body_width(&set_picture_at(&mut close, &rts, Instant::now()));
+        let t0 = Instant::now();
+        s.set_camera(2, 2, Some(1000), t0);
+        let mut widths = Vec::new();
+        for n in 0..=20 {
+            let now = t0 + Duration::from_millis(n * 50);
+            s.advance(now, 0.05);
+            widths.push(body_width(&set_picture_at(&mut s, &rts, now)));
+        }
+        assert!(s.set_moves.is_empty(), "the move is over");
+        assert_eq!(widths[20], target, "{widths:?}");
+        for w in widths.windows(2) {
+            assert!(w[1] >= w[0], "the camera goes back: {widths:?}");
+            assert!(w[1] - w[0] <= 10, "a jump of {} pixels: {widths:?}", w[1] - w[0]);
+        }
+        // The body grows two pixels at a time, one on each side.
+        let largest = widths.windows(2).map(|w| w[1] - w[0]).max().unwrap();
+        let (first, last) = (widths[1] - widths[0], widths[20] - widths[19]);
+        assert!(first <= 2 && last <= 2 && largest >= 4, "starts and stops gently: {widths:?}");
     }
 }

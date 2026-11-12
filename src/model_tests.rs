@@ -97,3 +97,12 @@ fn changing_what_a_guest_hears_keeps_them_connected() {
     assert!(call("a", "q").restarts_source(&before), "new TURN settings need a new call");
     assert!(Kind::Clock.restarts_source(&Kind::Bars));
 }
+
+/// Later versions will add to sets too: what is missing takes its default.
+#[test]
+fn a_virtual_set_with_missing_fields_still_opens() {
+    let kind: Kind = serde_json::from_str(r#"{"VirtualSet":{"cameras":[{"name":"Large"}]}}"#).unwrap();
+    let Kind::VirtualSet { look, background, cameras, camera, .. } = kind else { panic!("{kind:?}") };
+    assert_eq!((look, background, camera), (SetLook::Studio, None, 0));
+    assert_eq!(cameras[0].view, SetView::default());
+}
