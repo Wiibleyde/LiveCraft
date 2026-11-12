@@ -72,7 +72,15 @@ pub fn optical_drives_cached() -> Vec<String> {
     }
 }
 
+/// Elsewhere than Windows there are no drive letters to list: a disc is
+/// opened from an image or a folder.
+#[cfg(not(windows))]
+fn optical_drives() -> Vec<String> {
+    Vec::new()
+}
+
 /// Drive letters of the computer's optical drives, such as `D:\`.
+#[cfg(windows)]
 fn optical_drives() -> Vec<String> {
     use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     // DRIVE_CDROM, as documented for GetDriveTypeW; DVD drives report it too.

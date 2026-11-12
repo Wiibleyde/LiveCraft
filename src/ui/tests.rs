@@ -812,7 +812,7 @@ fn a_dropped_dvd_folder_plays_and_steps_through_chapters() {
     until(&mut h, "trois chapitres en rouge", || {
         rt.items.load(Ordering::Relaxed) == 3 && near(centre(&rt), RED)
     });
-    let on = |rt: &sources::InputRt, n: u64, colour| {
+    let on = |rt: &crate::sources::InputRt, n: u64, colour| {
         rt.item.load(Ordering::Relaxed) == n && near(centre(rt), colour)
     };
     click(&mut h, "Chapitre suivant disque");
