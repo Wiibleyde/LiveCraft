@@ -38,7 +38,8 @@ audio routing and the state you left them in. Your file is never changed; you sa
 ### ⚡ Light on purpose
 
 What nobody is watching costs next to nothing. Cards are drawn at card size, pages off air slow down
-on their own, and all web inputs share a single browser.
+on their own, and all web inputs share a single browser. Files heavier than 1080p60 and network
+streams are decoded by the graphics card, with software taking over by itself if the card fails.
 
 ### 🔌 Scriptable from the start
 
@@ -105,6 +106,7 @@ Other ways to start it:
 livecraft --project show.vmix             # open a project, .vmix or .livecraft
 livecraft --import-report show.vmix       # say what a project keeps, without opening it
 livecraft --selftest some-folder          # real end-to-end run: plays, records, streams, replays
+livecraft --soak some-folder 45m          # a whole show for 45 minutes, memory and timing watched
 livecraft --livecheck some-folder         # virtual camera and microphone, streamed and read back
 livecraft --screenshot out.png            # start, save a picture of the window, quit
 livecraft --lang en                       # start in English (or fr), and keep that choice

@@ -25,6 +25,7 @@ so a slow window cannot hold up the show.
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
 | `sets.rs` | Virtual sets: built-in decors and camera moves; the mixer composes them |
 | `sources.rs`, `playback.rs`, `browser.rs`, `dvd.rs` | Where pictures and sound come from |
+| `decode.rs` | Which files and streams the graphics card decodes |
 | `call.rs` | Video calls: the guest's link and page, and the call received in the windowless browser |
 | `slides.rs` | Presentations, turned into one picture per slide by PowerPoint or LibreOffice |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
@@ -38,6 +39,7 @@ so a slow window cannot hold up the show.
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
 | `i18n.rs`, `locales/` | Interface text: `t!("key")` reads it from one catalog per language |
 | `selftest.rs`, `playtest.rs`, `calltest.rs` | `--selftest`: real end-to-end checks |
+| `soak.rs` | `--soak`: a whole show left running, with memory, timing and outputs watched |
 | `livecheck.rs` | `--livecheck`: a virtual camera and microphone streamed to a local server and read back |
 
 ## Doing less
@@ -47,6 +49,10 @@ so a slow window cannot hold up the show.
 - Sources know whether anyone is watching. A web page off air sends about two pictures a second.
 - Big buffers are reused, because fresh memory costs more than the work done on it.
 - A LUT is reduced to fit the processor's fast memory and applied without branches.
+- Files heavier than 1080p60 and network streams are decoded by the graphics card (D3D11). Smaller
+  files stay in software, where they start and seek half a second sooner. A card that fails to open,
+  ends a file early or goes quiet on a stream hands over to software, which carries on from the same
+  place.
 
 ## Rules worth keeping
 

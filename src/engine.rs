@@ -30,6 +30,42 @@ pub struct Stats {
     pub struggling: AtomicBool,
     pub cpu_self: AtomicU32,
     pub cpu_total: AtomicU32,
+    pub tick_times: TickTimes,
+}
+
+pub const TICK_STEP_US: u64 = 250;
+pub const TICK_BUCKETS: usize = 512;
+
+/// How long each tick of the video loop took, in 250 µs steps up to 128 ms.
+/// One counter per step costs an addition a tick, and two readings give the
+/// percentiles of any stretch of a long show.
+pub struct TickTimes {
+    buckets: [AtomicU64; TICK_BUCKETS],
+    max_us: AtomicU64,
+}
+
+impl Default for TickTimes {
+    fn default() -> Self {
+        Self { buckets: std::array::from_fn(|_| AtomicU64::new(0)), max_us: AtomicU64::new(0) }
+    }
+}
+
+impl TickTimes {
+    pub fn record(&self, took: Duration) {
+        let us = took.as_micros() as u64;
+        let step = ((us / TICK_STEP_US) as usize).min(TICK_BUCKETS - 1);
+        self.buckets[step].fetch_add(1, Ordering::Relaxed);
+        self.max_us.fetch_max(us, Ordering::Relaxed);
+    }
+
+    pub fn counts(&self) -> Vec<u64> {
+        self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect()
+    }
+
+    /// The longest tick since the previous call.
+    pub fn take_max_us(&self) -> u64 {
+        self.max_us.swap(0, Ordering::Relaxed)
+    }
 }
 
 /// A window showing something other than the plain output.
@@ -151,16 +187,16 @@ impl Engine {
     /// Starts a source for every input. With `keep`, each carries on from where
     /// its previous source stood, for when only the format changes.
     fn start_all_inputs(&self, keep: bool) {
-        let (inputs, w, h, fps) = {
+        let (inputs, w, h, fps, card) = {
             let s = self.state.lock().unwrap();
             let p = &s.project;
-            (p.inputs.clone(), p.out_w, p.out_h, p.fps)
+            (p.inputs.clone(), p.out_w, p.out_h, p.fps, p.hardware_decoding)
         };
         let mut rts = self.rts.lock().unwrap();
         let old: HashMap<u64, Arc<InputRt>> = std::mem::take(&mut *rts);
         for i in &inputs {
             let resume = old.get(&i.id).filter(|_| keep).map(|r| r.resume());
-            rts.insert(i.id, sources::start_seeded(i, w, h, fps, None, resume));
+            rts.insert(i.id, sources::start_seeded(i, w, h, fps, card, None, resume));
         }
         for rt in old.values() {
             rt.shutdown();
@@ -176,13 +212,13 @@ impl Engine {
     }
 
     pub fn add_input(&self, input: Input) {
-        let (w, h, fps) = {
+        let (w, h, fps, card) = {
             let mut s = self.state.lock().unwrap();
             s.project.inputs.push(input.clone());
             s.version += 1;
-            (s.project.out_w, s.project.out_h, s.project.fps)
+            (s.project.out_w, s.project.out_h, s.project.fps, s.project.hardware_decoding)
         };
-        let rt = sources::start(&input, w, h, fps);
+        let rt = sources::start(&input, w, h, fps, card);
         self.rts.lock().unwrap().insert(input.id, rt);
     }
 
@@ -199,12 +235,12 @@ impl Engine {
     pub fn undo(&self) {
         let back = self.state.lock().unwrap().undo.take();
         let Some(closed) = back else { return };
-        let (w, h, fps) = {
+        let (w, h, fps, card) = {
             let s = self.state.lock().unwrap();
-            (s.project.out_w, s.project.out_h, s.project.fps)
+            (s.project.out_w, s.project.out_h, s.project.fps, s.project.hardware_decoding)
         };
         // The running source first, so the input never appears without one.
-        let rt = sources::start(&closed.input, w, h, fps);
+        let rt = sources::start(&closed.input, w, h, fps, card);
         self.rts.lock().unwrap().insert(closed.input.id, rt);
         self.state.lock().unwrap().restore(closed);
     }
@@ -215,20 +251,39 @@ impl Engine {
         let found = {
             let mut s = self.state.lock().unwrap();
             s.version += 1;
-            let (w, h, fps) = (s.project.out_w, s.project.out_h, s.project.fps);
-            s.input(id).cloned().map(|i| (i, w, h, fps))
+            let (w, h, fps, card) =
+                (s.project.out_w, s.project.out_h, s.project.fps, s.project.hardware_decoding);
+            s.input(id).cloned().map(|i| (i, w, h, fps, card))
         };
-        if let Some((input, w, h, fps)) = found {
+        if let Some((input, w, h, fps, card)) = found {
             // The old picture stays up until the new one is ready: editing a
             // title on air must not blink.
             let old = self.rt(id);
             let seed = old.as_ref().and_then(|r| r.latest());
             let resume = old.as_ref().filter(|_| keep).map(|r| r.resume());
-            let rt = sources::start_seeded(&input, w, h, fps, seed, resume);
+            let rt = sources::start_seeded(&input, w, h, fps, card, seed, resume);
             if let Some(old) = self.rts.lock().unwrap().insert(id, rt) {
                 old.shutdown();
             }
             self.state.lock().unwrap().version += 1;
+        }
+    }
+
+    /// Turns decoding on the graphics card on or off. Only the inputs it can
+    /// concern restart, and they carry on from where they stood.
+    pub fn set_hardware_decoding(&self, on: bool) {
+        let concerned: Vec<u64> = {
+            let mut s = self.state.lock().unwrap();
+            s.project.hardware_decoding = on;
+            let p = &s.project;
+            p.inputs
+                .iter()
+                .filter(|i| matches!(i.kind, Kind::Video { .. } | Kind::List { .. } | Kind::Network { .. }))
+                .map(|i| i.id)
+                .collect()
+        };
+        for id in concerned {
+            self.restart_input(id, true);
         }
     }
 
