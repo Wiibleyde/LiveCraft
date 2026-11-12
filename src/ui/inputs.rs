@@ -615,6 +615,37 @@ impl App {
                 self.editing = Some(id);
                 ui.close();
             }
+            for net in Net::ALL {
+                ui.menu_button(net.label(), |ui| {
+                    ui.set_max_width(340.0);
+                    self.look_for_net_sources();
+                    match self.net_found(net) {
+                        None => {
+                            ui.label(RichText::new(t!("inputs.net_searching")).color(DIM));
+                        }
+                        Some(Err(missing)) => {
+                            ui.label(RichText::new(missing).color(DIM));
+                        }
+                        Some(Ok(list)) => {
+                            if list.is_empty() {
+                                ui.label(RichText::new(t!("inputs.net_none", name = net.label())).color(DIM));
+                            }
+                            for source in list {
+                                if ui.button(&source).clicked() {
+                                    self.add_input(&source, net.input(source.clone()));
+                                    ui.close();
+                                }
+                            }
+                        }
+                    }
+                    ui.separator();
+                    if ui.button(t!("inputs.net_other", name = net.label())).clicked() {
+                        let id = self.add_input(net.label(), net.input(String::new()));
+                        self.editing = Some(id);
+                        ui.close();
+                    }
+                });
+            }
             if ui.button(t!("inputs.web_page")).clicked() {
                 let kind = Kind::Browser { url: "https://".into(), alpha: false };
                 let id = self.add_input(t!("inputs.web_page"), kind);

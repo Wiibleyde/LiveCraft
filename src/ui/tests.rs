@@ -268,6 +268,8 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
         Kind::PowerPoint { path: "x.pptx".into() },
         Kind::Camera { device: "x".into(), ptz_host: String::new() },
         Kind::Network { url: "srt://127.0.0.1:1".into(), buffer_ms: 0 },
+        Kind::Ndi { source: String::new() },
+        Kind::Omt { source: "omt://127.0.0.1:1".into() },
         Kind::Browser { url: "about:blank".into(), alpha: false },
         Kind::Microphone { device: "x".into() },
         Kind::Designed { objects: Vec::new(), anim_ms: 500 },
@@ -344,6 +346,95 @@ fn an_empty_desk_shows_its_hint_and_buttons_are_safe() {
     wait(&mut h, 200);
     click(&mut h, "Fondu au noir");
     assert!(project(&h).inputs.is_empty());
+    end(h);
+}
+
+#[test]
+fn an_ndi_or_omt_input_comes_from_the_menu_and_asks_for_its_source() {
+    let mut h = desk(small_project());
+    let before = project(&h).inputs.len();
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "OMT");
+    click(&mut h, "Autre source OMT…");
+    let p = project(&h);
+    assert_eq!(p.inputs.len(), before + 1);
+    let added = p.inputs.last().unwrap().clone();
+    assert_eq!(added.kind, Kind::Omt { source: String::new() });
+    assert_eq!(h.state().editing, Some(added.id), "ses réglages s'ouvrent pour choisir la source");
+    h.get_by_label("Nom exact");
+    let rt = h.state().engine.rt(added.id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !rt.status().is_some_and(|s| s.contains("Choisissez une source OMT")) {
+        assert!(Instant::now() < deadline, "la carte doit dire quoi faire : {:?}", rt.status());
+        wait(&mut h, 20);
+    }
+    end(h);
+}
+
+#[test]
+fn network_outputs_start_and_stop_from_the_settings() {
+    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = desk(small_project());
+    h.state_mut().settings_open = true;
+    h.state_mut().settings_tab = 2;
+    h.run_steps(3);
+    let engine = h.state().engine.clone();
+    click(&mut h, "Démarrer NDI / OMT");
+    assert!(!engine.is_net());
+    let said =
+        |h: &Harness<'static, App>| h.state().message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said(&h).contains("Cochez"), "rien de coché doit le dire : {}", said(&h));
+    click(&mut h, "NDI");
+    assert!(project(&h).ndi_out.enabled, "la case cochée doit rester dans le projet");
+    click(&mut h, "Démarrer NDI / OMT");
+    match crate::netvideo::Net::Ndi.available() {
+        Ok(()) => {
+            assert!(engine.is_net(), "{}", said(&h));
+            assert_eq!(engine.net.lock().unwrap()[0].name, "LiveCraft");
+            click(&mut h, "Arrêter NDI / OMT");
+            assert!(!engine.is_net());
+        }
+        // Without the runtime, nothing starts and the reason is on screen.
+        Err(missing) => {
+            assert!(!engine.is_net());
+            assert_eq!(said(&h), missing);
+        }
+    }
+    end(h);
+}
+
+/// Both tests offer the same source names, and a name is taken for the whole
+/// process: they run one after the other.
+static NET_NAMES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Stop then Start at once: the sender just stopped is still being torn down,
+/// and the new one must not fail on its name ("nom déjà pris").
+#[test]
+fn a_network_output_starts_again_right_after_it_stops() {
+    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = desk(small_project());
+    h.state_mut().settings_open = true;
+    h.state_mut().settings_tab = 2;
+    h.run_steps(3);
+    let engine = h.state().engine.clone();
+    let (ndi, omt) =
+        (crate::netvideo::Net::Ndi.available().is_ok(), crate::netvideo::Net::Omt.available().is_ok());
+    if !ndi && !omt {
+        end(h);
+        return;
+    }
+    if ndi {
+        click(&mut h, "NDI");
+    }
+    if omt {
+        click(&mut h, "OMT");
+    }
+    for round in 0..4 {
+        click(&mut h, "Démarrer NDI / OMT");
+        assert!(engine.is_net(), "tour {round} : le démarrage doit réussir juste après l'arrêt");
+        click(&mut h, "Arrêter NDI / OMT");
+        assert!(!engine.is_net());
+    }
     end(h);
 }
 

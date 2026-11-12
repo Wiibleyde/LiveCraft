@@ -4,6 +4,7 @@
 
 use crate::frame::Frame;
 use crate::model::{Input, Kind, ListItem, TitleObject, TitleStyle};
+use crate::netvideo::{self, Net};
 use crate::titles::{self, Stroke};
 use crate::{playback, text};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -35,6 +36,10 @@ impl Ring {
 
     pub fn room(&self) -> usize {
         self.cap.saturating_sub(self.q.lock().unwrap().len())
+    }
+
+    pub fn len(&self) -> usize {
+        self.q.lock().unwrap().len()
     }
 
     /// Adds samples, dropping the oldest if the reader fell behind.
@@ -403,6 +408,8 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             args.extend(["-i".into(), url]);
             run_capture(&rt, args, w, h, fps);
         }
+        Kind::Ndi { source } => netvideo::run_input(&rt, Net::Ndi, &source, w, h),
+        Kind::Omt { source } => netvideo::run_input(&rt, Net::Omt, &source, w, h),
         Kind::Screen => {
             let args = vec![
                 "-f".into(),
