@@ -1,9 +1,11 @@
 //! The sound thread: treats each input, sums the Master and A to G buses,
 //! feeds headphones and output devices, and hands sound to recordings.
 
+use crate::clap;
 use crate::dsp::Chain;
 use crate::engine::Engine;
 use crate::model::{AudioCfg, AudioPick, Kind, ReturnSound};
+use crate::plugins::{Owner, Rack};
 use crate::sources::{AUDIO_RATE, Ring};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::{HashMap, HashSet};
@@ -12,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const FRAMES: usize = AUDIO_RATE / 50; // 20 ms per block
+pub(crate) const FRAMES: usize = AUDIO_RATE / 50; // 20 ms per block
 const BLOCK: usize = FRAMES * 2;
 
 /// Name meaning the system's default output.
@@ -146,7 +148,7 @@ impl Engine {
             .filter(|i| i.kind.has_audio())
             .map(|i| Strip {
                 id: i.id,
-                cfg: i.audio.clone(),
+                cfg: i.audio.without_plugins(),
                 audible: !i.audio.muted && (!i.audio.follow || air.contains(&i.id)),
                 solo: s.solo.contains(&i.id),
                 always_on: is_always_on(&i.kind),
@@ -187,6 +189,7 @@ impl Engine {
     }
 
     pub(crate) fn audio_loop(self: Arc<Self>) {
+        clap::this_thread_is_audio();
         // Asking the system about devices can be slow, so it happens beside
         // the sound, which must not miss a block.
         self.list_audio_devices();
@@ -206,18 +209,25 @@ impl Engine {
         let mut buses = vec![vec![0f32; BLOCK]; 8];
         let mut solo = vec![0f32; BLOCK];
         // What each video call guest adds to Master, to take back out of
-        // what they hear.
+        // what they hear. It is taken out of `dry`, Master as the inputs
+        // send it, before the plug-ins of buses and Master: those change the
+        // guest's voice in the mix, which would then no longer cancel.
         let mut own: HashMap<u64, Vec<f32>> = HashMap::new();
+        let mut dry = vec![0f32; BLOCK];
         let mut back = vec![0f32; BLOCK];
+        let mut rack = Rack::new(&self.plugins);
         let mut next = Instant::now();
         while !self.quit.load(Ordering::Relaxed) {
             let mix = self.read_mix();
+            rack.refresh();
             buses.iter_mut().for_each(|b| b.fill(0.0));
             solo.fill(0.0);
             chains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             gains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             own.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             own.values_mut().for_each(|v| v.fill(0.0));
+            dry.fill(0.0);
+            let minus = mix.strips.iter().any(|s| s.call == Some(ReturnSound::MasterMinusGuest));
             for strip in &mix.strips {
                 let Some(rt) = self.rt(strip.id) else { continue };
                 let Some(ring) = &rt.audio else { continue };
@@ -228,6 +238,7 @@ impl Engine {
                 ring.pull(&mut tmp);
                 let chain = chains.entry(strip.id).or_default();
                 chain.process(&mut tmp, &strip.cfg);
+                rack.run(Owner::Input(strip.id), &mut tmp);
                 let fader = strip.cfg.volume * strip.cfg.volume;
                 let target = if strip.audible { fader } else { 0.0 };
                 let from = *gains.get(&strip.id).unwrap_or(&target);
@@ -236,7 +247,7 @@ impl Engine {
                 let (pan_l, pan_r) = balance(strip.cfg.balance);
                 let mut own_block = (strip.call == Some(ReturnSound::MasterMinusGuest))
                     .then(|| own.entry(strip.id).or_insert_with(|| vec![0f32; BLOCK]));
-                let to_master = own_block.as_ref().map_or(0.0, |_| reach_of_master(&strip.cfg, &mix.buses));
+                let to_master = if minus { reach_of_master(&strip.cfg, &mix.buses) } else { 0.0 };
                 let mut peak = 0f32;
                 for (n, pair) in tmp.as_chunks::<2>().0.iter().enumerate() {
                     let g = from + step * n as f32;
@@ -250,6 +261,10 @@ impl Engine {
                             bus[n * 2] += l * send;
                             bus[n * 2 + 1] += r * send;
                         }
+                    }
+                    if minus {
+                        dry[n * 2] += l * to_master;
+                        dry[n * 2 + 1] += r * to_master;
                     }
                     if let Some(block) = own_block.as_mut() {
                         block[n * 2] = l * to_master;
@@ -270,6 +285,7 @@ impl Engine {
             for b in 1..8 {
                 let (level, to_master) = mix.buses[b - 1];
                 let (head, tail) = buses.split_at_mut(b);
+                rack.run(Owner::Bus(b as u8), &mut tail[0]);
                 tail[0].iter_mut().for_each(|v| *v = (*v * level).clamp(-1.0, 1.0));
                 if to_master {
                     for (m, v) in head[0].iter_mut().zip(tail[0].iter()) {
@@ -279,6 +295,7 @@ impl Engine {
                 let peak = tail[0].iter().fold(0f32, |m, v| m.max(v.abs()));
                 self.bus_peaks[b].store(peak.to_bits(), Ordering::Relaxed);
             }
+            rack.run(Owner::Bus(0), &mut buses[0]);
             buses[0].iter_mut().for_each(|v| *v = (*v * mix.master).clamp(-1.0, 1.0));
             let peak = buses[0].iter().fold(0f32, |m, v| m.max(v.abs()));
             self.bus_peaks[0].store(peak.to_bits(), Ordering::Relaxed);
@@ -286,7 +303,8 @@ impl Engine {
             let default = default_name.lock().unwrap().clone();
             play_routes(&mix, &buses, &solo, &mut devices, &default);
             self.feed_encoders(&buses);
-            self.feed_calls(&mix, &buses, &own, &mut back);
+            self.feed_calls(&mix, &buses, (&dry, &own), &mut back);
+            rack.idle();
 
             next += Duration::from_millis(20);
             let now = Instant::now();
@@ -298,6 +316,7 @@ impl Engine {
             // Slightly late runs the next block at once: recordings need
             // every block to stay in step with the picture.
         }
+        rack.stop();
     }
 
     fn list_audio_devices(&self) {
@@ -331,19 +350,24 @@ impl Engine {
     }
 
     /// Sends each connected guest what they asked to hear.
-    fn feed_calls(&self, mix: &Mix, buses: &[Vec<f32>], own: &HashMap<u64, Vec<f32>>, back: &mut [f32]) {
+    /// `dry` is Master as the inputs send it, `own` what each guest sends it.
+    fn feed_calls(
+        &self,
+        mix: &Mix,
+        buses: &[Vec<f32>],
+        (dry, own): (&[f32], &HashMap<u64, Vec<f32>>),
+        back: &mut [f32],
+    ) {
         for strip in &mix.strips {
             let Some(sound) = strip.call else { continue };
             let Some(rt) = self.rt(strip.id) else { continue };
             let Some(link) = rt.call.as_ref().filter(|l| l.is_connected()) else { continue };
             match sound {
                 ReturnSound::MasterMinusGuest => {
-                    // Master was clipped after the guest went in, so this is
-                    // exact except on peaks that were clipping anyway.
                     let mine = own.get(&strip.id);
                     for (n, v) in back.iter_mut().enumerate() {
-                        let guest = mine.map_or(0.0, |m| m[n]) * mix.master;
-                        *v = (buses[0][n] - guest).clamp(-1.0, 1.0);
+                        let guest = mine.map_or(0.0, |m| m[n]);
+                        *v = ((dry[n] - guest) * mix.master).clamp(-1.0, 1.0);
                     }
                     link.sound.push(back);
                 }

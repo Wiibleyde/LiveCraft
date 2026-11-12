@@ -265,6 +265,7 @@ fn every_tab_of_input_settings_opens_for_every_kind_of_input() {
         Kind::List { items: Vec::new(), auto_next: true, auto_first: false, looped: false, shuffle: false },
         Kind::Photos { folder: "x".into(), seconds: 0.0 },
         Kind::ImageSequence { first: "x0001.png".into(), fps: 30.0, looped: true },
+        Kind::Dvd { path: "C:/introuvable/disque.iso".into(), title: 1 },
         Kind::PowerPoint { path: "x.pptx".into() },
         Kind::Camera { device: "x".into(), ptz_host: String::new() },
         Kind::Network { url: "srt://127.0.0.1:1".into(), buffer_ms: 0 },
@@ -880,6 +881,62 @@ fn a_virtual_set_is_made_from_the_menu_and_its_camera_glides_between_presets() {
     end(h);
 }
 
+/// Generous: other tests and builds share the machine, and a DVD title takes a moment to open.
+fn until(h: &mut Harness<'static, App>, what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !done() {
+        assert!(Instant::now() < deadline, "attendu sans succès : {what}");
+        wait(h, 30);
+    }
+}
+
+/// Dropping a disc's VIDEO_TS folder makes a DVD input, whose card and
+/// settings step through chapters and switch titles.
+#[test]
+fn a_dropped_dvd_folder_plays_and_steps_through_chapters() {
+    use crate::playtest::{BLUE, GREEN, RED, centre, near};
+    let dir = std::env::temp_dir().join(format!("livecraft-dvd-ui-{}", std::process::id()));
+    let Some(disc) = crate::playtest::dvd_fixture(&dir.to_string_lossy()).unwrap() else {
+        eprintln!("ignoré : dvdauthor ou le démultiplexeur dvdvideo manque");
+        return;
+    };
+    // An empty desk, so the new card is on screen to be clicked.
+    let mut p = Project::blank();
+    p.out_w = 320;
+    p.out_h = 180;
+    let mut h = desk(p);
+    h.state_mut().add_file(&std::path::Path::new(&disc).join("VIDEO_TS"));
+    h.run_steps(3);
+    let input = project(&h).inputs.last().cloned().unwrap();
+    assert_eq!(input.kind, Kind::Dvd { path: disc.clone(), title: 1 }, "the disc, not the VIDEO_TS folder");
+    assert_eq!(input.name, "disque");
+    let rt = h.state().engine.rt(input.id).unwrap();
+    until(&mut h, "trois chapitres en rouge", || {
+        rt.items.load(Ordering::Relaxed) == 3 && near(centre(&rt), RED)
+    });
+    let on = |rt: &sources::InputRt, n: u64, colour| {
+        rt.item.load(Ordering::Relaxed) == n && near(centre(rt), colour)
+    };
+    click(&mut h, "Chapitre suivant disque");
+    until(&mut h, "chapitre 2 en vert", || on(&rt, 1, GREEN));
+    click(&mut h, "Chapitre précédent disque");
+    until(&mut h, "retour au chapitre 1", || on(&rt, 0, RED));
+    h.state_mut().editing = Some(input.id);
+    h.state_mut().edit_tab = 0;
+    h.run_steps(3);
+    click(&mut h, "Chapitre 3");
+    until(&mut h, "chapitre 3 en bleu", || on(&rt, 2, BLUE));
+    click(&mut h, "Titre du DVD");
+    click(&mut h, "Titre 2 : 1 chapitre(s), 00:02");
+    let engine = h.state().engine.clone();
+    until(&mut h, "le titre 2 en blanc", || {
+        engine.rt(input.id).is_some_and(|rt| near(centre(&rt), [255, 255, 255]))
+    });
+    assert_eq!(project(&h).inputs.last().unwrap().kind, Kind::Dvd { path: disc, title: 2 });
+    end(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Text on screen that only the French catalog holds: after a switch to English, any of it
 /// still showing was kept from before the switch.
 fn french_left(h: &Harness<'static, App>) -> Vec<String> {
@@ -941,4 +998,68 @@ fn an_older_session_without_a_language_still_opens() {
         serde_json::from_str(&serde_json::to_string(&Saved { language: "en".into(), ..saved }).unwrap())
             .unwrap();
     assert_eq!(again.language, "en");
+}
+
+/// For what sits low in a scrolled window: a click lands where it is shown.
+fn click_shown(h: &mut Harness<'static, App>, label: &str) {
+    h.get_by_label(label).scroll_to_me();
+    h.run_steps(3);
+    click(h, label);
+}
+
+fn settle(h: &mut Harness<'static, App>, what: &str, ok: impl Fn(&Harness<'static, App>) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ok(h) {
+        assert!(Instant::now() < deadline, "{what}");
+        wait(h, 40);
+    }
+}
+
+/// A plug-in picked from the list joins the input's chain and really treats
+/// its sound: turning its gain down turns the meter down by as much, and
+/// bypassing or removing it gives the sound back.
+#[test]
+fn a_plugin_added_in_the_audio_settings_treats_the_sound() {
+    use crate::plugins::{Owner, tests::test_plugin};
+    const TONE: u64 = 16;
+    let mut h = desk(small_project());
+    h.state().engine.plugins.set_catalog(vec![test_plugin()]);
+    let peak = |h: &Harness<'static, App>| h.state().engine.rt(TONE).unwrap().peak();
+    let chain = |h: &Harness<'static, App>| {
+        project(h).inputs.iter().find(|i| i.id == TONE).unwrap().audio.plugins.clone()
+    };
+    settle(&mut h, "the test tone plays", |h| peak(h) > 0.01);
+    let untreated = peak(&h);
+
+    h.state_mut().editing = Some(TONE);
+    h.state_mut().edit_tab = 8;
+    h.run_steps(3);
+    click_shown(&mut h, "Ajouter un plug-in");
+    click(&mut h, "LiveCraft Test Gain");
+    let slots = chain(&h);
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots[0].id, "org.livecraft.test-gain");
+    let key = slots[0].key;
+    let view = move |h: &Harness<'static, App>| h.state().engine.plugins.view(Owner::Input(TONE), key);
+    settle(&mut h, "the plug-in starts", |h| view(h).is_some_and(|v| v.running));
+    h.run_steps(3);
+    h.get_by_label("Latence : 32 échantillons (0.7 ms)");
+
+    // As a screen reader or a typed value would set it.
+    h.get_by_label("Gain").set_value_accesskit(-20.0);
+    h.run_steps(3);
+    let gain_db = |h: &Harness<'static, App>| view(h).unwrap().params[0].value as f32;
+    settle(&mut h, "the plug-in takes the new gain", |h| (gain_db(h) + 20.0).abs() < 0.01);
+    let expected = untreated * 0.1;
+    settle(&mut h, "the meter follows the plug-in's gain", |h| (peak(h) - expected).abs() < expected * 0.1);
+    settle(&mut h, "the state reaches the project", |h| !chain(h)[0].state.is_empty());
+
+    click_shown(&mut h, "Actif LiveCraft Test Gain");
+    assert!(chain(&h)[0].bypass);
+    settle(&mut h, "bypass gives the sound back", |h| (peak(h) - untreated).abs() < untreated * 0.05);
+
+    click_shown(&mut h, "Retirer LiveCraft Test Gain");
+    assert!(chain(&h).is_empty());
+    settle(&mut h, "the plug-in is let go", |h| view(h).is_none());
+    end(h);
 }

@@ -7,6 +7,7 @@ mod audio_panel;
 mod bars;
 mod input_settings;
 mod inputs;
+mod plugin_chain;
 mod settings;
 mod switcher;
 #[cfg(test)]
@@ -174,6 +175,8 @@ pub struct App {
     settings_tab: usize,
     playlist_open: bool,
     overlays_open: bool,
+    /// The bus or Master whose plug-ins are shown in their own window.
+    plugins_for: Option<crate::plugins::Owner>,
     overlay_pick: usize,
     categories_open: bool,
     clocks_open: bool,
@@ -339,13 +342,24 @@ impl App {
         let shot_delay = if imported.is_some() { 10 } else { 0 };
         let p = &saved.project;
         let format_draft = (p.out_w, p.out_h, p.fps);
-        let edit_tab =
-            ["general", "couleur", "cle", "correction", "effets", "position", "couches", "declencheurs"]
-                .iter()
-                .position(|t| *t == open)
-                .unwrap_or(0);
+        let edit_tab = [
+            "general",
+            "couleur",
+            "cle",
+            "correction",
+            "effets",
+            "position",
+            "couches",
+            "declencheurs",
+            "audio",
+        ]
+        .iter()
+        .position(|t| *t == open)
+        .unwrap_or(0);
+        // The sound tab needs an input with sound: the example's test tone.
+        let shown = if open == "audio" { 16 } else { 9 };
         let editing =
-            (open.starts_with('c') && open != "clocks" || edit_tab > 0 || open == "general").then_some(9);
+            (open.starts_with('c') && open != "clocks" || edit_tab > 0 || open == "general").then_some(shown);
         Self {
             engine,
             saved,
@@ -368,6 +382,7 @@ impl App {
             },
             playlist_open: open == "playlist",
             overlays_open: open == "incrustations",
+            plugins_for: None,
             overlay_pick: 0,
             categories_open: false,
             clocks_open: open == "clocks",
@@ -714,6 +729,7 @@ impl eframe::App for App {
 
         self.input_settings_window(&ctx, &project);
         self.settings_window(&ctx, &project);
+        self.bus_plugins_window(&ctx, &project);
         self.playlist_window(&ctx, &project);
         self.overlays_window(&ctx, &project);
         self.categories_window(&ctx, &project);
