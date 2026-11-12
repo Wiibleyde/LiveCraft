@@ -423,6 +423,16 @@ impl App {
         }
     }
 
+    /// A copy beside the original that works on its own: a call's copy gets a
+    /// link of its own.
+    pub(super) fn duplicate_input(&mut self, input: &Input) {
+        let mut copy = input.clone();
+        copy.id = self.engine.new_id();
+        copy.kind = crate::call::copy_kind(&input.kind);
+        copy.name = t!("inputs.virtual_copy", name = input.name);
+        self.engine.add_input(copy);
+    }
+
     fn input_menu(&mut self, ui: &mut egui::Ui, input: &Input) {
         let id = input.id;
         ui.set_min_width(180.0);
@@ -435,10 +445,7 @@ impl App {
             ui.close();
         }
         if ui.button(t!("inputs.menu_duplicate")).clicked() {
-            let mut copy = input.clone();
-            copy.id = self.engine.new_id();
-            copy.name = t!("inputs.virtual_copy", name = input.name);
-            self.engine.add_input(copy);
+            self.duplicate_input(input);
             ui.close();
         }
         match &input.kind {
@@ -693,6 +700,13 @@ impl App {
                 let kind = Kind::Browser { url: "https://".into(), alpha: false };
                 let id = self.add_input(t!("inputs.web_page"), kind);
                 self.editing = Some(id);
+                ui.close();
+            }
+            if ui.button(t!("inputs.add_video_call")).on_hover_text(t!("inputs.add_video_call_tip")).clicked()
+            {
+                let id = self.add_input(t!("inputs.video_call_name"), crate::call::new_call());
+                self.editing = Some(id);
+                self.edit_tab = 0;
                 ui.close();
             }
             if ui.button(t!("inputs.add_screen")).clicked() {
