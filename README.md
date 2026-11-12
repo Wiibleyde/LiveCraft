@@ -49,8 +49,8 @@ The HTTP and TCP interfaces use the published function names, so existing contro
 
 **Inputs.** Video files, image sequences, photo folders, lists, images, audio files, PowerPoint
 presentations, cameras and microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP,
-TS), web pages, solid colours, test cards, clocks, and titles with presets, tickers, countdowns and a
-simple designer.
+TS), NDI and OMT sources, web pages, solid colours, test cards, clocks, and titles with presets, tickers,
+countdowns and a simple designer.
 
 **Virtual sets.** Keyed presenters stand in a decor, behind a desk, and a virtual camera glides
 between presets from a card button, a named function or remote control. Two decors are drawn by
@@ -71,8 +71,8 @@ or Master, with their own windows and their settings saved in the project. LiveC
 in the standard CLAP folders and in `CLAP_PATH`.
 
 **Outputs.** Two recorders, up to five stream destinations sharing one encode, separate recordings per
-input, SRT output, fullscreen and external windows, multiview. NVENC, Quick Sync and AMF are used when
-your FFmpeg offers them.
+input, SRT output, the program with sound as an NDI or OMT source, fullscreen and external windows,
+multiview. NVENC, Quick Sync and AMF are used when your FFmpeg offers them.
 
 **Show tools.** Instant replay with events and tags, playlists, triggers, data sources from CSV,
 scripts, VISCA PTZ control, a telestrator, and a web controller for phones and tablets.
@@ -88,6 +88,11 @@ Chrome, and presentations need Microsoft PowerPoint or
 To build it yourself, you need [Rust](https://rustup.rs) (edition 2024), and [FFmpeg](https://ffmpeg.org)
 on your `PATH`. Builds from source target CPUs with AVX2, see `.cargo/config.toml`; releases run on any
 x86-64 processor.
+
+NDI and OMT are optional and loaded only when used. NDI needs the NDI runtime, installed with
+[NDI Tools](https://ndi.video/tools/). OMT needs `libomt.dll` and `libvmx.dll` from the
+[Open Media Transport release](https://github.com/openmediatransport/libomtnet/releases), placed beside
+`livecraft.exe` or on the `PATH`. Without them, everything else works and LiveCraft says what is missing.
 
 ```sh
 cargo run --release
@@ -115,7 +120,7 @@ livecraft --lang en                       # start in English (or fr), and keep t
 
 - **Windows only.** The code uses Windows APIs for capture, screens and secrets.
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
-- **No NDI or OMT.** Also no video calls, no DVD inputs.
+- **No video calls**, no DVD inputs.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
 
 The full list is in the [roadmap](ROADMAP.md).

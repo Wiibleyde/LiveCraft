@@ -13,6 +13,8 @@ fn older_files_keep_opening() {
     for bus in p["buses"].as_array_mut().unwrap() {
         bus.as_object_mut().unwrap().remove("plugins");
     }
+    p.remove("ndi_out");
+    p.remove("omt_out");
     for input in p["inputs"].as_array_mut().unwrap() {
         let i = input.as_object_mut().unwrap();
         i.remove("auto_pause");
@@ -26,6 +28,8 @@ fn older_files_keep_opening() {
     }
     let back: Project = serde_json::from_value(v).unwrap();
     assert_eq!(back.inputs.len(), Project::sample().inputs.len());
+    assert_eq!(back.ndi_out, NetOutCfg::default(), "les sorties réseau restent éteintes");
+    assert!(!back.omt_out.enabled);
 }
 
 #[test]

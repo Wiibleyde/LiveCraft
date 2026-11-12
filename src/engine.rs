@@ -5,6 +5,7 @@
 pub use crate::desk::*;
 use crate::frame::Frame;
 use crate::model::*;
+use crate::netvideo::NetOut;
 use crate::output::Encoder;
 use crate::plugins::PluginHost;
 use crate::replay::ReplayState;
@@ -54,6 +55,8 @@ pub struct Engine {
     pub streamers: Mutex<Vec<Encoder>>,
     pub multi: Mutex<Vec<(u64, Encoder)>>,
     pub srt: Mutex<Vec<(Route, Encoder)>>,
+    /// NDI and OMT senders of the program.
+    pub net: Mutex<Vec<NetOut>>,
     pub replay: Mutex<ReplayState>,
     /// Failure message from an output that stopped by itself.
     pub output_error: Mutex<Option<String>>,
@@ -92,6 +95,7 @@ impl Engine {
             streamers: Mutex::new(Vec::new()),
             multi: Mutex::new(Vec::new()),
             srt: Mutex::new(Vec::new()),
+            net: Mutex::new(Vec::new()),
             replay: Mutex::new(ReplayState::default()),
             output_error: Mutex::new(None),
             record_started: Mutex::new(None),
