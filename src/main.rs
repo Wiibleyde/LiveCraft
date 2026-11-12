@@ -55,7 +55,7 @@ mod widgets;
 use eframe::egui;
 
 fn main() -> eframe::Result {
-    #[cfg(all(windows, target_arch = "x86_64", not(target_feature = "avx2")))]
+    #[cfg(all(windows, target_arch = "x86_64"))]
     if let Some(code) = hand_over_to_avx2_build() {
         std::process::exit(code);
     }
@@ -113,9 +113,16 @@ fn main() -> eframe::Result {
 /// processors without them. This one runs anywhere; next to it,
 /// `livecraft-avx2.exe` is built for x86-64-v3 and takes over when the
 /// processor has every feature that level assumes.
-#[cfg(all(windows, target_arch = "x86_64", not(target_feature = "avx2")))]
+///
+/// Compiled into both builds, so that everyday builds (x86-64-v3, see
+/// .cargo/config.toml) type-check it too: only the release's portable build
+/// used to, and a broken call there was found only when releasing.
+#[cfg(all(windows, target_arch = "x86_64"))]
 fn hand_over_to_avx2_build() -> Option<i32> {
     use std::arch::is_x86_feature_detected as has;
+    if cfg!(target_feature = "avx2") {
+        return None;
+    }
     let able = has!("avx")
         && has!("avx2")
         && has!("bmi1")
@@ -135,7 +142,7 @@ fn hand_over_to_avx2_build() -> Option<i32> {
     }
     // The children of this process end with it, so closing or killing this
     // wrapper (the one the shortcut and Task Manager show) ends the real program.
-    sources::tie_children_to_this_process();
+    platform::tie_children_to_this_process();
     let started = std::time::Instant::now();
     // If it cannot start, or dies at once, this build still can.
     let status = std::process::Command::new(faster).args(std::env::args_os().skip(1)).status().ok()?;
@@ -150,7 +157,7 @@ fn hand_over_to_avx2_build() -> Option<i32> {
 /// access violation, missing library, failed start-up...) with a status that
 /// has both top bits set. Within this long, it is the processor or the install,
 /// not something the person did.
-#[cfg(any(test, all(windows, target_arch = "x86_64", not(target_feature = "avx2"))))]
+#[cfg(any(test, all(windows, target_arch = "x86_64")))]
 fn crashed_at_start(code: i32, after: std::time::Duration) -> bool {
     after < std::time::Duration::from_secs(2) && (code as u32) & 0xC000_0000 == 0xC000_0000
 }

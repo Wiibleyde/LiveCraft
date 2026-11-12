@@ -656,6 +656,27 @@ fn the_old_name_still_opens_old_files() {
     end(h);
 }
 
+/// The reported bug: running the tests replaced the person's desk with a
+/// test project, as a test desk saved itself where a real run does.
+#[test]
+fn a_test_desk_never_writes_the_persons_session() {
+    let mut h = desk(small_project());
+    assert!(h.state().session_file.is_none(), "a test desk keeps no session");
+    let file = std::env::temp_dir().join(format!("livecraft-session-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    // Given a place, the same desk saves there once its autosave is due.
+    h.state_mut().session_file = Some(file.clone());
+    h.state_mut().last_autosave = Instant::now().checked_sub(Duration::from_secs(31)).unwrap();
+    h.run_steps(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !file.exists() {
+        assert!(Instant::now() < deadline, "the autosave writes where it is told");
+        sleep(Duration::from_millis(20));
+    }
+    end(h);
+    let _ = std::fs::remove_file(&file);
+}
+
 /// What a double-clicked .livecraft file does: the installer's file type
 /// starts LiveCraft with `--project <file>`.
 /// Opening a project by name replaces the desk, which the session file held:
