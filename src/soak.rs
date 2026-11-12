@@ -1295,7 +1295,7 @@ mod tests {
         let dir = dir.to_string_lossy().into_owned();
         let result = receiver(&dir, "rtmp://256.256.256.256:1935/live/soak", &format!("{dir}/x.flv"));
         let _ = std::fs::remove_dir_all(&dir);
-        let e = result.err().expect("a receiver that cannot listen must fail the run");
+        let e = result.expect_err("a receiver that cannot listen must fail the run");
         assert!(e.contains("256.256.256.256"), "its own words are kept: {e}");
     }
 
