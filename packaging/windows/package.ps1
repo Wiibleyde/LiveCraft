@@ -105,7 +105,8 @@ if ($signed) {
     $signTool = Find-SignTool
     $signArgs = @('sign', '/sha1', $CertThumbprint, '/fd', 'SHA256', '/tr', $TimestampUrl, '/td', 'SHA256',
         '/d', 'LiveCraft', '/du', 'https://github.com/Wiibleyde/LiveCraft')
-    $exes = $builds.Keys | ForEach-Object { Join-Path $stage $_ }
+    # @(...): a single program would otherwise be a string, splatted one character at a time.
+    $exes = @($builds.Keys | ForEach-Object { Join-Path $stage $_ })
     Invoke-Checked 'signing the programs' { & $signTool @signArgs @exes }
 }
 

@@ -130,7 +130,10 @@ jobs:
           )
           $notesFile = Join-Path $env:RUNNER_TEMP 'notes.md'
           $notes -join "`n" | Set-Content -Encoding utf8 $notesFile
-          $extra = if ($version -match '-') { @('--prerelease') } else { @() }
+          # Built up, not assigned from an if: PowerShell unrolls a one-item array returned by
+          # a statement into a plain string, which @extra then passes one character at a time.
+          $extra = @()
+          if ($version -match '-') { $extra += '--prerelease' }
           gh release create $env:GITHUB_REF_NAME (Get-ChildItem target/dist -File).FullName `
             --verify-tag --title "LiveCraft $version" --notes-file $notesFile --generate-notes @extra
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
