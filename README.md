@@ -51,6 +51,10 @@ The HTTP and TCP interfaces use the published function names, so existing contro
 microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP, TS), web pages, solid
 colours, test cards, clocks, and titles with presets, tickers, countdowns and a simple designer.
 
+**Virtual sets.** Keyed presenters stand in a decor, behind a desk, and a virtual camera glides
+between presets from a card button, a named function or remote control. Two decors are drawn by
+LiveCraft itself; any image or video can replace them.
+
 **Switching.** Cut, fade, zoom, wipes, slides, the cube family, merge and stingers, with four
 transition slots, a T-bar, fade to black and Quick Play.
 
@@ -82,10 +86,11 @@ cargo run --release
 Other ways to start it:
 
 ```sh
-livecraft --project show.vmix             # open a project
+livecraft --project show.vmix             # open a project, .vmix or .livecraft
 livecraft --import-report show.vmix       # say what a project keeps, without opening it
 livecraft --selftest some-folder          # real end-to-end run: plays, records, streams, replays
 livecraft --soak some-folder 45m          # a whole show for 45 minutes, memory and timing watched
+livecraft --livecheck some-folder         # virtual camera and microphone, streamed and read back
 livecraft --screenshot out.png            # start, save a picture of the window, quit
 livecraft --lang en                       # start in English (or fr), and keep that choice
 ```
@@ -101,10 +106,33 @@ livecraft --lang en                       # start in English (or fr), and keep t
 
 - **Windows only.** The code uses Windows APIs for capture, screens and secrets.
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
-- **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs, no virtual sets.
+- **No NDI or OMT.** Also no video calls, no PowerPoint or DVD inputs.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
 
 The full list is in the [roadmap](ROADMAP.md).
+
+### Live check
+
+`--livecheck` runs the path of a real show through devices Windows sees as real. A
+[Softcam](https://github.com/tshino/softcam) virtual camera shows a counting pattern and
+[VB-CABLE](https://vb-audio.com/Cable/) carries a 1 kHz tone; LiveCraft opens them as a camera and a
+microphone, streams program over RTMP and SRT to its own [MediaMTX](https://github.com/bluenviron/mediamtx)
+on free local ports, then reads both streams back and checks that the count keeps moving and the tone
+is there. CI runs it on every pull request, along with three deliberately broken runs
+(`--break freeze`, `--break silence`, `--break drop`) that must fail.
+
+To run it yourself, install VB-CABLE once (it needs an administrator and plays the tone into
+`CABLE Input` while the check runs), then fetch the other tools with Visual Studio or its Build Tools
+installed:
+
+```powershell
+./scripts/livecheck-tools.ps1     # prints LIVECRAFT_MEDIAMTX=... and LIVECRAFT_SOFTCAM=...
+$env:LIVECRAFT_MEDIAMTX = '<printed path>'; $env:LIVECRAFT_SOFTCAM = '<printed path>'
+cargo run -- --livecheck target/livecheck
+```
+
+Softcam is registered for the current user only while the check runs, so no administrator is needed
+for it. Close other programs using a Softcam camera first: only one can exist at a time.
 
 ## Come build it with us
 

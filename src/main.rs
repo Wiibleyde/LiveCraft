@@ -14,6 +14,7 @@ mod extras;
 mod frame;
 mod functions;
 mod fx;
+mod livecheck;
 mod mixer;
 mod model;
 #[cfg(test)]
@@ -25,6 +26,7 @@ mod playtest;
 mod replay;
 mod secret;
 mod selftest;
+mod sets;
 mod soak;
 mod sources;
 mod text;
@@ -47,6 +49,9 @@ fn main() -> eframe::Result {
         let at = args.iter().position(|a| a == "--soak").map_or(0, |i| i + 2);
         let length = args.get(at).filter(|a| !a.starts_with("--"));
         std::process::exit(soak::run(&dir, length.map(String::as_str)));
+    }
+    if let Some(dir) = value_of("--livecheck") {
+        std::process::exit(livecheck::run(&dir, value_of("--break").as_deref()));
     }
     // The command line speaks the system's language unless told otherwise; the window
     // then follows its saved choice, which `--lang` also changes.
