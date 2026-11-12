@@ -117,12 +117,6 @@ impl ShowClock {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
-
-    /// `hh:mm:ss`, hours growing past 99 when the show is that long.
-    pub fn text(&self, now: Instant) -> String {
-        let s = self.elapsed(now).as_secs();
-        format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-    }
 }
 
 pub struct State {
@@ -760,7 +754,7 @@ mod tests {
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
         let mut c = ShowClock::default();
-        assert_eq!(c.text(at(50)), "00:00:00", "a clock never started stays at zero");
+        assert_eq!(c.elapsed(at(50)), Duration::ZERO, "a clock never started stays at zero");
         c.start(at(10));
         assert!(c.running());
         assert_eq!(c.elapsed(at(70)), Duration::from_secs(60));
@@ -774,10 +768,10 @@ mod tests {
         c.toggle(at(660));
         assert!(!c.running());
         c.toggle(at(700));
-        assert_eq!(c.text(at(700) + Duration::from_secs(3600 + 62)), "01:03:02");
+        assert_eq!(c.elapsed(at(700) + Duration::from_secs(62)), Duration::from_secs(182));
         c.reset();
         assert!(!c.running());
-        assert_eq!(c.text(at(9000)), "00:00:00");
+        assert_eq!(c.elapsed(at(9000)), Duration::ZERO);
     }
 
     fn clip(id: u64) -> Input {
