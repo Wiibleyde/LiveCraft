@@ -826,8 +826,11 @@ fn show(engine: &Arc<Engine>, dir: &str, ids: Ids, length: Duration, csv: &mut F
         rt.playing.store(true, Ordering::Relaxed);
     }
     let page = engine.rt(ids.page).ok_or("page absente")?;
-    // A browser starting on a loaded machine can take most of a minute.
-    until(90.0, "la page web", || page.seq() >= 1).map_err(|e| format!("{e} : {:?}", page.status()))?;
+    // A browser starting on a loaded machine can take most of a minute. A page
+    // that never shows fails the run, but everything else is still worth
+    // measuring: a long run is costly to start again.
+    let page_start = until(90.0, "la page web", || page.seq() >= 1);
+    let page_start = page_start.err().map(|e| format!("{e} : {:?}", page.status()));
     sleep(Duration::from_millis(700));
     engine.start_streaming()?;
     let first = engine.start_recording(dir)?;
@@ -860,6 +863,9 @@ fn show(engine: &Arc<Engine>, dir: &str, ids: Ids, length: Duration, csv: &mut F
         longest_late_s: 0.0,
     };
     let mut failures = Failures::default();
+    if let Some(e) = page_start {
+        failures.add("page-start", 0.0, e);
+    }
     let mut segments = Segments { stem, next: 0, found: Vec::new() };
     let mut samples = Vec::new();
     let mut warmup_counts = None;
