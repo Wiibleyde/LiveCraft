@@ -61,3 +61,12 @@ fn a_new_setting_is_not_a_new_source() {
     assert!(!video("a", 1.0).same_source(&video("b", 1.0)));
     assert!(!Kind::Bars.same_source(&Kind::Clock));
 }
+
+/// Later versions will add to sets too: what is missing takes its default.
+#[test]
+fn a_virtual_set_with_missing_fields_still_opens() {
+    let kind: Kind = serde_json::from_str(r#"{"VirtualSet":{"cameras":[{"name":"Large"}]}}"#).unwrap();
+    let Kind::VirtualSet { look, background, cameras, camera, .. } = kind else { panic!("{kind:?}") };
+    assert_eq!((look, background, camera), (SetLook::Studio, None, 0));
+    assert_eq!(cameras[0].view, SetView::default());
+}

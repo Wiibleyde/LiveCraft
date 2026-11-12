@@ -279,6 +279,10 @@ impl Engine {
                     renumber(output);
                 }
                 Kind::Telestrator { background } => renumber(background),
+                Kind::VirtualSet { background, foreground, .. } => {
+                    renumber(background);
+                    renumber(foreground);
+                }
                 Kind::Title { data, .. } => *data = None,
                 _ => {}
             }
