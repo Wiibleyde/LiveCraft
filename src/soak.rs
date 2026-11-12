@@ -29,6 +29,8 @@ const STEP_EVERY: Duration = Duration::from_secs(6);
 const STEPS: usize = 12;
 const STREAM_URL: &str = "rtmp://127.0.0.1:19350/live/soak";
 const DEFAULT_LENGTH: Duration = Duration::from_secs(30 * 60);
+/// The weekly run must end, report included, within its job's time limit.
+const MAX_LENGTH: Duration = Duration::from_secs(2 * 3600);
 
 /// Start-up fills buffers, loads the page and opens encoders: not a trend.
 const WARMUP_MIN: Duration = Duration::from_secs(120);
@@ -71,7 +73,9 @@ pub fn run(dir: &str, length: Option<&str>) -> i32 {
         Some(text) => match parse_length(text) {
             Some(d) => d,
             None => {
-                println!("ECHEC: durée illisible « {text} » (exemples : 45m, 90s, 1h)");
+                println!(
+                    "ECHEC: durée illisible ou hors limites « {text} » (de 1 s à 2 h, par exemple 45m, 90s, 1h)"
+                );
                 return 2;
             }
         },
@@ -88,7 +92,7 @@ pub fn run(dir: &str, length: Option<&str>) -> i32 {
     }
 }
 
-/// `90s`, `45m`, `1h`, or a bare number of minutes.
+/// `90s`, `45m`, `1h`, or a bare number of minutes, from 1 s to `MAX_LENGTH`.
 fn parse_length(text: &str) -> Option<Duration> {
     let text = text.trim();
     let split = text.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(text.len());
@@ -99,7 +103,8 @@ fn parse_length(text: &str) -> Option<Duration> {
         "h" => n * 3600.0,
         _ => return None,
     };
-    (seconds >= 1.0).then(|| Duration::from_secs_f64(seconds))
+    let length = Duration::try_from_secs_f64(seconds).ok()?;
+    (Duration::from_secs(1)..=MAX_LENGTH).contains(&length).then_some(length)
 }
 
 /// Milliseconds at quantile `q` of a tick histogram, as the upper edge of its
@@ -1234,6 +1239,11 @@ mod tests {
         assert_eq!(parse_length("1.5h"), Some(Duration::from_secs(5400)));
         assert_eq!(parse_length("10 minutes"), None);
         assert_eq!(parse_length("0s"), None);
+        assert_eq!(parse_length("2h"), Some(MAX_LENGTH));
+        assert_eq!(parse_length("121m"), None);
+        // Too large for a Duration: an error, not a panic.
+        assert_eq!(parse_length("99999999999999999999h"), None);
+        assert_eq!(parse_length("-5m"), None);
     }
 
     #[test]
