@@ -3,10 +3,21 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE-*', 'NOTICE', '.github/ISSUE_TEMPLATE/**']
   pull_request:
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE-*', 'NOTICE', '.github/ISSUE_TEMPLATE/**']
 
 permissions:
   contents: read
+
+# A new push to a pull request replaces the run still going for the previous one; runs on main all finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Incremental builds only help a developer's own machine; on CI they make the cache bigger and slower.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   check:
@@ -31,12 +42,15 @@ jobs:
           rustup update stable
           rustup default stable
           rustup component add rustfmt clippy
-      - uses: actions/cache@v4
+      # Restored from the closest earlier build when Cargo.lock changed, so a new dependency does
+      # not rebuild everything; saved only from main, so pull requests do not fill the cache quota.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - name: Test
@@ -49,6 +63,13 @@ jobs:
           dbus-run-session -- sh -c 'printf ci | gnome-keyring-daemon --unlock --components=secrets > /dev/null
           && cargo test
           && secret-tool search application livecraft purpose session-key 2> /dev/null | grep -q "^label = LiveCraft"'
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
   # A virtual camera and a virtual cable feed LiveCraft's real camera and
   # microphone inputs; program goes to a local MediaMTX over RTMP and SRT, and
@@ -67,12 +88,13 @@ jobs:
         run: |
           rustup update stable
           rustup default stable
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             target
           key: livecheck-${{ hashFiles('Cargo.lock') }}
+          restore-keys: livecheck-
       - name: Install FFmpeg
         run: |
           # A dated BtbN release, and the SHA-256 that release publishes in its checksums.sha256.
@@ -124,6 +146,13 @@ jobs:
         # Kept out of the cached target folder, so every run fetches and checks it again.
         run: ./scripts/livecheck-tools.ps1 -Into "$env:RUNNER_TEMP/livecheck-tools"
       - run: cargo build
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: livecheck-${{ hashFiles('Cargo.lock') }}
       - name: Live check
         run: ./target/debug/livecraft.exe --livecheck target/livecheck
       - name: A broken link must fail the check
