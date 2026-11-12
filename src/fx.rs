@@ -129,34 +129,24 @@ impl Frame {
     /// Copy of this frame moved, zoomed, turned and cropped in place.
     pub fn transform(&self, p: &Position, mirror: bool) -> Frame {
         let mut out = Frame::new(self.w, self.h);
-        let (w, h) = (self.w as f32, self.h as f32);
-        let (cx, cy) = (w / 2.0, h / 2.0);
-        let turns = p.quarter_turns % 4;
-        // A quarter turn swaps the sides: shrink to keep the picture inside.
-        let fit = if turns % 2 == 1 { (h / w).min(w / h) } else { 1.0 };
-        let zoom = (p.zoom * fit).max(0.001);
-        let angle = p.rotate + turns as f32 * std::f32::consts::FRAC_PI_2;
-        let (sin, cos) = angle.sin_cos();
-        let (pan_x, pan_y) = (p.pan_x * cx, p.pan_y * cy);
-        let (l, r) = (p.crop[0] * w, w - p.crop[1] * w);
-        let (t, b) = (p.crop[2] * h, h - p.crop[3] * h);
-        // Without a turn or a mirror this is a plain scaled draw, far cheaper.
-        if angle == 0.0 && !mirror {
-            let (x, y) = (cx + pan_x + (l - cx) * zoom, cy - pan_y + (t - cy) * zoom);
-            out.blit_region(self, p.crop, x, y, (r - l) * zoom, (b - t) * zoom, 255, 0.0);
-            return out;
-        }
+        let t = match placement(self.w, self.h, p, mirror) {
+            Placed::Box { crop, x, y, w, h } => {
+                out.blit_region(self, crop, x, y, w, h, 255, 0.0);
+                return out;
+            }
+            Placed::Turned(t) => t,
+        };
         let stride = self.w * 4;
         out.data.par_chunks_mut(stride).with_min_len(ROWS).enumerate().for_each(|(y, row)| {
             for x in 0..self.w {
-                let mut dx = x as f32 + 0.5 - cx - pan_x;
-                let dy = y as f32 + 0.5 - cy + pan_y;
-                if mirror {
+                let mut dx = x as f32 + 0.5 - t.cx - t.pan_x;
+                let dy = y as f32 + 0.5 - t.cy + t.pan_y;
+                if t.mirror {
                     dx = -dx;
                 }
-                let sx = cx + (dx * cos + dy * sin) / zoom;
-                let sy = cy + (-dx * sin + dy * cos) / zoom;
-                if sx < l || sx >= r || sy < t || sy >= b {
+                let sx = t.cx + (dx * t.cos + dy * t.sin) / t.zoom;
+                let sy = t.cy + (-dx * t.sin + dy * t.cos) / t.zoom;
+                if sx < t.bounds[0] || sx >= t.bounds[1] || sy < t.bounds[2] || sy >= t.bounds[3] {
                     continue;
                 }
                 let s = sample(self, sx - 0.5, sy - 0.5);
@@ -218,6 +208,52 @@ fn outside_round(x: f32, y: f32, w: f32, h: f32, r: f32) -> bool {
     dx > 0.0 && dy > 0.0 && dx * dx + dy * dy > r * r
 }
 
+/// Where an input's position puts its picture.
+pub enum Placed {
+    /// Without a turn or a mirror: a plain scaled draw, far cheaper.
+    Box {
+        crop: [f32; 4],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+    Turned(Turn),
+}
+
+/// Every output pixel looks back into the source through this.
+pub struct Turn {
+    pub cx: f32,
+    pub cy: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+    pub sin: f32,
+    pub cos: f32,
+    pub zoom: f32,
+    pub mirror: bool,
+    /// Left, right, top, bottom edges kept from the source, in pixels.
+    pub bounds: [f32; 4],
+}
+
+pub fn placement(w: usize, h: usize, p: &Position, mirror: bool) -> Placed {
+    let (w, h) = (w as f32, h as f32);
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    let turns = p.quarter_turns % 4;
+    // A quarter turn swaps the sides: shrink to keep the picture inside.
+    let fit = if turns % 2 == 1 { (h / w).min(w / h) } else { 1.0 };
+    let zoom = (p.zoom * fit).max(0.001);
+    let angle = p.rotate + turns as f32 * std::f32::consts::FRAC_PI_2;
+    let (sin, cos) = angle.sin_cos();
+    let (pan_x, pan_y) = (p.pan_x * cx, p.pan_y * cy);
+    let (l, r) = (p.crop[0] * w, w - p.crop[1] * w);
+    let (t, b) = (p.crop[2] * h, h - p.crop[3] * h);
+    if angle == 0.0 && !mirror {
+        let (x, y) = (cx + pan_x + (l - cx) * zoom, cy - pan_y + (t - cy) * zoom);
+        return Placed::Box { crop: p.crop, x, y, w: (r - l) * zoom, h: (b - t) * zoom };
+    }
+    Placed::Turned(Turn { cx, cy, pan_x, pan_y, sin, cos, zoom, mirror, bounds: [l, r, t, b] })
+}
+
 /// Applies an input's settings to a source frame, in the order a signal
 /// passes through them: geometry, colour, key, then effects.
 pub fn process(src: &Frame, input: &Input, fill: Option<&Frame>) -> Frame {
@@ -237,7 +273,7 @@ pub fn process(src: &Frame, input: &Input, fill: Option<&Frame>) -> Frame {
 }
 
 /// One lookup per channel holds everything that treats channels separately.
-fn colour_table(c: &Colour, ch: usize) -> [u8; 256] {
+pub fn colour_table(c: &Colour, ch: usize) -> [u8; 256] {
     let mut t = [0u8; 256];
     let span = (c.white - c.black).max(0.001);
     for (i, o) in t.iter_mut().enumerate() {
@@ -251,7 +287,7 @@ fn colour_table(c: &Colour, ch: usize) -> [u8; 256] {
 }
 
 /// Saturation and hue as one matrix, turning around the grey axis.
-fn colour_matrix(sat: f32, hue: f32) -> [[f32; 3]; 3] {
+pub fn colour_matrix(sat: f32, hue: f32) -> [[f32; 3]; 3] {
     const L: [f32; 3] = [0.299, 0.587, 0.114];
     let (s, c) = (hue.to_radians().sin(), hue.to_radians().cos());
     let k = 1.0 / 3f32.sqrt();
@@ -365,10 +401,15 @@ fn apply_key(f: &mut Frame, key: &Key, fill: Option<&Frame>) {
     }
 }
 
+/// The channel a key colour is made of, pulled down on what remains.
+pub fn spill_channel(key: &Key) -> usize {
+    (0..3).max_by_key(|&i| key.color[i]).unwrap_or(1)
+}
+
 /// Pulls the key colour's dominant channel down to its neighbours on what
 /// remains, which removes the green or blue halo around people.
 fn remove_spill(f: &mut Frame, key: &Key) {
-    let dominant = (0..3).max_by_key(|&i| key.color[i]).unwrap_or(1);
+    let dominant = spill_channel(key);
     let (a, b) = ((dominant + 1) % 3, (dominant + 2) % 3);
     let amount = key.spill.clamp(0.0, 1.0);
     let stride = f.w * 4;
@@ -383,15 +424,16 @@ fn remove_spill(f: &mut Frame, key: &Key) {
     });
 }
 
-fn crop_bounds(f: &Frame, crop: [f32; 4]) -> (usize, usize, usize, usize) {
-    let (w, h) = (f.w as f32, f.h as f32);
+/// The pixels an effect's crop leaves, as column and row ranges.
+pub fn crop_bounds(fw: usize, fh: usize, crop: [f32; 4]) -> (usize, usize, usize, usize) {
+    let (w, h) = (fw as f32, fh as f32);
     let x0 = (crop[0] * w) as usize;
     let x1 = ((1.0 - crop[1]) * w) as usize;
     let y0 = (crop[2] * h) as usize;
     let y1 = ((1.0 - crop[3]) * h) as usize;
-    let (x0, y0) = (x0.min(f.w), y0.min(f.h));
+    let (x0, y0) = (x0.min(fw), y0.min(fh));
     // Crops that meet or cross leave nothing, not a backwards range.
-    (x0, x1.min(f.w).max(x0), y0, y1.min(f.h).max(y0))
+    (x0, x1.min(fw).max(x0), y0, y1.min(fh).max(y0))
 }
 
 /// Puts `done` back into `f`, but only inside the effect's crop.
@@ -400,7 +442,7 @@ fn merge_in_crop(f: &mut Frame, done: &Frame, crop: [f32; 4]) {
         f.copy_from(done);
         return;
     }
-    let (x0, x1, y0, y1) = crop_bounds(f, crop);
+    let (x0, x1, y0, y1) = crop_bounds(f.w, f.h, crop);
     for y in y0..y1 {
         let i = (y * f.w + x0) * 4;
         let j = (y * f.w + x1) * 4;
@@ -528,6 +570,16 @@ impl Lut {
         Self { nodes, cells, steps }
     }
 
+    /// The table as the graphics card reads it, so both look up alike: per
+    /// channel and value its cell (offset, and fraction above bit 20), then
+    /// the three steps, then each node as red, green and blue bytes.
+    pub fn packed(&self) -> Vec<u32> {
+        let cells = self.cells.iter().flatten().map(|&(at, frac)| at | frac << 20);
+        let nodes =
+            self.nodes.iter().map(|n| (n & 0xff | (n >> 16 & 0xff) << 8 | (n >> 32 & 0xff) << 16) as u32);
+        cells.chain(self.steps).chain(nodes).collect()
+    }
+
     /// Tetrahedral interpolation without a single branch: this runs on every
     /// pixel of every frame, and pictures make branches unpredictable.
     #[inline]
@@ -639,7 +691,7 @@ fn changed_at(path: &str) -> Option<std::time::SystemTime> {
 
 type Stamped<T> = (std::time::SystemTime, Option<Arc<T>>);
 
-fn load_lut(path: &str) -> Option<Arc<Lut>> {
+pub fn load_lut(path: &str) -> Option<Arc<Lut>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Stamped<Lut>>>> = OnceLock::new();
     let stamp = changed_at(path)?;
     let mut map = CACHE.get_or_init(Default::default).lock().unwrap();
@@ -671,7 +723,7 @@ fn read_mask(path: &str, w: usize, h: usize) -> Option<Vec<u8>> {
     Some(m)
 }
 
-fn load_mask(path: &str, w: usize, h: usize) -> Option<Arc<Vec<u8>>> {
+pub fn load_mask(path: &str, w: usize, h: usize) -> Option<Arc<Vec<u8>>> {
     type Masks = HashMap<(String, usize, usize), Stamped<Vec<u8>>>;
     static CACHE: OnceLock<Mutex<Masks>> = OnceLock::new();
     let stamp = changed_at(path)?;
@@ -694,7 +746,7 @@ mod tests {
     #[test]
     fn crossing_crops_are_empty_and_harmless() {
         let f = Frame::solid(16, 8, [9, 9, 9]);
-        let (x0, x1, y0, y1) = crop_bounds(&f, [0.8, 0.8, 0.9, 0.9]);
+        let (x0, x1, y0, y1) = crop_bounds(f.w, f.h, [0.8, 0.8, 0.9, 0.9]);
         assert!(x1 >= x0 && y1 >= y0);
         let mut g = f.clone();
         merge_in_crop(&mut g, &Frame::solid(16, 8, [1, 1, 1]), [0.8, 0.8, 0.9, 0.9]);
