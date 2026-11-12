@@ -354,6 +354,7 @@ impl App {
                 ui.add_space(16.0);
                 ui.label(RichText::new(msg).size(11.0).color(ORANGE));
             }
+            self.update_notice(ui);
         });
     }
 

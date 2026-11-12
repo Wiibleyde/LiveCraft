@@ -433,6 +433,7 @@ settings.add_source = Ajouter une source
 settings.source_n = Source {n}
 settings.about_tagline = Mélangeur vidéo en direct, reconstruit à partir de la documentation publique.
 settings.about_ffmpeg = Les vidéos, caméras et sorties passent par ffmpeg, à installer séparément.
+settings.about_version = Version {version}
 settings.compositing = Composition de l'image
 settings.compose_on_gpu = Composer sur la carte graphique
 settings.compositor_starting = Démarrage…
@@ -978,3 +979,17 @@ dvd.no_root = répertoire racine illisible
 
 # src/secret.rs
 secret.not_saved = Les clés et mots de passe n'ont pas pu être protégés : ils ne sont pas enregistrés et sont à ressaisir au prochain démarrage
+
+# src/ui/updates.rs
+update.available = LiveCraft {version} est disponible
+update.open_page = Ouvrir la page de cette version
+update.dismiss = Masquer pour cette version
+update.title = Mises à jour
+update.at_start = Rechercher les mises à jour au démarrage
+update.checking = Vérification en cours…
+update.failed = La vérification a échoué : {error}
+update.never = Pas encore vérifié.
+update.up_to_date = Vérifié le {when} : LiveCraft est à jour.
+update.found = Vérifié le {when} : LiveCraft {version} est disponible.
+update.check_now = Vérifier maintenant
+update.what_is_sent = Une seule demande à l'API publique de GitHub, quelques secondes après le démarrage et au plus une fois par jour. Elle ne porte que le nom et la version du programme, rien sur vous ni sur vos projets.

@@ -1155,6 +1155,59 @@ fn an_older_session_without_a_language_still_opens() {
     assert_eq!(again.language, "en");
 }
 
+/// A check that finds a newer version says so at the right of the status line; the
+/// notice opens that version's page, and once put away it stays away for that version.
+#[test]
+fn a_newer_release_is_announced_until_put_away() {
+    static OPENED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut h = desk(small_project());
+    assert!(h.state().update_at.is_none(), "tests never ask GitHub");
+    h.state_mut().open_in_browser = |url| OPENED.lock().unwrap().push(url.into());
+    let notice = "LiveCraft 99.0.0 est disponible";
+    assert!(h.query_by_label(notice).is_none());
+
+    // As the check's thread hands its answer over.
+    let answer = r#"[{"tag_name": "v100.0.0", "draft": true}, {"tag_name": "v99.0.0", "prerelease": false}]"#;
+    let newest = crate::update::newest(answer, crate::update::CURRENT);
+    *h.state().update_answer.lock().unwrap() = Some(newest);
+    h.run_steps(3);
+    click(&mut h, notice);
+    assert_eq!(*OPENED.lock().unwrap(), ["https://github.com/Wiibleyde/LiveCraft/releases/tag/v99.0.0"]);
+
+    click(&mut h, "Masquer pour cette version");
+    assert!(h.query_by_label(notice).is_none());
+    assert_eq!(h.state().saved.updates.dismissed, "99.0.0");
+    end(h);
+}
+
+/// Settings, About shows the running version and what the last check found, and
+/// turns the check at start off.
+#[test]
+fn about_tells_the_version_and_turns_the_check_off() {
+    let mut h = desk(small_project());
+    let u = &mut h.state_mut().saved.updates;
+    u.found = Some("99.0.0".into());
+    u.checked_at = Some(1_800_000_000);
+    u.dismissed = "99.0.0".into();
+    click(&mut h, "Réglages");
+    click(&mut h, "À propos");
+    h.get_by_label(&format!("Version {}", crate::update::CURRENT));
+    assert!(h.query_by_label_contains(" : LiveCraft 99.0.0 est disponible.").is_some(), "even put away");
+    h.get_by_label("Ouvrir la page de cette version");
+    assert!(h.state().saved.updates.check);
+    click(&mut h, "Rechercher les mises à jour au démarrage");
+    assert!(!h.state().saved.updates.check);
+    end(h);
+}
+
+/// Sessions saved before the update check existed have it on.
+#[test]
+fn an_older_session_checks_for_updates() {
+    let saved: Saved = serde_json::from_str(r#"{"record_dir":"D:/videos","language":"fr"}"#).unwrap();
+    assert!(saved.updates.check);
+    assert_eq!(saved.updates.checked_at, None);
+}
+
 /// For what sits low in a scrolled window: a click lands where it is shown.
 fn click_shown(h: &mut Harness<'static, App>, label: &str) {
     h.get_by_label(label).scroll_to_me();

@@ -62,7 +62,7 @@ impl App {
                             7 => self.tab_scripts(ui, &mut p),
                             8 => tab_data(ui, &mut p),
                             9 => self.tab_remote(ui),
-                            _ => tab_about(ui),
+                            _ => self.tab_about(ui),
                         }
                     });
                 });
@@ -369,6 +369,18 @@ impl App {
         });
     }
 
+    fn tab_about(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("LiveCraft").strong());
+            ui.label(t!("settings.about_version", version = crate::update::CURRENT));
+        });
+        ui.label(t!("settings.about_tagline"));
+        ui.label(RichText::new(t!("settings.about_ffmpeg")).small().color(DIM));
+        ui.label(RichText::new(t!("settings.about_ndi")).small().color(DIM));
+        ui.separator();
+        self.about_updates(ui);
+    }
+
     fn tab_remote(&mut self, ui: &mut egui::Ui) {
         ui.label(t!("settings.remote_ports", http = HTTP_PORT, tcp = TCP_PORT));
         ui.label(RichText::new(t!("settings.remote_local", port = HTTP_PORT)).small());
@@ -486,11 +498,4 @@ fn tab_data(ui: &mut egui::Ui, p: &mut Project) {
             ..DataSource::default()
         });
     }
-}
-
-fn tab_about(ui: &mut egui::Ui) {
-    ui.label(RichText::new("LiveCraft").strong());
-    ui.label(t!("settings.about_tagline"));
-    ui.label(RichText::new(t!("settings.about_ffmpeg")).small().color(DIM));
-    ui.label(RichText::new(t!("settings.about_ndi")).small().color(DIM));
 }

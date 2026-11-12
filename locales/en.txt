@@ -433,6 +433,7 @@ settings.add_source = Add a source
 settings.source_n = Source {n}
 settings.about_tagline = Live video mixer, rebuilt from the public documentation.
 settings.about_ffmpeg = Videos, cameras and outputs go through ffmpeg, installed separately.
+settings.about_version = Version {version}
 settings.compositing = Picture composition
 settings.compose_on_gpu = Compose on the graphics card
 settings.compositor_starting = Starting…
@@ -978,3 +979,17 @@ dvd.no_root = unreadable root directory
 
 # src/secret.rs
 secret.not_saved = Keys and passwords could not be protected: they are not saved and must be typed again at the next start
+
+# src/ui/updates.rs
+update.available = LiveCraft {version} is available
+update.open_page = Open this version's page
+update.dismiss = Hide for this version
+update.title = Updates
+update.at_start = Check for updates at start
+update.checking = Checking…
+update.failed = The check failed: {error}
+update.never = Not checked yet.
+update.up_to_date = Checked on {when}: LiveCraft is up to date.
+update.found = Checked on {when}: LiveCraft {version} is available.
+update.check_now = Check now
+update.what_is_sent = One request to GitHub's public API, a few seconds after start and at most once a day. It carries only the program's name and version, nothing about you or your projects.
