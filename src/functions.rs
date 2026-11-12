@@ -47,8 +47,8 @@ impl Args {
     }
 
     fn number(&self) -> Result<f32, String> {
-        let v = self.value.as_deref().ok_or("Value manquant")?;
-        v.trim().parse().map_err(|_| format!("Valeur illisible : {v}"))
+        let v = self.value.as_deref().ok_or(t!("functions.missing_value"))?;
+        v.trim().parse().map_err(|_| t!("functions.unreadable_value", value = v))
     }
 }
 
@@ -164,13 +164,14 @@ impl Engine {
     fn target(&self, a: &Args) -> Result<u64, String> {
         let s = self.state.lock().unwrap();
         // A function with no input means the one in Preview, as on the desk.
-        resolve(&s, a.input.as_deref().or(Some("0"))).ok_or_else(|| "Entrée introuvable".to_string())
+        resolve(&s, a.input.as_deref().or(Some("0")))
+            .ok_or_else(|| t!("functions.input_not_found").to_string())
     }
 
     fn with_input(&self, a: &Args, f: impl FnOnce(&mut Input)) -> Result<(), String> {
         let id = self.target(a)?;
         let mut s = self.state.lock().unwrap();
-        s.input_mut(id).map(f).ok_or_else(|| "Entrée introuvable".to_string())
+        s.input_mut(id).map(f).ok_or_else(|| t!("functions.input_not_found").to_string())
     }
 
     /// Runs a function by name, written in any case, as control surfaces and
@@ -305,7 +306,7 @@ impl Engine {
             }
             "AudioBus" | "AudioBusOn" | "AudioBusOff" => {
                 let letter = a.value.as_deref().unwrap_or("M").to_uppercase();
-                let bit = "MABCDEFG".find(&letter).ok_or("Bus inconnu")?;
+                let bit = "MABCDEFG".find(&letter).ok_or(t!("functions.unknown_bus"))?;
                 self.with_input(a, |i| {
                     let mask = 1u8 << bit;
                     i.audio.buses = match name {
@@ -383,12 +384,12 @@ impl Engine {
                     let s = self.state.lock().unwrap();
                     s.project.scripts.iter().find(|x| x.name == wanted).map(|x| x.code.clone())
                 };
-                self.run_script(code.ok_or("Script introuvable")?);
+                self.run_script(code.ok_or(t!("functions.script_not_found"))?);
             }
             "ScriptStopAll" => {
                 self.script_stop.fetch_add(1, Ordering::Relaxed);
             }
-            _ => return Err(format!("Fonction inconnue : {name}")),
+            _ => return Err(t!("functions.unknown_function", name = name)),
         }
         Ok(())
     }
@@ -406,7 +407,7 @@ impl Engine {
     fn transition(&self, kind: TransKind, a: &Args) -> Result<(), String> {
         let mut s = self.state.lock().unwrap();
         if a.input.is_some() {
-            let id = resolve(&s, a.input.as_deref()).ok_or("Entrée introuvable")?;
+            let id = resolve(&s, a.input.as_deref()).ok_or(t!("functions.input_not_found"))?;
             s.set_preview(id);
         }
         s.run_transition(kind, a.duration.unwrap_or(1000));
@@ -419,9 +420,10 @@ impl Engine {
             self.state.lock().unwrap().all_overlays_off();
             return Ok(());
         }
-        let digit = rest.chars().next().and_then(|c| c.to_digit(10)).ok_or("Canal inconnu")?;
+        let digit =
+            rest.chars().next().and_then(|c| c.to_digit(10)).ok_or(t!("functions.unknown_channel"))?;
         if !(1..=8).contains(&digit) {
-            return Err("Canal inconnu".into());
+            return Err(t!("functions.unknown_channel").into());
         }
         let slot = digit as usize - 1;
         let action = rest[1..].to_ascii_lowercase();
@@ -432,14 +434,14 @@ impl Engine {
             "in" => s.set_overlay(slot, Some(id?)),
             "out" | "off" => s.set_overlay(slot, None),
             "last" => s.overlay_button(slot),
-            _ => return Err(format!("Fonction inconnue : OverlayInput{rest}")),
+            _ => return Err(t!("functions.unknown_function", name = format!("OverlayInput{rest}"))),
         }
         Ok(())
     }
 
     fn playback_function(&self, name: &str, a: &Args) -> Result<(), String> {
         let id = self.target(a)?;
-        let rt = self.rt(id).ok_or("Entrée introuvable")?;
+        let rt = self.rt(id).ok_or(t!("functions.input_not_found"))?;
         match name {
             "Play" => rt.playing.store(true, Ordering::Relaxed),
             "Pause" => rt.playing.store(false, Ordering::Relaxed),
@@ -472,7 +474,7 @@ impl Engine {
 
     fn countdown_function(&self, name: &str, a: &Args) -> Result<(), String> {
         let id = self.target(a)?;
-        let rt = self.rt(id).ok_or("Entrée introuvable")?;
+        let rt = self.rt(id).ok_or(t!("functions.input_not_found"))?;
         match name {
             "StartCountdown" => rt.playing.store(true, Ordering::Relaxed),
             "PauseCountdown" => rt.playing.store(false, Ordering::Relaxed),
@@ -482,7 +484,7 @@ impl Engine {
             }
             _ => {
                 let v = a.value.as_deref().unwrap_or("");
-                let ms = parse_time(v).ok_or_else(|| format!("Durée illisible : {v}"))?;
+                let ms = parse_time(v).ok_or_else(|| t!("functions.unreadable_duration", value = v))?;
                 rt.dur_ms.store(ms, Ordering::Relaxed);
                 rt.seek_ms.store(0, Ordering::Relaxed);
             }
@@ -497,9 +499,9 @@ impl Engine {
             a.selected_name.as_deref().is_some_and(|n| n.to_lowercase().contains("sub") || n.ends_with('1'));
         {
             let mut s = self.state.lock().unwrap();
-            let kind = s.input_mut(id).map(|i| &mut i.kind).ok_or("Entrée introuvable")?;
+            let kind = s.input_mut(id).map(|i| &mut i.kind).ok_or(t!("functions.input_not_found"))?;
             let Kind::Title { text, sub, .. } = kind else {
-                return Err("Cette entrée n'est pas un titre".into());
+                return Err(t!("functions.not_a_title").into());
             };
             *(if second { sub } else { text }) = value;
         }
@@ -527,13 +529,18 @@ impl Engine {
         let wanted = a.value.as_deref().unwrap_or("").trim();
         let mut s = self.state.lock().unwrap();
         let Some(Kind::VirtualSet { cameras, .. }) = s.input(id).map(|i| &i.kind) else {
-            return Err("Cette entrée n'est pas un plateau virtuel".into());
+            return Err(t!("functions.not_a_set").into());
         };
         let n = match wanted.parse::<usize>() {
             Ok(n) => n.checked_sub(1),
-            Err(_) => cameras.iter().position(|c| c.name.eq_ignore_ascii_case(wanted)),
+            Err(_) => cameras.iter().position(|c| {
+                c.name.eq_ignore_ascii_case(wanted)
+                    || crate::sets::camera_label(&c.name).eq_ignore_ascii_case(wanted)
+            }),
         };
-        let n = n.filter(|n| *n < cameras.len()).ok_or_else(|| format!("Caméra introuvable : {wanted}"))?;
+        let n = n
+            .filter(|n| *n < cameras.len())
+            .ok_or_else(|| t!("functions.camera_not_found", name = wanted))?;
         s.set_camera(id, n, a.duration, Instant::now());
         Ok(())
     }

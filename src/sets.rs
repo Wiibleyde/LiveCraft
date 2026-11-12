@@ -39,6 +39,18 @@ pub fn default_cameras() -> Vec<SetCamera> {
     ]
 }
 
+/// What a preset is called on screen: the four defaults are saved in French, so existing
+/// projects and scripts keep matching them, and shown in the interface language.
+pub fn camera_label(name: &str) -> &str {
+    match name {
+        "Plan large" => t!("set.cam_wide"),
+        "Plan moyen" => t!("set.cam_medium"),
+        "Gros plan" => t!("set.cam_close"),
+        "Écran" => t!("set.cam_screen"),
+        _ => name,
+    }
+}
+
 /// Where the camera of a set rests: on its chosen preset.
 pub fn resting_view(kind: &Kind) -> Option<SetView> {
     let Kind::VirtualSet { cameras, camera, .. } = kind else { return None };

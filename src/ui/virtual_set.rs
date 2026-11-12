@@ -18,33 +18,23 @@ impl App {
             return;
         };
         ui.horizontal(|ui| {
-            ui.label("Décor");
-            ui.selectable_value(look, SetLook::Studio, "Studio");
-            ui.selectable_value(look, SetLook::Evening, "Soirée");
-            ui.selectable_value(look, SetLook::Empty, "Aucun");
+            ui.label(t!("set.decor"));
+            ui.selectable_value(look, SetLook::Studio, t!("set.studio"));
+            ui.selectable_value(look, SetLook::Evening, t!("set.evening"));
+            ui.selectable_value(look, SetLook::Empty, t!("set.none"));
         });
-        let built_in = if *look == SetLook::Empty { "Aucun" } else { "Décor intégré" };
+        let built_in = if *look == SetLook::Empty { t!("set.none") } else { t!("set.built_in") };
         ui.horizontal(|ui| {
-            ui.label("Fond");
+            ui.label(t!("set.background"));
             picture_combo(ui, "plateau-fond", background, &choices, built_in);
-            ui.label("Premier plan");
+            ui.label(t!("set.foreground"));
             picture_combo(ui, "plateau-avant", foreground, &choices, built_in);
         });
-        ui.label(
-            RichText::new("Une image ou une vidéo choisie remplace le décor intégré ; le premier plan doit être transparent.")
-                .small()
-                .color(DIM),
-        );
+        ui.label(RichText::new(t!("set.replace_note")).small().color(DIM));
 
         ui.separator();
-        ui.label(RichText::new("Présentateurs").strong());
-        ui.label(
-            RichText::new(
-                "La clé (fond vert) se règle dans les réglages de chaque présentateur, sa place dans l'onglet Couches.",
-            )
-            .small()
-            .color(DIM),
-        );
+        ui.label(RichText::new(t!("set.presenters")).strong());
+        ui.label(RichText::new(t!("set.presenters_note")).small().color(DIM));
         let mut remove = None;
         for (n, l) in input.layers.iter_mut().enumerate() {
             ui.horizontal(|ui| {
@@ -55,7 +45,7 @@ impl App {
                         ui.selectable_value(&mut l.input, *other, name);
                     }
                 });
-                if ui.small_button("Retirer").clicked() {
+                if ui.small_button(t!("set.remove")).clicked() {
                     remove = Some(n);
                 }
             });
@@ -64,21 +54,20 @@ impl App {
             input.layers.remove(n);
         }
         let room = input.layers.len() < 10 && !choices.is_empty();
-        if ui.add_enabled(room, egui::Button::new("Ajouter un présentateur")).clicked() {
+        if ui.add_enabled(room, egui::Button::new(t!("set.add_presenter"))).clicked() {
             input.layers.push(Layer::new(choices[0].0, sets::presenter_spot(input.layers.len())));
         }
 
         ui.separator();
-        ui.label(RichText::new("Caméras").strong());
-        ui.add(egui::Slider::new(move_ms, 0..=5000).text("durée d'un mouvement (ms)"));
+        ui.label(RichText::new(t!("set.cameras")).strong());
+        ui.add(egui::Slider::new(move_ms, 0..=5000).text(t!("set.move_time")));
         let mut go = None;
         let mut remove = None;
         for (n, cam) in cameras.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 let on = (*camera == n).then_some(GREEN);
-                let button =
-                    named(tiny(ui, &format!("C{}", n + 1), on), format!("Aller à la caméra {}", n + 1));
-                if button.on_hover_text("Y aller en douceur").clicked() {
+                let button = named(tiny(ui, &format!("C{}", n + 1), on), t!("set.go_to_camera", n = n + 1));
+                if button.on_hover_text(t!("set.go_smoothly")).clicked() {
                     go = Some(n);
                 }
                 ui.add(egui::TextEdit::singleline(&mut cam.name).desired_width(110.0));
@@ -88,7 +77,7 @@ impl App {
                 );
                 ui.add(egui::DragValue::new(&mut v.x).range(0.0..=1.0).speed(0.005).prefix("x "));
                 ui.add(egui::DragValue::new(&mut v.y).range(0.0..=1.0).speed(0.005).prefix("y "));
-                if ui.small_button("Retirer").clicked() {
+                if ui.small_button(t!("set.remove")).clicked() {
                     remove = Some(n);
                 }
             });
@@ -100,9 +89,9 @@ impl App {
             }
             *camera = (*camera).min(cameras.len().saturating_sub(1));
         }
-        if ui.button("Ajouter une caméra (vue actuelle)").clicked() {
+        if ui.button(t!("set.add_camera")).clicked() {
             let view = self.with(|s| s.set_view(id, Instant::now())).unwrap_or_default();
-            cameras.push(SetCamera { name: format!("Caméra {}", cameras.len() + 1), view });
+            cameras.push(SetCamera { name: t!("set.new_camera_name", n = cameras.len() + 1), view });
         }
         if let Some(n) = go {
             self.with(|s| s.set_camera(id, n, None, Instant::now()));
