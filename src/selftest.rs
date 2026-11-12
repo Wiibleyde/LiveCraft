@@ -323,12 +323,26 @@ mod tests {
 
         let first = engine.start_recording(&dir).unwrap();
         let t0 = Instant::now();
+        // The sender's sound comes in pieces of a third of a second, so what
+        // waits peaks as each one lands. Sound piling up raises the least that
+        // waits in every second, which is what Drift watches: that is checked,
+        // and the peak is shown.
         let waiting = || engine.rt(net).and_then(|r| r.audio.as_ref().map(|a| a.queued())).unwrap_or(0);
-        let mut most_waiting_late = 0;
+        let last_minute = Duration::from_secs(minutes * 60 - 60);
+        let (mut floor_late, mut peak_late) = (0, 0);
         while t0.elapsed() < Duration::from_secs(minutes * 60) {
-            sleep(Duration::from_secs(1));
-            if t0.elapsed() > Duration::from_secs(minutes * 60 - 60) {
-                most_waiting_late = most_waiting_late.max(waiting());
+            let second = Instant::now();
+            let mut floor = usize::MAX;
+            while second.elapsed() < Duration::from_secs(1) {
+                let now = waiting();
+                floor = floor.min(now);
+                if t0.elapsed() > last_minute {
+                    peak_late = peak_late.max(now);
+                }
+                sleep(Duration::from_millis(10));
+            }
+            if t0.elapsed() > last_minute {
+                floor_late = floor_late.max(floor);
             }
         }
         let late = engine.stats.late_ticks.load(Ordering::Relaxed);
@@ -348,12 +362,14 @@ mod tests {
             );
             assert!((picture - sound).abs() <= frame, "{file}");
         }
-        let waited_ms = most_waiting_late as f64 * 1000.0 / 48_000.0;
+        let ms = |frames: usize| frames as f64 * 1000.0 / 48_000.0;
+        let (floor_ms, peak_ms) = (ms(floor_late), ms(peak_late));
         println!(
             "{minutes} min: {late} late ticks; pictures sent {sent}, dropped {dropped}, repeated {repeated}; \
-             fast network sound waiting at most {waited_ms:.0} ms in the last minute"
+             fast network sound waiting in the last minute: least each second at most {floor_ms:.0} ms, \
+             peak {peak_ms:.0} ms"
         );
-        assert!(waited_ms < 100.0, "the fast sender's sound piles up");
+        assert!(floor_ms < 100.0, "the fast sender's sound piles up");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
