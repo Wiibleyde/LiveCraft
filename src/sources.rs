@@ -18,7 +18,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const AUDIO_RATE: usize = 48_000;
-pub(crate) const FFMPEG_MISSING: &str = "ffmpeg est introuvable : installez-le pour cette source";
+pub(crate) fn ffmpeg_missing() -> &'static str {
+    t!("sources.ffmpeg_missing")
+}
 
 /// Bounded queue of interleaved stereo samples.
 pub struct Ring {
@@ -348,7 +350,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32, hardware: boo
             Ok(f) => {
                 rt.publish(f);
             }
-            Err(e) => rt.set_status(format!("Image illisible : {e}")),
+            Err(e) => rt.set_status(t!("sources.unreadable_image", error = e)),
         },
         Kind::Photos { folder, seconds } => run_photos(&rt, &folder, seconds, w, h),
         Kind::Title { text, sub, style, color, accent, ticker_speed, countdown_ms, font, size, .. } => {
@@ -372,7 +374,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32, hardware: boo
         Kind::ImageSequence { first, fps: seq_fps, looped } => {
             match playback::Spec::sequence(&first, seq_fps, looped) {
                 Some(spec) => playback::run_file(&rt, spec, w, h, fps, None),
-                None => rt.set_status("Le nom du fichier doit finir par un numéro"),
+                None => rt.set_status(t!("sources.sequence_needs_number")),
             }
         }
         Kind::AudioFile { path, looped } => playback::run_audio_file(&rt, &path, looped),
@@ -472,7 +474,7 @@ fn run_system_audio(rt: &Arc<InputRt>) {
         Some(stream)
     });
     if opened.is_none() {
-        rt.set_status("Audio système indisponible");
+        rt.set_status(t!("sources.system_audio_unavailable"));
     }
     while !rt.stopped() {
         thread::sleep(Duration::from_millis(100));
@@ -569,7 +571,7 @@ fn run_photos(rt: &InputRt, folder: &str, seconds: f32, w: usize, h: usize) {
     });
     files.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
     if files.is_empty() {
-        rt.set_status("Aucune photo dans ce dossier");
+        rt.set_status(t!("sources.no_photos"));
         return;
     }
     rt.items.store(files.len() as u64, Ordering::Relaxed);
@@ -593,7 +595,7 @@ fn run_photos(rt: &InputRt, folder: &str, seconds: f32, w: usize, h: usize) {
                 Ok(f) => {
                     rt.publish(f);
                 }
-                Err(e) => rt.set_status(format!("Photo illisible : {e}")),
+                Err(e) => rt.set_status(t!("sources.unreadable_photo", error = e)),
             }
         }
         thread::sleep(Duration::from_millis(50));
@@ -780,7 +782,7 @@ pub(crate) fn run_capture(
         let mut child = match spawned {
             Ok(c) => c,
             Err(_) => {
-                rt.set_status(FFMPEG_MISSING);
+                rt.set_status(ffmpeg_missing());
                 return;
             }
         };
@@ -835,7 +837,7 @@ pub(crate) fn run_capture(
             on_card = !got_any;
         }
         let why = log.lock().unwrap().clone();
-        rt.set_status(format!("Source perdue, nouvel essai… {why}"));
+        rt.set_status(t!("sources.source_lost", reason = why));
         thread::sleep(Duration::from_secs(2));
     }
 }
@@ -853,7 +855,7 @@ fn run_microphone(rt: &Arc<InputRt>, device: &str) {
         let mut child = match spawned {
             Ok(c) => c,
             Err(_) => {
-                rt.set_status(FFMPEG_MISSING);
+                rt.set_status(ffmpeg_missing());
                 return;
             }
         };
@@ -865,7 +867,7 @@ fn run_microphone(rt: &Arc<InputRt>, device: &str) {
         if rt.stopped() {
             return;
         }
-        rt.set_status(format!("Micro perdu, nouvel essai… {}", log.lock().unwrap()));
+        rt.set_status(t!("sources.mic_lost", reason = log.lock().unwrap()));
         thread::sleep(Duration::from_secs(2));
     }
 }

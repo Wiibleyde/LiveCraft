@@ -192,7 +192,7 @@ fn play_once(
     let mut child = match spawned {
         Ok(c) => c,
         Err(_) => {
-            rt.set_status(FFMPEG_MISSING);
+            rt.set_status(ffmpeg_missing());
             return End::Stopped;
         }
     };
@@ -263,7 +263,7 @@ fn play_once(
         ring.clear();
     }
     if matches!(end, End::Failed) {
-        rt.set_status(format!("Lecture impossible : {}", log.lock().unwrap()));
+        rt.set_status(t!("playback.cannot_play", reason = log.lock().unwrap()));
     }
     end
 }
@@ -335,7 +335,7 @@ pub fn run_audio_file(rt: &Arc<InputRt>, path: &str, looped: bool) {
         let mut child = match spawned {
             Ok(c) => c,
             Err(_) => {
-                rt.set_status(FFMPEG_MISSING);
+                rt.set_status(ffmpeg_missing());
                 return;
             }
         };
@@ -404,7 +404,7 @@ pub fn run_list(
     card: Option<Hardware>,
 ) {
     if items.is_empty() {
-        rt.set_status("Liste vide");
+        rt.set_status(t!("playback.empty_list"));
         return;
     }
     if shuffle {
@@ -514,7 +514,7 @@ fn play_clip(rt: &Arc<InputRt>, play: &ReplayPlay, w: usize, h: usize, fps: u32)
     let mut outs = Vec::new();
     for file in play.files.iter().take(4) {
         let Some(mut child) = clip_decoder(file, play, cw, ch, fps) else {
-            rt.set_status(FFMPEG_MISSING);
+            rt.set_status(ffmpeg_missing());
             return;
         };
         outs.push(child.stdout.take().unwrap());
