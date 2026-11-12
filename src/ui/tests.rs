@@ -5,8 +5,9 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use std::thread::sleep;
 
+/// Tests find widgets by their French text, whatever language this computer speaks.
 fn saved(project: Project) -> Saved {
-    Saved::fresh(project)
+    Saved { language: "fr".into(), ..Saved::fresh(project) }
 }
 
 fn desk(project: Project) -> Harness<'static, App> {
@@ -540,4 +541,67 @@ fn every_named_function_is_known_and_leaves_the_desk_working() {
     engine.call("RemoveInput", &Args::new().input("2")).unwrap();
     assert!(engine.state.lock().unwrap().input(2).is_none());
     end(h);
+}
+
+/// Text on screen that only the French catalog holds: after a switch to English, any of it
+/// still showing was kept from before the switch.
+fn french_left(h: &Harness<'static, App>) -> Vec<String> {
+    use crate::i18n::{Lang, entries};
+    let english: std::collections::HashSet<&str> = entries(Lang::En).map(|(_, text)| text).collect();
+    let english_of: HashMap<&str, &str> = entries(Lang::En).collect();
+    let french_only: std::collections::HashSet<&str> = entries(Lang::Fr)
+        // Language names stay in their own language on purpose.
+        .filter(|(key, _)| !key.starts_with("language."))
+        .filter(|(key, text)| english_of.get(key) != Some(text) && !english.contains(text))
+        .map(|(_, text)| text)
+        .collect();
+    let found = std::cell::RefCell::new(Vec::new());
+    let _ = h
+        .query_all_by(|node| {
+            let shown = if node.role() == egui::accesskit::Role::Label { node.value() } else { node.label() };
+            if let Some(text) = shown.filter(|t| french_only.contains(t.as_str())) {
+                found.borrow_mut().push(text);
+            }
+            false
+        })
+        .count();
+    found.into_inner()
+}
+
+/// The language is picked in the settings and changes the whole window at once; the window
+/// that was open stays open on its tab, and the choice is what gets saved.
+#[test]
+fn choosing_english_in_the_settings_changes_the_window_at_once() {
+    // Demo names follow the language they were created in; English ones keep the search
+    // below about what the window itself says.
+    crate::i18n::set_language(crate::i18n::Lang::En);
+    let mut h = desk(small_project());
+    click(&mut h, "Réglages");
+    click(&mut h, "Options");
+    assert!(h.query_by_label("Coupe").is_some());
+    click(&mut h, "English");
+    assert!(h.state().settings_open, "the settings window is still open");
+    assert_eq!(h.state().settings_tab, 1, "on the same tab");
+    assert_eq!(h.state().saved.language, "en");
+    assert_eq!(french_left(&h), Vec::<String>::new(), "French left on screen");
+    assert!(h.query_by_label("Coupe").is_none());
+    click(&mut h, "Input CAM 3");
+    click(&mut h, "Cut");
+    assert_eq!(project(&h).program, Some(3), "the English buttons work");
+    click(&mut h, "Français");
+    assert_eq!(h.state().saved.language, "fr");
+    assert!(h.query_by_label("Coupe").is_some(), "and back");
+    end(h);
+}
+
+/// Sessions saved before the choice existed open in the system's language.
+#[test]
+fn an_older_session_without_a_language_still_opens() {
+    let saved: Saved = serde_json::from_str(r#"{"record_dir":"D:/videos"}"#).unwrap();
+    assert_eq!(saved.record_dir, "D:/videos");
+    assert_eq!(saved.language, "");
+    let again: Saved =
+        serde_json::from_str(&serde_json::to_string(&Saved { language: "en".into(), ..saved }).unwrap())
+            .unwrap();
+    assert_eq!(again.language, "en");
 }
