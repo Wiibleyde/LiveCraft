@@ -68,6 +68,7 @@ struct Desk {
 
 const SCENE: u64 = 20;
 const ALL_SETTINGS: u64 = 21;
+const SET: u64 = 22;
 
 /// Files the settings read, written once per size.
 fn files(w: usize) -> (String, String) {
@@ -159,6 +160,13 @@ fn desk(w: usize, h: usize) -> Desk {
     let mut graded = Input::new(ALL_SETTINGS, "Scène réglée", Kind::Scene).with_layers(layers);
     graded.colour = Colour { saturation: 0.6, ..Colour::default() };
     inputs.push(graded);
+    // The keyed presenter in a virtual set, its camera on the close-up.
+    let mut kind = sets::new_set(SetLook::Studio);
+    if let Kind::VirtualSet { camera, .. } = &mut kind {
+        *camera = 2;
+    }
+    let presenter = vec![Layer::new(13, sets::presenter_spot(0))];
+    inputs.push(Input::new(SET, "Plateau", kind).with_layers(presenter));
 
     let mut p = Project::blank();
     p.out_w = w;
@@ -169,7 +177,7 @@ fn desk(w: usize, h: usize) -> Desk {
     let rts = p
         .inputs
         .iter()
-        .filter(|i| i.kind != Kind::Scene)
+        .filter(|i| !matches!(i.kind, Kind::Scene | Kind::VirtualSet { .. }))
         .map(|i| {
             let rt = InputRt::new(false, true);
             let frame = match i.id {
