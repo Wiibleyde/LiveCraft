@@ -48,9 +48,10 @@ The HTTP and TCP interfaces use the published function names, so existing contro
 ## Features
 
 **Inputs.** Video files, image sequences, photo folders, lists, images, audio files, PowerPoint
-presentations, cameras and microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP,
-TS), NDI and OMT sources, web pages, solid colours, test cards, clocks, and titles with presets, tickers,
-countdowns and a simple designer.
+presentations, DVDs (a drive, a `VIDEO_TS` folder or an `.iso`, with titles and chapters), cameras and
+microphones, screen capture, system audio, network streams (SRT, RTMP, RTSP, TS), NDI and OMT sources, web
+pages, solid colours, test cards, clocks, and titles with presets, tickers, countdowns and a simple
+designer.
 
 **Virtual sets.** Keyed presenters stand in a decor, behind a desk, and a virtual camera glides
 between presets from a card button, a named function or remote control. Two decors are drawn by
@@ -136,7 +137,9 @@ LiveCraft runs on Windows, Linux and macOS. Capture goes through FFmpeg's own de
 ### What is missing today
 
 - **The picture is composed on the CPU.** It holds 1080p on a desktop processor; 4K will be heavy.
-- **No video calls**, no DVD inputs.
+- **No video calls.**
+- **DVDs need FFmpeg's `dvdvideo` demuxer**, as in the gyan.dev full builds. Copy-protected discs only
+  open if that FFmpeg can load libdvdcss.
 - **Animated title templates are not imported.** Their text comes across on a simple remade title.
 
 The full list is in the [roadmap](ROADMAP.md).

@@ -46,6 +46,8 @@ cargo run -- --selftest target/selftest
 
 `--selftest` needs FFmpeg. It generates its own media, then really plays, records, streams and
 replays, so run it for anything touching sources, outputs or timing.
+The DVD checks author a small disc with `dvdauthor` (and image it with `mkisofs` when present); without
+them on your `PATH`, they say so and are skipped.
 
 If you change the interface, add a test in `src/ui/tests.rs`: they drive the real window and engine
 with real clicks. If you fix a bug, add the test that would have caught it.
