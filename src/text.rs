@@ -14,17 +14,6 @@ fn default_font() -> &'static FontArc {
     })
 }
 
-fn font_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(w) = std::env::var("WINDIR") {
-        dirs.push(PathBuf::from(w).join("Fonts"));
-    }
-    if let Ok(l) = std::env::var("LOCALAPPDATA") {
-        dirs.push(PathBuf::from(l).join("Microsoft").join("Windows").join("Fonts"));
-    }
-    dirs
-}
-
 struct Installed {
     families: Vec<String>,
     bold: bool,
@@ -40,7 +29,8 @@ fn read_font_file(path: &std::path::Path, list: &mut Vec<Installed>) {
         let names = face.names().into_iter().filter(|n| {
             n.name_id == ttf_parser::name_id::FAMILY || n.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY
         });
-        let families = names.filter_map(|n| n.to_string()).map(|n| n.to_lowercase()).collect();
+        let families =
+            names.filter_map(|n| n.to_string().or_else(|| mac_roman(&n))).map(|n| n.to_lowercase()).collect();
         list.push(Installed {
             families,
             bold: face.is_bold(),
@@ -51,23 +41,37 @@ fn read_font_file(path: &std::path::Path, list: &mut Vec<Installed>) {
     }
 }
 
+/// Apple's own fonts may name themselves only in Mac Roman, which agrees
+/// with ASCII for the names people type.
+fn mac_roman(name: &ttf_parser::name::Name) -> Option<String> {
+    let roman = name.platform_id == ttf_parser::PlatformId::Macintosh && name.encoding_id == 0;
+    (roman && name.name.is_ascii()).then(|| String::from_utf8_lossy(name.name).into_owned())
+}
+
 /// What is installed, by the names inside the fonts: a file name says little
 /// (Arial Black is ariblk.ttf, Segoe UI is segoeui.ttf). Read once.
 fn installed() -> &'static [Installed] {
     static LIST: OnceLock<Vec<Installed>> = OnceLock::new();
     LIST.get_or_init(|| {
         let mut list = Vec::new();
-        for dir in font_dirs() {
-            let Ok(entries) = std::fs::read_dir(dir) else { continue };
-            for path in entries.flatten().map(|e| e.path()) {
-                let ext = path.extension().map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
-                if matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
-                    read_font_file(&path, &mut list);
-                }
-            }
+        for dir in crate::platform::font_dirs() {
+            read_font_dir(&dir, 0, &mut list);
         }
         list
     })
+}
+
+/// Linux sorts fonts into folders by maker, several levels deep.
+fn read_font_dir(dir: &std::path::Path, depth: u8, list: &mut Vec<Installed>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for path in entries.flatten().map(|e| e.path()) {
+        let ext = path.extension().map_or(String::new(), |e| e.to_string_lossy().to_lowercase());
+        if matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
+            read_font_file(&path, list);
+        } else if depth < 4 && path.is_dir() {
+            read_font_dir(&path, depth + 1, list);
+        }
+    }
 }
 
 /// The right weight of a family, never an italic if an upright one exists.
@@ -179,10 +183,21 @@ mod tests {
 
     #[test]
     fn fonts_are_found_by_their_real_name() {
-        // Every Windows has these; the file names do not spell the family.
-        let plain = find_font("Segoe UI", false).expect("Segoe UI");
-        let bold = find_font("segoe ui", true).expect("Segoe UI gras");
-        assert_ne!(plain.0, bold.0, "bold is its own file");
+        // Every system has its own; the file names do not spell the family.
+        let family = if cfg!(windows) {
+            "Segoe UI"
+        } else if cfg!(target_os = "macos") {
+            "Helvetica"
+        } else {
+            "DejaVu Sans"
+        };
+        let missing = || {
+            let some: Vec<_> = installed().iter().flat_map(|f| f.families.first()).take(20).collect();
+            panic!("{family} absente parmi {} polices, dont {some:?}", installed().len())
+        };
+        let plain = find_font(family, false).unwrap_or_else(missing);
+        let bold = find_font(&family.to_uppercase(), true).unwrap_or_else(missing);
+        assert_ne!(plain, bold, "bold is its own face");
         assert!(find_font("Police Qui N Existe Pas", false).is_none());
     }
 

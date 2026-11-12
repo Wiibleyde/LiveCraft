@@ -78,7 +78,7 @@ impl App {
                             ui.label(RichText::new(e).color(RED));
                         }
                         if v.running {
-                            let ms = v.latency as f32 * 1000.0 / sources::AUDIO_RATE as f32;
+                            let ms = v.latency as f32 * 1000.0 / crate::sources::AUDIO_RATE as f32;
                             let text = if v.latency == 0 {
                                 t!("plugin_chain.no_latency").to_string()
                             } else {

@@ -41,8 +41,12 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 pub type Hardware = &'static [&'static str];
 
 /// D3D11 is offered by every vendor's driver on Windows. For a codec the card
-/// does not know, ffmpeg quietly decodes in software instead.
-pub const CARD: Hardware = &["-hwaccel", "d3d11va"];
+/// does not know, ffmpeg quietly decodes in software instead. Linux and macOS
+/// have no such common name, so decoding stays on the processor there.
+#[cfg(windows)]
+pub const CARD: Option<Hardware> = Some(&["-hwaccel", "d3d11va"]);
+#[cfg(not(windows))]
+pub const CARD: Option<Hardware> = None;
 
 /// The most pixels per second still decoded by the processor: 1080p60.
 const SOFTWARE_LIMIT: u64 = 1920 * 1080 * 60;
@@ -106,7 +110,7 @@ fn run_limited(mut cmd: Command, limit: Duration) -> Option<String> {
     });
     let text = rx.recv_timeout(limit).ok();
     if text.is_none() {
-        crate::sources::end_process_tree(&mut child);
+        crate::platform::end_process_tree(&mut child);
     }
     let status = child.wait().ok()?;
     if status.success() { text } else { None }
@@ -232,6 +236,8 @@ mod tests {
         assert!(matches!(consult(Some(&failed), None, later), Need::Probe));
     }
 
+    // Uses `cmd` and `ping`.
+    #[cfg(windows)]
     #[test]
     fn a_probe_that_hangs_is_ended() {
         let mut cmd = Command::new("ping");

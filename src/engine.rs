@@ -122,7 +122,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn start(project: Project) -> Arc<Self> {
-        sources::tie_children_to_this_process();
+        crate::platform::tie_children_to_this_process();
         let (w, h) = (project.out_w, project.out_h);
         let next = project.inputs.iter().map(|i| i.id).max().unwrap_or(0) + 1;
         let engine = Arc::new(Self {

@@ -1,8 +1,9 @@
-//! Web page input: Edge or Chrome runs without a window, and streams what it
+//! Web page input: Chrome, Chromium or Edge runs without a window, and streams what it
 //! draws over its debugging connection. Only this computer can reach it.
 
 use crate::api::base64_decode;
 use crate::frame::Frame;
+pub(crate) use crate::platform::{ProcessTree, find_browser};
 use crate::sources::InputRt;
 use crate::titles;
 use serde_json::{Value, json};
@@ -15,63 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tungstenite::{Message, WebSocket};
-
-/// A browser runs as dozens of processes. A Windows job holds them together,
-/// so closing the job ends them all, even if this program crashes.
-pub(crate) struct ProcessTree(windows_sys::Win32::Foundation::HANDLE);
-
-impl ProcessTree {
-    pub(crate) fn hold(child: &std::process::Child) -> Option<Self> {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::System::JobObjects::*;
-        // SAFETY: the job handle is checked, the information block is sized for
-        // the call, and the child's handle is valid while child is borrowed.
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                return None;
-            }
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const _,
-                std::mem::size_of_val(&info) as u32,
-            );
-            AssignProcessToJobObject(job, child.as_raw_handle() as _);
-            Some(Self(job))
-        }
-    }
-}
-
-// SAFETY: a job handle is not tied to a thread and is only closed once, on drop.
-unsafe impl Send for ProcessTree {}
-
-impl Drop for ProcessTree {
-    fn drop(&mut self) {
-        // SAFETY: this handle came from CreateJobObjectW and is closed once.
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.0);
-        }
-    }
-}
-
-pub(crate) fn find_browser() -> Option<PathBuf> {
-    let roots = ["ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"];
-    let tails = ["Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe"];
-    for tail in tails {
-        for root in roots {
-            if let Ok(base) = std::env::var(root) {
-                let p = PathBuf::from(base).join(tail);
-                if p.exists() {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    None
-}
 
 pub(crate) fn free_port() -> Option<u16> {
     TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok().map(|a| a.port())
@@ -135,14 +79,14 @@ struct Host {
     port: u16,
     users: usize,
     profile: PathBuf,
-    _tree: Option<ProcessTree>,
+    tree: Option<ProcessTree>,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);
 
 fn launch(exe: &PathBuf) -> Option<Host> {
     let port = free_port()?;
-    let profile = std::env::temp_dir().join(format!("LiveCraft-web-{port}"));
+    let profile = private_profile("LiveCraft-web", port)?;
     let mut cmd = Command::new(exe);
     cmd.args(["--headless=new", "--hide-scrollbars", "--mute-audio", "--no-first-run"])
         .args(["--no-default-browser-check", "--disable-sync", "--disable-extensions"])
@@ -156,22 +100,23 @@ fn launch(exe: &PathBuf) -> Option<Host> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::platform::prepare_child(&mut cmd);
     let child = cmd.spawn().ok()?;
     let tree = ProcessTree::hold(&child);
-    Some(Host { child, port, users: 0, profile, _tree: tree })
+    Some(Host { child, port, users: 0, profile, tree })
 }
 
 /// Joins the running browser, starting it if needed. Returns its port.
 fn join_host(exe: &PathBuf) -> Option<u16> {
     let mut slot = HOST.lock().unwrap();
-    let dead = slot.as_mut().is_some_and(|h| !matches!(h.child.try_wait(), Ok(None)));
-    if dead {
-        *slot = None;
+    let dead = slot.as_mut().is_some_and(|h| crate::platform::has_exited(&mut h.child));
+    if dead && let Some(mut host) = slot.take() {
+        // Ended, but not reaped yet: its number is still its own, so what it
+        // left behind can be ended and the tree let go before the number is freed.
+        crate::platform::end_process_tree(&mut host.child);
+        clear_profile_later(host.profile.clone());
+        drop(host.tree.take());
+        let _ = host.child.wait();
     }
     if slot.is_none() {
         *slot = launch(exe);
@@ -189,8 +134,14 @@ fn leave_host(port: u16) {
     if host.users == 0
         && let Some(mut host) = slot.take()
     {
-        crate::sources::end_process_tree(&mut host.child);
+        crate::platform::end_process_tree(&mut host.child);
         clear_profile_later(host.profile.clone());
+        // The tree lets go before the browser is reaped, so the number it
+        // holds can never belong to another program by then.
+        drop(host.tree.take());
+        thread::spawn(move || {
+            let _ = host.child.wait();
+        });
     }
 }
 
@@ -278,13 +229,47 @@ pub(crate) fn run_page(
     }
 }
 
+/// A browser's profile folder, made new and private: in the account's own
+/// runtime folder where there is one (not the shared temporary folder), under
+/// a name nobody can predict, and refused if it already exists.
+pub(crate) fn private_profile(prefix: &str, port: u16) -> Option<PathBuf> {
+    let base = profile_base();
+    for _ in 0..8 {
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).ok()?;
+        let path = base.join(format!("{prefix}-{port}-{:016x}", u64::from_le_bytes(random)));
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut make = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut make, 0o700);
+        if make.create(&path).is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn profile_base() -> PathBuf {
+    #[cfg(unix)]
+    if let Some(dir) =
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_absolute() && d.is_dir())
+    {
+        return dir;
+    }
+    std::env::temp_dir()
+}
+
 /// Profiles left by a run that ended abruptly; a day old means nothing uses them.
 fn clear_old_profiles() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         thread::spawn(|| {
-            let Ok(list) = std::fs::read_dir(std::env::temp_dir()) else { return };
             let day = Duration::from_secs(86_400);
+            let mut folders = vec![std::env::temp_dir()];
+            if profile_base() != folders[0] {
+                folders.push(profile_base());
+            }
+            let list = folders.into_iter().filter_map(|d| std::fs::read_dir(d).ok()).flatten();
             for entry in list.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 // The program was called Regie before, and left the same kind.
@@ -488,6 +473,22 @@ fn show(rt: &InputRt, data: &str, size: (usize, usize), last_hash: &mut u64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_profile_is_new_private_and_hard_to_guess() {
+        let a = private_profile("LiveCraft-web-test", 1234).unwrap();
+        let b = private_profile("LiveCraft-web-test", 1234).unwrap();
+        assert_ne!(a, b, "never the same name twice");
+        assert!(a.is_dir() && a.starts_with(profile_base()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let _ = std::fs::remove_dir_all(a);
+        let _ = std::fs::remove_dir_all(b);
+    }
+
     use std::sync::mpsc;
 
     type Browser = WebSocket<TcpStream>;

@@ -84,7 +84,7 @@ impl App {
         mid.spacing_mut().item_spacing.x = 1.0;
         if bar_button(&mut mid, t!("bars.fullscreen"), self.windows_on[0]).clicked() {
             self.windows_on[0] = !self.windows_on[0];
-            self.screens = tools::list_screens();
+            self.screens = crate::platform::list_screens();
         }
         let open = egui::Button::new("").fill(BTN).min_size(vec2(16.0, 22.0));
         let menu = egui::containers::menu::MenuButton::from_button(open);
@@ -311,7 +311,7 @@ impl App {
     pub(super) fn open_settings(&mut self, tab: usize) {
         self.settings_open = true;
         self.settings_tab = tab;
-        self.screens = tools::list_screens();
+        self.screens = crate::platform::list_screens();
     }
 
     pub(super) fn status_line(&mut self, ui: &mut egui::Ui) {
@@ -367,7 +367,7 @@ impl App {
             self.say(t!("bars.nothing_to_capture"));
             return;
         };
-        let dir = user_dir("Pictures");
+        let dir = user_dir(crate::platform::pictures_dir());
         let _ = std::fs::create_dir_all(&dir);
         let name = chrono::Local::now().format("instantane-%Y%m%d-%H%M%S.png").to_string();
         let picked = rfd::FileDialog::new()

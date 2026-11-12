@@ -743,6 +743,7 @@ sources.no_photos = No photos in this folder
 sources.unreadable_photo = Unreadable photo: {error}
 sources.source_lost = Source lost, retrying… {reason}
 sources.mic_lost = Microphone lost, retrying… {reason}
+sources.system_audio_lost = System audio lost, retrying… {reason}
 
 # src/playback.rs
 playback.cannot_play = Cannot play: {reason}
@@ -752,7 +753,7 @@ playback.dvd_titles_unreadable = Titles unreadable: {error}
 playback.dvd_unreadable = No readable DVD: {error}
 
 # src/browser.rs
-browser.needs_edge_or_chrome = Edge or Chrome is needed for web pages
+browser.needs_edge_or_chrome = Chrome, Chromium or Edge is needed for web pages
 browser.cannot_launch = Could not start the browser
 browser.page_lost_retrying = Web page lost, retrying…
 browser.cannot_connect = Could not connect to the browser: {error}
@@ -804,6 +805,10 @@ outputs.srt_stopped = SRT stopped: {reason}
 
 # src/audio.rs
 audio.default_output = Default output
+
+# src/platform/
+platform.x11_needed = Screen capture needs an X11 or XWayland session
+platform.no_screen_access = No screen to capture: allow screen recording
 
 # src/mixer.rs
 mixer.cpu_chosen = chosen in the settings
@@ -966,3 +971,6 @@ dvd.too_big = {name} is too big
 dvd.missing_in_image = {name} is not in the image
 dvd.no_iso = image without an ISO 9660 file system
 dvd.no_root = unreadable root directory
+
+# src/secret.rs
+secret.not_saved = Keys and passwords could not be protected: they are not saved and must be typed again at the next start

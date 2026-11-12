@@ -24,7 +24,6 @@ use crate::model::*;
 use crate::netvideo::Net;
 use crate::output;
 use crate::secret;
-use crate::sources;
 use crate::widgets::*;
 use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, pos2, vec2};
 use serde::{Deserialize, Serialize};
@@ -55,9 +54,8 @@ struct Saved {
     language: String,
 }
 
-fn user_dir(sub: &str) -> PathBuf {
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(sub).join("LiveCraft")
+fn user_dir(base: PathBuf) -> PathBuf {
+    base.join("LiveCraft")
 }
 
 /// Copies the session file to `session.prev.json` beside it, replacing the
@@ -67,14 +65,12 @@ fn back_up_session(session: &std::path::Path) -> bool {
 }
 
 fn saved_path() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("LiveCraft").join("session.json")
+    crate::platform::config_dir().join("LiveCraft").join("session.json")
 }
 
 /// Where the session lived when the program was called Regie.
 fn older_saved_path() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("Regie").join("session.json")
+    crate::platform::config_dir().join("Regie").join("session.json")
 }
 
 /// A new name must not cost anyone their desk: the old session is read until
@@ -116,7 +112,7 @@ impl Saved {
     fn fresh(project: Project) -> Self {
         Self {
             project,
-            record_dir: user_dir("Videos").to_string_lossy().into_owned(),
+            record_dir: user_dir(crate::platform::videos_dir()).to_string_lossy().into_owned(),
             last_file: None,
             remote_lan: false,
             remote_password: String::new(),
@@ -334,7 +330,7 @@ impl App {
         let encoders = Arc::new(Mutex::new(vec!["libx264".to_string()]));
         let (d, e) = (devices.clone(), encoders.clone());
         std::thread::spawn(move || {
-            *d.lock().unwrap() = sources::list_devices();
+            *d.lock().unwrap() = crate::platform::list_devices();
             *e.lock().unwrap() = output::list_encoders();
         });
 
@@ -410,7 +406,7 @@ impl App {
             windows_on: [false; ROUTES],
             external_route: Route::Output,
             want_fullscreen: [true, true, false],
-            screens: tools::list_screens(),
+            screens: crate::platform::list_screens(),
             confirm_new: false,
             confirm_open: None,
             pending_restart: None,
@@ -488,9 +484,9 @@ impl App {
             return;
         }
         self.devices_at = Instant::now();
-        self.screens = tools::list_screens();
+        self.screens = crate::platform::list_screens();
         let devices = self.devices.clone();
-        std::thread::spawn(move || *devices.lock().unwrap() = sources::list_devices());
+        std::thread::spawn(move || *devices.lock().unwrap() = crate::platform::list_devices());
     }
 
     /// Network sources come and go: while a list of them is on screen, it is
@@ -747,6 +743,9 @@ impl eframe::App for App {
         self.screen_windows(&ctx, &project);
         self.run_pending_restart();
         self.autosave(&project);
+        if secret::take_dropped() {
+            self.say(t!("secret.not_saved"));
+        }
         self.handle_screenshot(&ctx);
         // Clock and meters tick over even when the picture is still.
         ctx.request_repaint_after(Duration::from_millis(100));

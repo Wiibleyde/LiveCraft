@@ -4,7 +4,8 @@
 //! program is shipped: they are started from where they are installed, as
 //! ffmpeg is.
 
-use crate::sources::{InputRt, end_process_tree};
+use crate::platform::end_process_tree;
+use crate::sources::InputRt;
 use crate::titles;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{BufRead, BufReader};
@@ -651,6 +652,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_reused_process_id_under_another_name_is_left_alone() {
         let out = std::env::temp_dir().join(format!("lc-pid-reuse-{}", std::process::id()));
@@ -667,6 +669,7 @@ mod tests {
         assert!(alive, "a process that is not PowerPoint must survive");
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_given_up_conversion_ends_the_powerpoint_it_started_and_only_that() {
         let out = std::env::temp_dir().join(format!("lc-pid-{}", std::process::id()));

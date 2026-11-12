@@ -757,6 +757,8 @@ fn a_moving_setting_restarts_its_source_once_it_settles() {
     end(h);
 }
 
+// Hardware decoding exists on Windows only.
+#[cfg(windows)]
 #[test]
 fn turning_off_the_card_moves_running_streams_to_software_only() {
     // A listening stream waits for a sender, so its decoder stays as started.
@@ -1001,7 +1003,7 @@ fn a_dropped_dvd_folder_plays_and_steps_through_chapters() {
     until(&mut h, "trois chapitres en rouge", || {
         rt.items.load(Ordering::Relaxed) == 3 && near(centre(&rt), RED)
     });
-    let on = |rt: &sources::InputRt, n: u64, colour| {
+    let on = |rt: &crate::sources::InputRt, n: u64, colour| {
         rt.item.load(Ordering::Relaxed) == n && near(centre(rt), colour)
     };
     click(&mut h, "Chapitre suivant disque");

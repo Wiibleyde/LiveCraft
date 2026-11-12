@@ -721,7 +721,7 @@ mod tests {
             heard.extend(out.iter().step_by(2));
         }
         let read = &heard[5 * AUDIO_RATE..9 * AUDIO_RATE];
-        if let Err(e) = crate::livecheck::judge_tone(read, AUDIO_RATE) {
+        if let Err(e) = crate::clock::judge_tone(read, AUDIO_RATE) {
             panic!("{e}");
         }
     }

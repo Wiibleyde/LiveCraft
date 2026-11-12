@@ -323,6 +323,42 @@ impl Drift {
     }
 }
 
+/// The pitch of the tone the live check and the drift test listen for.
+#[cfg(any(windows, test))]
+pub(crate) const TONE_HZ: f32 = 1000.0;
+
+/// The tone must be there, loud enough and mostly alone.
+#[cfg(any(windows, test))]
+pub(crate) fn judge_tone(samples: &[f32], rate: usize) -> Result<String, String> {
+    // The first half second may still hold what the encoder started with.
+    let samples = samples.get(rate / 2..).unwrap_or_default();
+    if samples.len() < rate {
+        return Err(format!("{} ms de son reçus", samples.len() * 1000 / rate));
+    }
+    let power = samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32;
+    // Goertzel: the strength of one frequency, without a full spectrum.
+    let k = 2.0 * (std::f32::consts::TAU * TONE_HZ / rate as f32).cos();
+    let (mut s1, mut s2) = (0f32, 0f32);
+    for &v in samples {
+        let s0 = v + k * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let n = samples.len() as f32;
+    let tone_power = 2.0 * (s1 * s1 + s2 * s2 - k * s1 * s2) / (n * n);
+    let db = |p: f32| 10.0 * p.max(1e-12).log10();
+    if tone_power < 1e-4 {
+        return Err(format!("pas de son à {TONE_HZ} Hz : {:.0} dB au total", db(power)));
+    }
+    if tone_power < power * 0.8 {
+        return Err(format!(
+            "son brouillé : la tonalité ne fait que {:.0} % du son",
+            tone_power / power * 100.0
+        ));
+    }
+    Ok(format!("tonalité {TONE_HZ} Hz à {:.0} dB", db(tone_power)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

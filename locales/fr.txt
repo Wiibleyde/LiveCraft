@@ -743,6 +743,7 @@ sources.no_photos = Aucune photo dans ce dossier
 sources.unreadable_photo = Photo illisible : {error}
 sources.source_lost = Source perdue, nouvel essai… {reason}
 sources.mic_lost = Micro perdu, nouvel essai… {reason}
+sources.system_audio_lost = Audio système perdu, nouvel essai… {reason}
 
 # src/playback.rs
 playback.cannot_play = Lecture impossible : {reason}
@@ -752,7 +753,7 @@ playback.dvd_titles_unreadable = Titres illisibles : {error}
 playback.dvd_unreadable = Aucun DVD lisible : {error}
 
 # src/browser.rs
-browser.needs_edge_or_chrome = Edge ou Chrome est nécessaire pour les pages web
+browser.needs_edge_or_chrome = Chrome, Chromium ou Edge est nécessaire pour les pages web
 browser.cannot_launch = Impossible de lancer le navigateur
 browser.page_lost_retrying = Page web perdue, nouvel essai…
 browser.cannot_connect = Connexion au navigateur impossible : {error}
@@ -804,6 +805,10 @@ outputs.srt_stopped = SRT arrêté : {reason}
 
 # src/audio.rs
 audio.default_output = Sortie par défaut
+
+# src/platform/
+platform.x11_needed = La capture d'écran demande une session X11 ou XWayland
+platform.no_screen_access = Aucun écran à capturer : autorisez l'enregistrement de l'écran
 
 # src/mixer.rs
 mixer.cpu_chosen = choisi dans les réglages
@@ -966,3 +971,6 @@ dvd.too_big = {name} est trop grand
 dvd.missing_in_image = {name} absent de l'image
 dvd.no_iso = image sans système de fichiers ISO 9660
 dvd.no_root = répertoire racine illisible
+
+# src/secret.rs
+secret.not_saved = Les clés et mots de passe n'ont pas pu être protégés : ils ne sont pas enregistrés et sont à ressaisir au prochain démarrage

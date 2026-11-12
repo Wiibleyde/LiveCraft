@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/Wiibleyde/LiveCraft/releases/latest"><img alt="Download" src="https://img.shields.io/badge/download-latest%20release-blue?logo=github"></a>
   <img alt="100% Rust" src="https://img.shields.io/badge/100%25-Rust-orange">
-  <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-blue">
+  <img alt="Platforms: Windows, Linux, macOS" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-blue">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green">
   <img alt="Status: early alpha" src="https://img.shields.io/badge/status-early%20alpha-red">
   <img alt="Contributions welcome" src="https://img.shields.io/badge/contributions-welcome-brightgreen">
@@ -43,8 +43,8 @@ administrator rights.
 3. Alpha builds are not signed yet, so Windows SmartScreen may warn: click **More info**, then
    **Run anyway**. Checksums are in `SHA256SUMS.txt` next to the files.
 
-Windows is the only platform released so far; Linux and macOS are not available yet, and a pull
-request for them is in progress.
+Released builds are for Windows. Linux and macOS run from source for now (experimental, see
+[Platforms](#platforms)); packaged builds for them will follow.
 
 ### 🎛️ Familiar by design
 
@@ -115,8 +115,8 @@ scripts, VISCA PTZ control, a telestrator, and a web controller for phones and t
 
 On Windows, take the installer or the portable zip from the [releases](../../releases/latest). It installs for
 your account without administrator rights. FFmpeg is not included: install it with
-`winget install Gyan.FFmpeg`, or see the `FFmpeg.txt` next to the program. Web inputs also need Edge or
-Chrome, and presentations need Microsoft PowerPoint or
+`winget install Gyan.FFmpeg`, or see the `FFmpeg.txt` next to the program. Web inputs also need Chrome,
+Chromium or Edge, and presentations need Microsoft PowerPoint or
 [LibreOffice](https://www.libreoffice.org). How releases are made, signed and built is in [docs/releasing.md](docs/releasing.md).
 
 To build it yourself, you need [Rust](https://rustup.rs) (edition 2024), and [FFmpeg](https://ffmpeg.org)
@@ -144,8 +144,27 @@ livecraft --screenshot out.png            # start, save a picture of the window,
 livecraft --lang en                       # start in English (or fr), and keep that choice
 ```
 
+### Platforms
+
+LiveCraft runs on Windows, Linux and macOS. Capture goes through FFmpeg's own devices on each:
+
+| | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| Cameras | DirectShow | Video4Linux | AVFoundation |
+| Audio inputs | DirectShow | PulseAudio or PipeWire, else ALSA | AVFoundation |
+| Screen capture | every screen | the X display (`x11grab`) | the main screen |
+| System audio | output loopback | monitor of the default output | output loopback, macOS 14.6 and later |
+| Secrets | your Windows account | Secret Service keyring | Keychain |
+
+- **Linux** builds need the ALSA headers and `pkg-config` (`libasound2-dev` on Debian and Ubuntu,
+  `alsa-lib-devel` on Fedora). Your FFmpeg must include `v4l2`, `pulse` and `x11grab`, as distribution
+  builds do. Under Wayland, screen capture goes through XWayland and only sees windows of X programs.
+- **macOS** asks once for the camera, the microphone and screen recording; allow them for the terminal
+  or the app that starts LiveCraft. FFmpeg from Homebrew has everything needed.
+
 > [!IMPORTANT]
-> LiveCraft is **early alpha and not ready for a show that matters.** It has run on one Windows machine.
+> LiveCraft is **early alpha and not ready for a show that matters.** It has run on one Windows machine
+> and on Linux under WSL; on macOS it is only built and tested by CI so far.
 > Tests cover the desk, the interface and real encoding to local files and a local stream, but it has
 > **not** been tried with physical cameras, capture cards, PTZ heads or a live streaming platform.
 > The interface speaks French and English: it follows the system language, and Settings › Options
@@ -153,8 +172,6 @@ livecraft --lang en                       # start in English (or fr), and keep t
 
 ### What is missing today
 
-- **Windows only for now.** The code uses Windows APIs for capture, screens and secrets. Linux and
-  macOS are not released yet.
 - **Without a graphics card, the picture is composed on the CPU.** It holds 1080p on a desktop processor;
   4K needs a DirectX 12 or Vulkan card, which LiveCraft uses by itself when there is one.
 - **DVDs need FFmpeg's `dvdvideo` demuxer**, as in the gyan.dev full builds. Copy-protected discs only
@@ -191,7 +208,7 @@ for it. Close other programs using a Softcam camera first: only one can exist at
 Contributions of every size are welcome, in English or in French. You do not need to write code:
 
 - 🎥 **Try it with real gear** and tell us what happens. This is the most useful thing right now.
-- 🐛 **Open an issue** with your Windows version, your hardware and what you expected.
+- 🐛 **Open an issue** with your system and its version, your hardware and what you expected.
 - 🌍 **Translate the interface**: a language is one text file in [`locales/`](locales).
 - 🦀 **Take something from the [roadmap](ROADMAP.md).**
 

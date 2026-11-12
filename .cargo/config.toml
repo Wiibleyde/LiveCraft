@@ -1,3 +1,6 @@
-# Built and run on this machine: pixel loops gain a lot from wider instructions.
-[build]
+# Pixel loops gain a lot from wider instructions. Only recent x86-64 processors
+# know this level, so only Windows builds ask for it, where the installer ships
+# a build for any processor; ARM ones, such as Apple's, and Linux or Intel Mac
+# builds keep the portable defaults.
+[target.'cfg(all(windows, target_arch = "x86_64"))']
 rustflags = ["-C", "target-cpu=x86-64-v3"]

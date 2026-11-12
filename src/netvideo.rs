@@ -6,7 +6,9 @@ use crate::frame::{Frame, ROWS};
 use crate::sources::{AUDIO_RATE, InputRt};
 use crate::{ndi, omt};
 use rayon::prelude::*;
+#[cfg(windows)]
 use std::ffi::CString;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,8 +72,28 @@ impl Net {
 
 /// A runtime library, loaded for good: its functions are kept for the life of
 /// the program, so it is never unloaded.
+#[cfg(windows)]
 pub(crate) struct Library(windows_sys::Win32::Foundation::HMODULE);
 
+/// The NDI and OMT runtimes are only looked for on Windows so far: elsewhere
+/// they count as missing, and the rest of LiveCraft works without them.
+#[cfg(not(windows))]
+pub(crate) struct Library(std::convert::Infallible);
+
+#[cfg(not(windows))]
+impl Library {
+    pub(crate) fn open(_candidates: &[PathBuf]) -> Option<Self> {
+        None
+    }
+
+    /// # Safety
+    /// Never callable: no `Library` exists on this system.
+    pub(crate) unsafe fn symbol<T: Copy>(&self, _name: &str) -> Result<T, String> {
+        match self.0 {}
+    }
+}
+
+#[cfg(windows)]
 impl Library {
     /// The first existing candidate that loads. Only a full path is ever
     /// loaded: a bare name would also be searched for in the current folder,
@@ -425,19 +447,22 @@ mod tests {
     #[test]
     fn runtime_candidates_are_full_paths_only() {
         let sep = if cfg!(windows) { ";" } else { ":" };
-        let path = format!("rel{sep}{sep}C:\\bin{sep}.{sep}C:\\tools");
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        let at = |name: &str| format!("{root}{name}");
+        let path = format!("rel{sep}{sep}{}{sep}.{sep}{}", at("bin"), at("tools"));
         let got = candidates_from(
             "x.dll",
-            vec!["relatif".into(), "C:\\ndi".into(), "".into()],
-            Some(PathBuf::from("C:\\app")),
+            vec!["relatif".into(), at("ndi").into(), "".into()],
+            Some(PathBuf::from(at("app"))),
             Some(path.into()),
         );
         assert!(got.iter().all(|p| p.is_absolute()), "{got:?}");
         assert!(got.iter().all(|p| p.file_name().unwrap() == "x.dll"));
         assert!(!got.contains(&PathBuf::from("x.dll")), "never the bare name");
-        let order: Vec<String> =
-            got.iter().map(|p| p.parent().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(order, [r"C:\ndi", r"C:\app", r"C:\bin", r"C:\tools"]);
+        let order: Vec<PathBuf> = got.iter().map(|p| p.parent().unwrap().to_path_buf()).collect();
+        let want: Vec<PathBuf> =
+            ["ndi", "app", "bin", "tools"].iter().map(|n| PathBuf::from(at(n))).collect();
+        assert_eq!(order, want);
     }
 
     #[test]

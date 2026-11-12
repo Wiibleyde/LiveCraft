@@ -211,8 +211,7 @@ fn lut_file(original: Option<&str>, embedded: Option<&str>) -> String {
     let stem = Path::new(original.unwrap_or("lut"))
         .file_stem()
         .map_or("lut".to_string(), |s| s.to_string_lossy().into_owned());
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    let dir = Path::new(&base).join("LiveCraft").join("luts");
+    let dir = crate::platform::config_dir().join("LiveCraft").join("luts");
     // Two projects can hold different LUTs under the same name.
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(data, &mut hash);

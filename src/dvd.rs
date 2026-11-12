@@ -72,7 +72,15 @@ pub fn optical_drives_cached() -> Vec<String> {
     }
 }
 
+/// Elsewhere than Windows there are no drive letters to list: a disc is
+/// opened from an image or a folder.
+#[cfg(not(windows))]
+fn optical_drives() -> Vec<String> {
+    Vec::new()
+}
+
 /// Drive letters of the computer's optical drives, such as `D:\`.
+#[cfg(windows)]
 fn optical_drives() -> Vec<String> {
     use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     // DRIVE_CDROM, as documented for GetDriveTypeW; DVD drives report it too.
@@ -344,6 +352,8 @@ mod tests {
         assert_eq!(recognise(&dir.join("Disque")), Some(holder.clone()));
         assert_eq!(recognise(&video_ts), Some(holder), "picking VIDEO_TS itself opens the disc");
         assert_eq!(recognise(&dir), None, "a folder above the disc is not one");
+        // A drive letter only means something to Windows.
+        #[cfg(windows)]
         assert_eq!(display_name("D:\\"), "DVD D:");
         assert_eq!(display_name("C:/films/vacances.iso"), "vacances");
         std::fs::remove_dir_all(&dir).unwrap();
