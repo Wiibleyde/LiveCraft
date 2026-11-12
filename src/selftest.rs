@@ -3,7 +3,7 @@
 //! remote control, then checks the files it made.
 
 use crate::api::ApiConfig;
-use crate::engine::Engine;
+use crate::engine::{Compositor, Engine};
 use crate::functions::Args;
 use crate::model::*;
 use crate::sources::ffmpeg;
@@ -172,6 +172,12 @@ fn check(dir: &str) -> Result<String, String> {
         engine.recorders.lock().unwrap().iter().map(|r| r.dropped.load(Ordering::Relaxed)).sum();
     let fps = engine.stats.ticks_per_sec.load(Ordering::Relaxed);
     let mix_us = engine.stats.mix_us.load(Ordering::Relaxed);
+    // Says which side this run has checked: the card when there is one.
+    let by = match engine.compositor.lock().unwrap().clone() {
+        Compositor::Gpu(name) => format!("la carte graphique {name}"),
+        Compositor::Cpu(why) => format!("le processeur ({why})"),
+        Compositor::Starting => "personne encore".into(),
+    };
     if let Some(e) = engine.output_error.lock().unwrap().clone() {
         return Err(e);
     }
@@ -201,7 +207,7 @@ fn check(dir: &str) -> Result<String, String> {
         return Err("multi-enregistrement sans fichier".into());
     }
     Ok(format!(
-        "enregistreurs {one}/ {second}| diffusion {streamed}| cadence {fps}/s, rendu {mix_us} µs, \
-         images perdues {dropped}, crête son {peak:.2}"
+        "enregistreurs {one}/ {second}| diffusion {streamed}| cadence {fps}/s, rendu {mix_us} µs \
+         par {by}, images perdues {dropped}, crête son {peak:.2}"
     ))
 }
