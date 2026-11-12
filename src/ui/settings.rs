@@ -356,6 +356,7 @@ impl App {
     fn tab_remote(&mut self, ui: &mut egui::Ui) {
         ui.label(t!("settings.remote_ports", http = HTTP_PORT, tcp = TCP_PORT));
         ui.label(RichText::new(t!("settings.remote_local", port = HTTP_PORT)).small());
+        ui.label(RichText::new(t!("settings.remote_call_links")).small());
         ui.checkbox(&mut self.saved.remote_lan, t!("settings.remote_lan"));
         ui.horizontal(|ui| {
             ui.label(t!("settings.password"));

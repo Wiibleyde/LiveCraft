@@ -167,6 +167,57 @@ pub enum Kind {
         #[serde(default)]
         move_ms: u32,
     },
+    /// A remote guest's camera and microphone, sent from their own browser.
+    VideoCall {
+        /// The secret part of the guest's link. A new one locks the old link out.
+        #[serde(default)]
+        token: String,
+        /// Name or address put in the link for guests reaching this computer
+        /// from outside; empty uses its address on the local network.
+        #[serde(default)]
+        address: String,
+        #[serde(default)]
+        stun: String,
+        #[serde(default)]
+        turn: String,
+        #[serde(default)]
+        turn_user: String,
+        #[serde(default)]
+        turn_password: String,
+        #[serde(default)]
+        return_sound: ReturnSound,
+    },
+}
+
+/// What a video call guest hears back, along with the program picture.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub enum ReturnSound {
+    /// The main mix without the guest, who would otherwise hear their own
+    /// voice come back late.
+    #[default]
+    MasterMinusGuest,
+    /// One bus, 1 to 7 for A to G: a mix built for the guest.
+    Bus(u8),
+    Off,
+}
+
+impl ReturnSound {
+    pub fn all() -> Vec<ReturnSound> {
+        let mut v = vec![ReturnSound::MasterMinusGuest];
+        v.extend((1..=7).map(ReturnSound::Bus));
+        v.push(ReturnSound::Off);
+        v
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            ReturnSound::MasterMinusGuest => t!("model.return.master_minus_guest").into(),
+            ReturnSound::Bus(n) => {
+                t!("model.return.bus", name = "ABCDEFG".chars().nth(n as usize - 1).unwrap_or('?'))
+            }
+            ReturnSound::Off => t!("model.return.off").into(),
+        }
+    }
 }
 
 impl Kind {
@@ -200,6 +251,7 @@ impl Kind {
             Kind::Replay => t!("model.kind.replay"),
             Kind::Telestrator { .. } => t!("model.kind.telestrator"),
             Kind::VirtualSet { .. } => t!("model.kind.virtual_set"),
+            Kind::VideoCall { .. } => t!("model.kind.video_call"),
         }
     }
 
@@ -228,6 +280,7 @@ impl Kind {
             Kind::Replay => "Replay",
             Kind::Telestrator { .. } => "Telestrator",
             Kind::VirtualSet { .. } => "VirtualSet",
+            Kind::VideoCall { .. } => "VideoCall",
         }
     }
 
@@ -244,6 +297,7 @@ impl Kind {
                 | Kind::Microphone { .. }
                 | Kind::SystemAudio
                 | Kind::Tone
+                | Kind::VideoCall { .. }
         )
     }
 
@@ -278,6 +332,18 @@ impl Kind {
         }
     }
 
+    /// Whether a running source must start again after this change. A call
+    /// keeps its guest while only the link's address or the return changes.
+    pub fn restarts_source(&self, before: &Kind) -> bool {
+        match (self, before) {
+            (
+                Kind::VideoCall { token, stun, turn, turn_user, turn_password, .. },
+                Kind::VideoCall { token: t, stun: s, turn: u, turn_user: n, turn_password: p, .. },
+            ) => (token, stun, turn, turn_user, turn_password) != (t, s, u, n, p),
+            _ => self != before,
+        }
+    }
+
     /// Live pictures worth keeping as separate recordings.
     pub fn is_recordable(&self) -> bool {
         matches!(
@@ -288,6 +354,7 @@ impl Kind {
                 | Kind::Omt { .. }
                 | Kind::Screen
                 | Kind::Video { .. }
+                | Kind::VideoCall { .. }
         )
     }
 }
@@ -1254,8 +1321,13 @@ impl Project {
         self.streams.iter_mut().for_each(|s| s.key.clear());
         self.srt.iter_mut().for_each(|o| o.url = without_passphrase(&o.url));
         for i in &mut self.inputs {
-            if let Kind::Network { url, .. } = &mut i.kind {
-                *url = without_passphrase(url);
+            match &mut i.kind {
+                Kind::Network { url, .. } => *url = without_passphrase(url),
+                Kind::VideoCall { token, turn_password, .. } => {
+                    token.clear();
+                    turn_password.clear();
+                }
+                _ => {}
             }
         }
         self
