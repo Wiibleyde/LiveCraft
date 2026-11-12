@@ -11,9 +11,9 @@ use rayon::prelude::*;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -291,8 +291,13 @@ pub struct Readback {
     h: usize,
     stride: usize,
     index: wgpu::SubmissionIndex,
-    mapped: Arc<AtomicBool>,
+    /// `WAITING`, `MAPPED` or `FAILED`, set by the card's callback.
+    mapped: Arc<AtomicU8>,
 }
+
+const WAITING: u8 = 0;
+const MAPPED: u8 = 1;
+const FAILED: u8 = 2;
 
 impl Readback {
     pub fn size(&self) -> (usize, usize) {
@@ -671,11 +676,11 @@ impl Work {
             slot
         };
         let index = self.flush();
-        let mapped = Arc::new(AtomicBool::new(false));
+        let mapped = Arc::new(AtomicU8::new(WAITING));
         let done = mapped.clone();
-        self.staging.borrow()[slot]
-            .buffer
-            .map_async(wgpu::MapMode::Read, .., move |r| done.store(r.is_ok(), Ordering::Release));
+        self.staging.borrow()[slot].buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            done.store(if r.is_ok() { MAPPED } else { FAILED }, Ordering::Release)
+        });
         Readback { slot, w, h, stride, index, mapped }
     }
 
@@ -683,12 +688,24 @@ impl Work {
     /// `out` keeps what it held, and the card is reported broken.
     fn finish_readback(&self, back: Readback, out: &mut Frame) {
         let wait = wgpu::PollType::Wait { submission_index: Some(back.index), timeout: Some(PATIENCE) };
-        if let Err(e) = self.dev.device.poll(wait) {
-            self.dev.broken.lock().unwrap().get_or_insert_with(|| t!("gpu.not_responding", error = e));
+        match self.dev.device.poll(wait) {
+            Err(e) => {
+                self.dev.broken.lock().unwrap().get_or_insert_with(|| t!("gpu.not_responding", error = e));
+            }
+            Ok(_) => {
+                // Another thread polling the same card may have taken this
+                // picture's callback along with its own, and runs it as soon
+                // as it lets go of the card: the picture is there, its word
+                // is a moment away.
+                let until = Instant::now() + PATIENCE;
+                while back.mapped.load(Ordering::Acquire) == WAITING && Instant::now() < until {
+                    std::thread::yield_now();
+                }
+            }
         }
         let mut list = self.staging.borrow_mut();
         let staging = &mut list[back.slot];
-        let copied = back.mapped.load(Ordering::Acquire) && {
+        let copied = back.mapped.load(Ordering::Acquire) == MAPPED && {
             if (out.w, out.h) != (back.w, back.h) {
                 *out = Frame::for_overwrite(back.w, back.h);
             }

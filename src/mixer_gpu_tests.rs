@@ -319,6 +319,36 @@ fn a_live_preview_under_a_still_output_lets_its_frames_go() {
     }
 }
 
+/// Every engine in a process shares one card, and the thread that runs a
+/// picture's "ready" callback may be another one polling the card, a moment
+/// after this one stopped waiting. Each must still get its own picture back,
+/// and the card must not count as broken.
+#[test]
+fn painters_on_several_threads_each_get_their_own_pictures_back() {
+    if card().is_none() {
+        return;
+    }
+    let threads: Vec<_> = (0..8u32)
+        .map(|n| {
+            thread::spawn(move || {
+                let mut p = gpu::Painter::open(true).expect("the card");
+                for k in 0..40 {
+                    let sent = Arc::new(picture(96, 54, n * 100 + k, k % 2 == 0));
+                    let mut c = p.canvas(96, 54);
+                    c.copy_from(&p.source(sent.clone()));
+                    let made = p.done(c);
+                    let back = p.frame(&made);
+                    assert!(back.data == sent.data, "painter {n}, picture {k}: {:?}", p.failed());
+                }
+                assert_eq!(p.failed(), None);
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+}
+
 /// The comparison itself must see a wrong picture: one that always passes
 /// would let the card show anything.
 #[test]
