@@ -14,6 +14,7 @@ mod extras;
 mod frame;
 mod functions;
 mod fx;
+mod livecheck;
 mod mixer;
 mod model;
 #[cfg(test)]
@@ -43,6 +44,9 @@ fn main() -> eframe::Result {
     let value_of = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     if let Some(dir) = value_of("--selftest") {
         std::process::exit(selftest::run(&dir));
+    }
+    if let Some(dir) = value_of("--livecheck") {
+        std::process::exit(livecheck::run(&dir, value_of("--break").as_deref()));
     }
     // The command line speaks the system's language unless told otherwise; the window
     // then follows its saved choice, which `--lang` also changes.
