@@ -76,7 +76,7 @@ pub fn titles(path: &str) -> Result<Vec<Title>, String> {
     let mut disc = Disc::open(Path::new(path))?;
     let vmg = disc.read("VIDEO_TS.IFO")?;
     if !vmg.starts_with(b"DVDVIDEO-VMG") {
-        return Err("VIDEO_TS.IFO n'est pas une table DVD-Video".into());
+        return Err(t!("dvd.not_video_ifo").into());
     }
     let srpt = table(&vmg, 0xC4)?;
     let count = be16(&vmg, srpt)? as usize;
@@ -85,40 +85,42 @@ pub fn titles(path: &str) -> Result<Vec<Title>, String> {
     let mut sets: Vec<(u8, Vec<u8>)> = Vec::new();
     for n in 0..count {
         let e = srpt + 8 + n * 12;
-        let angles = *vmg.get(e + 1).ok_or(SHORT)? as u32;
+        let angles = *vmg.get(e + 1).ok_or_else(short)? as u32;
         let chapters = be16(&vmg, e + 2)? as u32;
-        let (set, set_title) = (*vmg.get(e + 6).ok_or(SHORT)?, *vmg.get(e + 7).ok_or(SHORT)?);
+        let (set, set_title) = (*vmg.get(e + 6).ok_or_else(short)?, *vmg.get(e + 7).ok_or_else(short)?);
         if !sets.iter().any(|(s, _)| *s == set) {
             sets.push((set, disc.read(&format!("VTS_{set:02}_0.IFO"))?));
         }
-        let vts = &sets.iter().find(|(s, _)| *s == set).ok_or(SHORT)?.1;
+        let vts = &sets.iter().find(|(s, _)| *s == set).ok_or_else(short)?.1;
         let duration_ms = title_duration(vts, set_title, chapters)?;
         out.push(Title { number: n as u32 + 1, chapters, angles, duration_ms });
     }
     Ok(out)
 }
 
-const SHORT: &str = "table DVD tronquée";
+fn short() -> String {
+    t!("dvd.truncated").to_string()
+}
 
 fn be16(b: &[u8], at: usize) -> Result<u16, String> {
-    b.get(at..at + 2).map(|s| u16::from_be_bytes([s[0], s[1]])).ok_or_else(|| SHORT.to_string())
+    b.get(at..at + 2).map(|s| u16::from_be_bytes([s[0], s[1]])).ok_or_else(short)
 }
 
 fn be32(b: &[u8], at: usize) -> Result<u32, String> {
-    b.get(at..at + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]])).ok_or_else(|| SHORT.to_string())
+    b.get(at..at + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]])).ok_or_else(short)
 }
 
 /// IFO headers point to their tables by sector.
 fn table(ifo: &[u8], pointer_at: usize) -> Result<usize, String> {
     let at = be32(ifo, pointer_at)? as usize * SECTOR as usize;
-    if at == 0 || at >= ifo.len() { Err(SHORT.into()) } else { Ok(at) }
+    if at == 0 || at >= ifo.len() { Err(short()) } else { Ok(at) }
 }
 
 /// Adds up the program chains the title's chapters run through: usually one,
 /// sometimes one per chapter.
 fn title_duration(vts: &[u8], set_title: u8, chapters: u32) -> Result<u64, String> {
     if !vts.starts_with(b"DVDVIDEO-VTS") {
-        return Err("table de titre DVD illisible".into());
+        return Err(t!("dvd.title_table").into());
     }
     let ptt = table(vts, 0xC8)?;
     let pgci = table(vts, 0xCC)?;
@@ -133,7 +135,7 @@ fn title_duration(vts: &[u8], set_title: u8, chapters: u32) -> Result<u64, Strin
     let mut total = 0;
     for pgcn in chains {
         let pgc = pgci + be32(vts, pgci + 8 + (pgcn.max(1) as usize - 1) * 8 + 4)? as usize;
-        total += playback_ms(vts.get(pgc + 4..pgc + 8).ok_or(SHORT)?);
+        total += playback_ms(vts.get(pgc + 4..pgc + 8).ok_or_else(short)?);
     }
     Ok(total)
 }
@@ -162,17 +164,17 @@ struct IsoEntry {
 impl Disc {
     fn open(p: &Path) -> Result<Self, String> {
         if p.is_file() {
-            let mut file = File::open(p).map_err(|e| format!("image illisible : {e}"))?;
+            let mut file = File::open(p).map_err(|e| t!("dvd.image_unreadable", error = e))?;
             let root = iso_root(&mut file)?;
             let video_ts = root
                 .into_iter()
                 .find(|e| e.dir && e.name.eq_ignore_ascii_case("VIDEO_TS"))
-                .ok_or("pas de dossier VIDEO_TS dans l'image")?;
+                .ok_or_else(|| t!("dvd.no_video_ts_in_image").to_string())?;
             let entries = iso_dir(&mut file, video_ts.lba, video_ts.len)?;
             return Ok(Disc::Image { file, entries });
         }
         let dir = if is_video_ts(p) { p.to_path_buf() } else { p.join("VIDEO_TS") };
-        if dir.is_dir() { Ok(Disc::Folder(dir)) } else { Err("pas de dossier VIDEO_TS ici".into()) }
+        if dir.is_dir() { Ok(Disc::Folder(dir)) } else { Err(t!("dvd.no_video_ts").into()) }
     }
 
     fn read(&mut self, name: &str) -> Result<Vec<u8>, String> {
@@ -181,7 +183,7 @@ impl Disc {
                 let path = dir.join(name);
                 let len = std::fs::metadata(&path).map_err(|e| format!("{name} : {e}"))?.len();
                 if len > MAX_IFO {
-                    return Err(format!("{name} est trop grand"));
+                    return Err(t!("dvd.too_big", name = name));
                 }
                 std::fs::read(&path).map_err(|e| format!("{name} : {e}"))
             }
@@ -189,9 +191,9 @@ impl Disc {
                 let e = entries
                     .iter()
                     .find(|e| !e.dir && e.name.eq_ignore_ascii_case(name))
-                    .ok_or_else(|| format!("{name} absent de l'image"))?;
+                    .ok_or_else(|| t!("dvd.missing_in_image", name = name))?;
                 if e.len > MAX_IFO {
-                    return Err(format!("{name} est trop grand"));
+                    return Err(t!("dvd.too_big", name = name));
                 }
                 read_at(file, e.lba * SECTOR, e.len)
             }
@@ -210,9 +212,9 @@ fn read_at(file: &mut File, at: u64, len: u64) -> Result<Vec<u8>, String> {
 fn iso_root(file: &mut File) -> Result<Vec<IsoEntry>, String> {
     let pvd = read_at(file, 16 * SECTOR, SECTOR)?;
     if pvd[0] != 1 || &pvd[1..6] != b"CD001" {
-        return Err("image sans système de fichiers ISO 9660".into());
+        return Err(t!("dvd.no_iso").into());
     }
-    let root = record(&pvd[156..190]).ok_or("répertoire racine illisible")?;
+    let root = record(&pvd[156..190]).ok_or_else(|| t!("dvd.no_root").to_string())?;
     iso_dir(file, root.lba, root.len)
 }
 

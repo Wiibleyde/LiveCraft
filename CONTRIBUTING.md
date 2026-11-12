@@ -60,7 +60,19 @@ with real clicks. If you fix a bug, add the test that would have caught it.
 - **Comments explain why**, not what. Code names say what things are.
 - **A file saved by an older version must keep opening.** New fields get a default.
 - **Nothing secret reaches a project file**, the screen or a log.
-- **Interface text is in French** for now, until strings move out of the code.
+- **Interface text lives in [`locales/`](locales), never in code.** Write `t!("area.key")`, or
+  `t!("area.key", name = value)` for a text holding `{name}`, and add the key to every
+  `locales/<language>.txt` (`key = text`, one per line, `\n` for a line break). Keys are always
+  literals: `cargo test` checks that each one used exists in every language with the same `{names}`.
+  Give a window, combo box or collapsing section a fixed id, not one taken from its text, so it keeps
+  its place when the language changes.
+
+## Translating
+
+Copy `locales/en.txt` to `locales/<code>.txt` (`de`, `es`…), translate the text after each ` = `
+and leave the keys and `{names}` alone. Then add the language to `Lang` in `src/i18n.rs`. Keep
+button labels about as short as the English ones: the cards are narrow. Run
+`cargo run -- --screenshot target/shot.png --lang <code>` to see what overflows.
 
 ## Pull requests
 

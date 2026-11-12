@@ -190,7 +190,7 @@ fn play_once(rt: &Arc<InputRt>, spec: &Spec, start_ms: u64, w: usize, h: usize, 
     let mut child = match spawned {
         Ok(c) => c,
         Err(_) => {
-            rt.set_status(FFMPEG_MISSING);
+            rt.set_status(ffmpeg_missing());
             return End::Stopped;
         }
     };
@@ -255,7 +255,7 @@ fn play_once(rt: &Arc<InputRt>, spec: &Spec, start_ms: u64, w: usize, h: usize, 
         ring.clear();
     }
     if matches!(end, End::Failed) {
-        rt.set_status(format!("Lecture impossible : {}", log.lock().unwrap()));
+        rt.set_status(t!("playback.cannot_play", reason = log.lock().unwrap()));
     }
     end
 }
@@ -335,18 +335,18 @@ pub fn run_dvd(rt: &Arc<InputRt>, path: &str, title: u32, w: usize, h: usize, fp
                 let found = titles.iter().any(|t| t.number == title.max(1));
                 *rt.titles.lock().unwrap() = titles;
                 if !found {
-                    rt.set_status(format!("Ce disque n'a pas de titre {}", title.max(1)));
+                    rt.set_status(t!("playback.dvd_no_title", title = title.max(1)));
                     return;
                 }
                 break;
             }
             // ffmpeg reads images this listing cannot, such as UDF-only ones.
             Err(e) if image => {
-                rt.set_status(format!("Titres illisibles : {e}"));
+                rt.set_status(t!("playback.dvd_titles_unreadable", error = e));
                 break;
             }
             Err(e) => {
-                rt.set_status(format!("Aucun DVD lisible : {e}"));
+                rt.set_status(t!("playback.dvd_unreadable", error = e));
                 for _ in 0..40 {
                     if rt.stopped() {
                         return;
@@ -369,7 +369,7 @@ pub fn run_audio_file(rt: &Arc<InputRt>, path: &str, looped: bool) {
         let mut child = match spawned {
             Ok(c) => c,
             Err(_) => {
-                rt.set_status(FFMPEG_MISSING);
+                rt.set_status(ffmpeg_missing());
                 return;
             }
         };
@@ -437,7 +437,7 @@ pub fn run_list(
     fps: u32,
 ) {
     if items.is_empty() {
-        rt.set_status("Liste vide");
+        rt.set_status(t!("playback.empty_list"));
         return;
     }
     if shuffle {
@@ -536,7 +536,7 @@ fn play_clip(rt: &Arc<InputRt>, play: &ReplayPlay, w: usize, h: usize, fps: u32)
     let mut outs = Vec::new();
     for file in play.files.iter().take(4) {
         let Some(mut child) = clip_decoder(file, play, cw, ch, fps) else {
-            rt.set_status(FFMPEG_MISSING);
+            rt.set_status(ffmpeg_missing());
             return;
         };
         outs.push(child.stdout.take().unwrap());
