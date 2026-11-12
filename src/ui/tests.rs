@@ -366,6 +366,30 @@ fn the_old_name_still_opens_old_files() {
 
 /// What a double-clicked .livecraft file does: the installer's file type
 /// starts LiveCraft with `--project <file>`.
+/// Opening a project by name replaces the desk, which the session file held:
+/// one copy is kept, and saving a project never leaves it half written.
+#[test]
+fn opening_a_project_keeps_the_session_and_saving_swaps_atomically() {
+    let dir = std::env::temp_dir().join(format!("livecraft-backup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = dir.join("session.json");
+    assert!(!super::back_up_session(&session), "nothing to keep");
+    std::fs::write(&session, b"first").unwrap();
+    assert!(super::back_up_session(&session));
+    std::fs::write(&session, b"second").unwrap();
+    assert!(super::back_up_session(&session));
+    assert_eq!(std::fs::read(dir.join("session.prev.json")).unwrap(), b"second", "the last one is kept");
+
+    let file = dir.join("show.livecraft");
+    std::fs::write(&file, b"old").unwrap();
+    super::bars::write_beside_then_swap(&file, b"new").unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"new");
+    assert!(!dir.join("show.livecraft.tmp").exists(), "no leftover");
+    let missing = dir.join("no").join("show.livecraft");
+    assert!(super::bars::write_beside_then_swap(&missing, b"x").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_project_opened_from_explorer_saves_back_to_its_own_file() {
     let dir = std::env::temp_dir().join(format!("livecraft-start-{}", std::process::id()));

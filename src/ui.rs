@@ -57,6 +57,12 @@ fn user_dir(sub: &str) -> PathBuf {
     PathBuf::from(home).join(sub).join("LiveCraft")
 }
 
+/// Copies the session file to `session.prev.json` beside it, replacing the
+/// previous copy. True when there was a session to keep.
+fn back_up_session(session: &std::path::Path) -> bool {
+    session.is_file() && std::fs::copy(session, session.with_file_name("session.prev.json")).is_ok()
+}
+
 fn saved_path() -> PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
     PathBuf::from(base).join("LiveCraft").join("session.json")
@@ -255,6 +261,7 @@ impl App {
         remote: bool,
     ) -> Self {
         let (mut imported, mut import_report, mut current_file, mut failed) = (None, None, None, None);
+        let mut backed_up = false;
         if let Some(path) = project_file {
             let read = if path.to_lowercase().ends_with(".vmix") {
                 crate::vmix_import::load(&path).map(|(p, r)| {
@@ -267,16 +274,23 @@ impl App {
             };
             match read {
                 Ok(p) => {
+                    // The session is saved on its own as the desk changes, so what
+                    // was on the desk would be gone for good: keep one copy.
+                    if remote && back_up_session(&saved_path()) {
+                        backed_up = true;
+                    }
                     saved.project = p;
                     saved.last_file = Some(path);
                 }
-                Err(e) => failed = Some(format!("Projet illisible : {e}")),
+                Err(e) => failed = Some(t!("bars.unreadable_project", error = e)),
             }
         }
         let mut app = Self::assemble(cc, saved, shot_path, open, imported, import_report, remote);
         app.current_file = current_file;
         if let Some(e) = failed {
             app.say(e);
+        } else if backed_up {
+            app.say(t!("bars.session_backed_up"));
         }
         app
     }

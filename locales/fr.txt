@@ -34,6 +34,7 @@ bars.route_preview = Aperçu
 bars.route_multiview2 = MultiView 2 (entrées)
 bars.projects_filter = Projets
 bars.unreadable_project = Projet illisible : {error}
+bars.session_backed_up = Le bureau précédent est gardé dans session.prev.json
 bars.no_recent = Aucun projet récent
 bars.project_filter = Projet LiveCraft
 bars.project_saved = Projet enregistré
