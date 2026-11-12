@@ -261,12 +261,12 @@ pub fn convert(
         }
         if asked_to_stop.is_some_and(|t| t.elapsed() > STOP_GRACE) {
             end_process_tree(&mut child);
-            end_started_powerpoint(out);
+            end_started_powerpoint(out, "POWERPNT.EXE");
             break;
         }
         if asked_to_stop.is_none() && heard.elapsed() > SILENCE {
             end_process_tree(&mut child);
-            end_started_powerpoint(out);
+            end_started_powerpoint(out, "POWERPNT.EXE");
             failure = Some(t!("slides.silent", program = conv.name()));
             break;
         }
@@ -290,7 +290,10 @@ pub fn convert(
 /// PowerPoint is a COM server, not a child of the script: ending the script
 /// leaves it open and hidden. The script writes the id of a PowerPoint it
 /// started itself (never one the user had open) to `powerpoint.pid`.
-fn end_started_powerpoint(out: &Path) {
+///
+/// The process must still be PowerPoint: if it already ended and Windows gave
+/// its id to another program, that program is left alone.
+fn end_started_powerpoint(out: &Path, image: &str) {
     let Some(pid) = std::fs::read_to_string(out.join("powerpoint.pid"))
         .ok()
         .and_then(|t| t.trim().parse::<u32>().ok())
@@ -299,7 +302,7 @@ fn end_started_powerpoint(out: &Path) {
         return;
     };
     let mut kill = Command::new("taskkill");
-    kill.args(["/T", "/F", "/PID", &pid.to_string()])
+    kill.args(["/T", "/F", "/FI", &format!("PID eq {pid}"), "/FI", &format!("IMAGENAME eq {image}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -649,6 +652,22 @@ mod tests {
     }
 
     #[test]
+    fn a_reused_process_id_under_another_name_is_left_alone() {
+        let out = std::env::temp_dir().join(format!("lc-pid-reuse-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let mut other = Command::new("ping");
+        other.args(["-n", "30", "127.0.0.1"]).stdout(Stdio::null());
+        let mut other = no_window(&mut other).spawn().unwrap();
+        std::fs::write(out.join("powerpoint.pid"), other.id().to_string()).unwrap();
+        end_started_powerpoint(&out, "POWERPNT.EXE");
+        thread::sleep(Duration::from_millis(1500));
+        let alive = other.try_wait().unwrap().is_none();
+        let _ = other.kill();
+        let _ = std::fs::remove_dir_all(&out);
+        assert!(alive, "a process that is not PowerPoint must survive");
+    }
+
+    #[test]
     fn a_given_up_conversion_ends_the_powerpoint_it_started_and_only_that() {
         let out = std::env::temp_dir().join(format!("lc-pid-{}", std::process::id()));
         std::fs::create_dir_all(&out).unwrap();
@@ -667,7 +686,7 @@ mod tests {
             ),
         )
         .unwrap();
-        end_started_powerpoint(&out);
+        end_started_powerpoint(&out, "PING.EXE");
         let ended = (0..50).any(|_| {
             thread::sleep(Duration::from_millis(100));
             ours.try_wait().unwrap().is_some()
