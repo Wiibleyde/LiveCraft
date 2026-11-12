@@ -51,6 +51,7 @@ stops, the shorter of sound and picture is padded to the other, so both end toge
 | `functions.rs`, `api.rs` | Named functions, and HTTP and TCP remote control, also https for guests |
 | `vmix_import.rs` | Reading `.vmix` projects |
 | `secret.rs` | Sealing secrets in the session file |
+| `update.rs` | Whether a newer version is out: one request to GitHub's releases, at most once a day |
 | `platform.rs`, `platform/` | What differs between Windows, Linux and macOS: capture devices, ending child processes, screens, browser, folders, the key that seals secrets |
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
 | `i18n.rs`, `locales/` | Interface text: `t!("key")` reads it from one catalog per language |

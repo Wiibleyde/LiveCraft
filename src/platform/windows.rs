@@ -246,6 +246,29 @@ pub fn open_sealed(sealed: &[u8]) -> Option<Vec<u8>> {
     (done != 0).then(|| take(out))
 }
 
+/// Opens a web page in the person's own browser.
+pub fn open_in_browser(url: &str) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    // Handed anything else, the shell would start it.
+    if !url.starts_with("https://") {
+        return;
+    }
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (verb, page) = (wide("open"), wide(url));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            page.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
 fn env_dir(name: &str) -> PathBuf {
     PathBuf::from(std::env::var(name).unwrap_or_else(|_| ".".into()))
 }

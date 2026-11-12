@@ -21,6 +21,8 @@ The direct dependencies are listed in `Cargo.toml`. All crates in `Cargo.lock`
 are available under permissive terms (MIT, Apache-2.0, BSD, ISC, Zlib, BSL-1.0,
 Unicode-3.0 or Unlicense). Where a crate offers a choice that includes a copyleft
 license (`r-efi`, `self_cell`), LiveCraft uses it under its MIT or Apache-2.0 option.
+`webpki-root-certs` (CDLA-Permissive-2.0) is listed only because `rustls-platform-verifier`
+needs it on WebAssembly; it is never built into LiveCraft.
 
 To list them with their licenses:
 
