@@ -746,6 +746,39 @@ outputs.srt_stopped = SRT stopped: {reason}
 # src/audio.rs
 audio.default_output = Default output
 
+# NDI and OMT (src/ndi.rs, src/omt.rs, src/netvideo.rs, src/outputs.rs, inputs and settings)
+ndi.missing = NDI runtime not found: install NDI Tools or the NDI runtime (ndi.video/tools), then restart LiveCraft
+ndi.cpu = The NDI runtime does not support this processor
+ndi.find_failed = The NDI search could not start
+ndi.bad_source_name = Invalid NDI source name
+ndi.receiver_failed = The NDI receiver could not be created
+ndi.bad_name = Invalid NDI output name
+ndi.sender_failed = The NDI output could not be created (name already taken?)
+omt.missing = OMT library not found: put libomt.dll and libvmx.dll (github.com/openmediatransport) next to LiveCraft or on the PATH, then restart LiveCraft
+omt.bad_source_name = Invalid OMT source name
+omt.receiver_failed = The OMT receiver could not be created
+omt.bad_name = Invalid OMT output name
+omt.sender_failed = The OMT output could not be created (name already taken?)
+netvideo.symbol_missing = {name} is missing: the library is too old
+netvideo.choose_source = Choose a {label} source in the input settings
+netvideo.searching = Looking for the {label} source "{source}"…
+netvideo.lost = {label} source "{source}" lost, waiting for it to come back…
+outputs.net_none_ticked = First tick NDI or OMT in the output settings
+inputs.net_searching = Looking for sources…
+inputs.net_none = No {name} source found
+inputs.net_other = Other {name} source…
+input_settings.net_source = Source
+input_settings.net_exact_name = Exact name
+input_settings.net_searching = Looking for sources…
+input_settings.net_none_yet = No {name} source found yet
+settings.net_title = NDI and OMT outputs: the program with the Master sound
+settings.net_name = Name
+settings.net_connections = {net} "{name}": {count} connection(s)
+settings.net_stop = Stop NDI / OMT
+settings.net_start = Start NDI / OMT
+settings.net_rename_note = A new name applies at the next start
+settings.about_ndi = NDI® is a registered trademark of Vizrt NDI AB (ndi.video). The NDI runtime and the OMT (Open Media Transport) library are installed separately.
+
 # src/slides.rs
 slides.no_converter = Neither PowerPoint nor LibreOffice is installed
 slides.no_python = LibreOffice is installed without its Python

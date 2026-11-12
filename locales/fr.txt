@@ -746,6 +746,39 @@ outputs.srt_stopped = SRT arrêté : {reason}
 # src/audio.rs
 audio.default_output = Sortie par défaut
 
+# NDI and OMT (src/ndi.rs, src/omt.rs, src/netvideo.rs, src/outputs.rs, inputs and settings)
+ndi.missing = Runtime NDI introuvable : installez NDI Tools ou le runtime NDI (ndi.video/tools), puis relancez LiveCraft
+ndi.cpu = Le runtime NDI ne prend pas en charge ce processeur
+ndi.find_failed = La recherche NDI n'a pas pu démarrer
+ndi.bad_source_name = Nom de source NDI invalide
+ndi.receiver_failed = Le récepteur NDI n'a pas pu être créé
+ndi.bad_name = Nom de sortie NDI invalide
+ndi.sender_failed = La sortie NDI n'a pas pu être créée (nom déjà pris ?)
+omt.missing = Bibliothèque OMT introuvable : placez libomt.dll et libvmx.dll (github.com/openmediatransport) à côté de LiveCraft ou dans le PATH, puis relancez LiveCraft
+omt.bad_source_name = Nom de source OMT invalide
+omt.receiver_failed = Le récepteur OMT n'a pas pu être créé
+omt.bad_name = Nom de sortie OMT invalide
+omt.sender_failed = La sortie OMT n'a pas pu être créée (nom déjà pris ?)
+netvideo.symbol_missing = {name} manque : version trop ancienne de la bibliothèque
+netvideo.choose_source = Choisissez une source {label} dans les réglages de l'entrée
+netvideo.searching = Recherche de la source {label} « {source} »…
+netvideo.lost = Source {label} « {source} » perdue, en attente de son retour…
+outputs.net_none_ticked = Cochez d'abord NDI ou OMT dans les réglages des sorties
+inputs.net_searching = Recherche des sources…
+inputs.net_none = Aucune source {name} trouvée
+inputs.net_other = Autre source {name}…
+input_settings.net_source = Source
+input_settings.net_exact_name = Nom exact
+input_settings.net_searching = Recherche des sources…
+input_settings.net_none_yet = Aucune source {name} trouvée pour l'instant
+settings.net_title = Sorties NDI et OMT : le programme avec le son Général
+settings.net_name = Nom
+settings.net_connections = {net} « {name} » : {count} connexion(s)
+settings.net_stop = Arrêter NDI / OMT
+settings.net_start = Démarrer NDI / OMT
+settings.net_rename_note = Un nouveau nom s'applique au prochain démarrage
+settings.about_ndi = NDI® est une marque déposée de Vizrt NDI AB (ndi.video). Le runtime NDI et la bibliothèque OMT (Open Media Transport) s'installent séparément.
+
 # src/slides.rs
 slides.no_converter = Ni PowerPoint ni LibreOffice installé
 slides.no_python = LibreOffice est installé sans son Python

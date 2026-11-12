@@ -28,6 +28,7 @@ so a slow window cannot hold up the show.
 | `slides.rs` | Presentations, turned into one picture per slide by PowerPoint or LibreOffice |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
+| `netvideo.rs`, `ndi.rs`, `omt.rs` | NDI and OMT in and out; runtimes loaded on first use, never shipped |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
 | `functions.rs`, `api.rs` | Named functions, and HTTP and TCP remote control |
 | `vmix_import.rs` | Reading `.vmix` projects |
@@ -49,4 +50,6 @@ so a slow window cannot hold up the show.
 
 - Pixels are RGBA with premultiplied alpha.
 - Sizes in saved data are fractions of the frame, so projects survive a change of format.
+- Replay marks are moments of the show, not positions in a file. Every encoder logs when each picture it
+  wrote was taken, so a file that lost pictures still finds the right one.
 - The desk can be tested without a window, and the window with real clicks in `ui/tests.rs`.

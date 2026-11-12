@@ -4,6 +4,7 @@
 
 use crate::frame::Frame;
 use crate::model::{Input, Kind, ListItem, TitleObject, TitleStyle};
+use crate::netvideo::{self, Net};
 use crate::titles::{self, Stroke};
 use crate::{playback, text};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -37,6 +38,10 @@ impl Ring {
         self.cap.saturating_sub(self.q.lock().unwrap().len())
     }
 
+    pub fn len(&self) -> usize {
+        self.q.lock().unwrap().len()
+    }
+
     /// Adds samples, dropping the oldest if the reader fell behind.
     pub fn push(&self, s: &[f32]) {
         let mut q = self.q.lock().unwrap();
@@ -65,10 +70,31 @@ impl Ring {
 /// A replay clip to play, set by the engine and read by the Replay input.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplayPlay {
-    pub files: Vec<String>,
-    pub start_s: f64,
-    pub end_s: f64,
+    /// One per camera shown, up to four.
+    pub clips: Vec<ReplayClip>,
+    /// Seconds of the show from the first picture to the out mark.
+    pub span_s: f64,
     pub speed: f32,
+}
+
+/// Part of one recording, and when each of its pictures was taken.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplayClip {
+    pub file: String,
+    /// Where reading starts and stops, in seconds from the file's first picture.
+    pub from_s: f64,
+    pub to_s: f64,
+    /// When each picture read was taken, in seconds from the start of the
+    /// moment. Empty when the recording kept no log: pictures then follow at
+    /// the frame rate, as they did in the file.
+    pub times: Vec<f64>,
+}
+
+impl ReplayClip {
+    /// When picture `n` of the clip is due, or None past its last one.
+    pub fn due(&self, n: usize, fps: u32) -> Option<f64> {
+        if self.times.is_empty() { Some(n as f64 / fps.max(1) as f64) } else { self.times.get(n).copied() }
+    }
 }
 
 /// Running state of one input, shared with the mixer and the UI.
@@ -268,8 +294,13 @@ pub fn ffmpeg() -> Command {
 }
 
 pub(crate) fn fit_filter(w: usize, h: usize, fps: u32) -> String {
+    format!("fps={fps},{}", fit_scale(w, h))
+}
+
+/// Fits a picture into `w`×`h` without touching its timing.
+pub(crate) fn fit_scale(w: usize, h: usize) -> String {
     format!(
-        "fps={fps},scale={w}:{h}:force_original_aspect_ratio=decrease:flags=fast_bilinear,\
+        "scale={w}:{h}:force_original_aspect_ratio=decrease:flags=fast_bilinear,\
          format=rgba,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
     )
 }
@@ -384,6 +415,8 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
             args.extend(["-i".into(), url]);
             run_capture(&rt, args, w, h, fps);
         }
+        Kind::Ndi { source } => netvideo::run_input(&rt, Net::Ndi, &source, w, h),
+        Kind::Omt { source } => netvideo::run_input(&rt, Net::Omt, &source, w, h),
         Kind::Screen => {
             let args = vec![
                 "-f".into(),

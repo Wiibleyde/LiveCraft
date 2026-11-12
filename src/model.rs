@@ -94,6 +94,14 @@ pub enum Kind {
         url: String,
         buffer_ms: u32,
     },
+    /// An NDI source on the network, by its full name: `MACHINE (Name)`.
+    Ndi {
+        source: String,
+    },
+    /// An OMT source on the network, by its full name or an omt:// address.
+    Omt {
+        source: String,
+    },
     /// A web page; lpha keeps its transparent background.
     Browser {
         url: String,
@@ -179,6 +187,8 @@ impl Kind {
             Kind::PowerPoint { .. } => t!("model.kind.powerpoint"),
             Kind::Camera { .. } => t!("model.kind.camera"),
             Kind::Network { .. } => t!("model.kind.network"),
+            Kind::Ndi { .. } => "NDI",
+            Kind::Omt { .. } => "OMT",
             Kind::Browser { .. } => t!("model.kind.browser"),
             Kind::Screen => t!("model.kind.screen"),
             Kind::Microphone { .. } => t!("model.kind.microphone"),
@@ -209,6 +219,8 @@ impl Kind {
             Kind::PowerPoint { .. } => "PowerPoint",
             Kind::Camera { .. } => "Capture",
             Kind::Network { .. } => "Stream",
+            Kind::Ndi { .. } => "NDI",
+            Kind::Omt { .. } => "OMT",
             Kind::Browser { .. } => "Browser",
             Kind::Screen => "Desktop",
             Kind::Title { .. } | Kind::Designed { .. } => "GT",
@@ -227,6 +239,8 @@ impl Kind {
                 | Kind::List { .. }
                 | Kind::Dvd { .. }
                 | Kind::Network { .. }
+                | Kind::Ndi { .. }
+                | Kind::Omt { .. }
                 | Kind::Microphone { .. }
                 | Kind::SystemAudio
                 | Kind::Tone
@@ -266,7 +280,15 @@ impl Kind {
 
     /// Live pictures worth keeping as separate recordings.
     pub fn is_recordable(&self) -> bool {
-        matches!(self, Kind::Camera { .. } | Kind::Network { .. } | Kind::Screen | Kind::Video { .. })
+        matches!(
+            self,
+            Kind::Camera { .. }
+                | Kind::Network { .. }
+                | Kind::Ndi { .. }
+                | Kind::Omt { .. }
+                | Kind::Screen
+                | Kind::Video { .. }
+        )
     }
 }
 
@@ -1076,6 +1098,21 @@ impl Default for SrtOut {
     }
 }
 
+/// The program with Master sound, offered on the network as an NDI or OMT source.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct NetOutCfg {
+    pub enabled: bool,
+    /// What receivers see after the computer's name.
+    pub name: String,
+}
+
+impl Default for NetOutCfg {
+    fn default() -> Self {
+        Self { enabled: false, name: "LiveCraft".into() }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct BusCfg {
@@ -1148,6 +1185,8 @@ pub struct Project {
     pub records: [RecordCfg; 2],
     pub streams: [StreamCfg; 5],
     pub srt: [SrtOut; 4],
+    pub ndi_out: NetOutCfg,
+    pub omt_out: NetOutCfg,
     pub master_level: f32,
     pub master_muted: bool,
     pub buses: [BusCfg; 7],
@@ -1225,6 +1264,8 @@ impl Project {
             records: [RecordCfg::new(true, 25000), RecordCfg::new(false, 6000)],
             streams: Default::default(),
             srt: Default::default(),
+            ndi_out: NetOutCfg::default(),
+            omt_out: NetOutCfg::default(),
             master_level: 1.0,
             master_muted: false,
             buses: Default::default(),
