@@ -77,9 +77,15 @@ scripts, VISCA PTZ control, a telestrator, and a web controller for phones and t
 
 ## Get started
 
-You need [Rust](https://rustup.rs) (edition 2024), and [FFmpeg](https://ffmpeg.org) on your `PATH`. Web
-inputs also need Edge or Chrome, and presentations need Microsoft PowerPoint or
-[LibreOffice](https://www.libreoffice.org) installed. Builds target CPUs with AVX2, see `.cargo/config.toml`.
+On Windows, take the installer or the portable zip from the [releases](../../releases). It installs for
+your account without administrator rights. FFmpeg is not included: install it with
+`winget install Gyan.FFmpeg`, or see the `FFmpeg.txt` next to the program. Web inputs also need Edge or
+Chrome, and presentations need Microsoft PowerPoint or
+[LibreOffice](https://www.libreoffice.org). How releases are made, signed and built is in [docs/releasing.md](docs/releasing.md).
+
+To build it yourself, you need [Rust](https://rustup.rs) (edition 2024), and [FFmpeg](https://ffmpeg.org)
+on your `PATH`. Builds from source target CPUs with AVX2, see `.cargo/config.toml`; releases run on any
+x86-64 processor.
 
 ```sh
 cargo run --release

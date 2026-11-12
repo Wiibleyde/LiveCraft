@@ -1,0 +1,22 @@
+LiveCraft a besoin de FFmpeg
+============================
+
+LiveCraft utilise FFmpeg pour lire les vidéos, capturer les caméras et l'écran,
+enregistrer et diffuser. FFmpeg est un programme séparé, sous sa propre licence,
+qui n'est pas fourni avec LiveCraft.
+
+Pour l'installer, au choix :
+
+  1. Dans un terminal (Windows 10 ou 11) :
+
+         winget install Gyan.FFmpeg
+
+  2. Ou téléchargez une version pour Windows depuis https://ffmpeg.org/download.html,
+     décompressez-la, puis :
+       - ajoutez son dossier "bin" à la variable d'environnement PATH,
+       - ou copiez ffmpeg.exe dans le même dossier que livecraft.exe.
+
+Relancez ensuite LiveCraft. Sans FFmpeg, les sources et sorties concernées
+affichent « FFmpeg est introuvable ».
+
+Les entrées de pages web demandent aussi Microsoft Edge ou Google Chrome.
