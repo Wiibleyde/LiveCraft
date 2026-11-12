@@ -9,6 +9,7 @@ fn older_files_keep_opening() {
     let p = v.as_object_mut().unwrap();
     p.remove("overlay_last");
     p.remove("layer_templates");
+    p.remove("hardware_decoding");
     p.remove("master_plugins");
     for bus in p["buses"].as_array_mut().unwrap() {
         bus.as_object_mut().unwrap().remove("plugins");
@@ -28,6 +29,7 @@ fn older_files_keep_opening() {
     }
     let back: Project = serde_json::from_value(v).unwrap();
     assert_eq!(back.inputs.len(), Project::sample().inputs.len());
+    assert!(back.hardware_decoding, "the card helps unless someone turned it off");
     assert_eq!(back.ndi_out, NetOutCfg::default(), "les sorties réseau restent éteintes");
     assert!(!back.omt_out.enabled);
 }
