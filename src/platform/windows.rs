@@ -16,6 +16,11 @@ pub fn prepare_child(cmd: &mut Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
+/// Whether the child has ended.
+pub fn has_exited(child: &mut Child) -> bool {
+    !matches!(child.try_wait(), Ok(None))
+}
+
 /// A child can have children of its own: ffmpeg is often started through a
 /// launcher, and a browser is dozens of processes. Stopping only the first
 /// would leave the real work running.

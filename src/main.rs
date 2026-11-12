@@ -10,6 +10,7 @@ mod browser;
 mod call;
 mod calltest;
 mod clap;
+mod decode;
 mod desk;
 mod dsp;
 mod dvd;
@@ -50,7 +51,7 @@ mod widgets;
 use eframe::egui;
 
 fn main() -> eframe::Result {
-    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    #[cfg(all(windows, target_arch = "x86_64", not(target_feature = "avx2")))]
     if let Some(code) = hand_over_to_avx2_build() {
         std::process::exit(code);
     }
@@ -102,7 +103,7 @@ fn main() -> eframe::Result {
 /// processors without them. This one runs anywhere; next to it,
 /// `livecraft-avx2.exe` is built for x86-64-v3 and takes over when the
 /// processor has every feature that level assumes.
-#[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+#[cfg(all(windows, target_arch = "x86_64", not(target_feature = "avx2")))]
 fn hand_over_to_avx2_build() -> Option<i32> {
     use std::arch::is_x86_feature_detected as has;
     let able = has!("avx")
@@ -139,7 +140,7 @@ fn hand_over_to_avx2_build() -> Option<i32> {
 /// access violation, missing library, failed start-up...) with a status that
 /// has both top bits set. Within this long, it is the processor or the install,
 /// not something the person did.
-#[cfg(any(test, all(target_arch = "x86_64", not(target_feature = "avx2"))))]
+#[cfg(any(test, all(windows, target_arch = "x86_64", not(target_feature = "avx2"))))]
 fn crashed_at_start(code: i32, after: std::time::Duration) -> bool {
     after < std::time::Duration::from_secs(2) && (code as u32) & 0xC000_0000 == 0xC000_0000
 }

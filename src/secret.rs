@@ -24,15 +24,36 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// Empty text stays empty. If sealing fails the text stays as it was: a key
-/// that is kept beats a key that is lost.
+static DROPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True once after a secret was left out of the saved session because it
+/// could not be sealed, so the interface can say so.
+pub fn take_dropped() -> bool {
+    DROPPED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What to save when sealing fails. Windows keeps the text as it was: a key
+/// that is kept beats a key that is lost. Elsewhere the text is left out, so
+/// a secret is never written in plain text; it has to be typed again.
+#[cfg(windows)]
+fn unsealed(text: &str) -> String {
+    text.to_string()
+}
+
+#[cfg(not(windows))]
+fn unsealed(_: &str) -> String {
+    DROPPED.store(true, std::sync::atomic::Ordering::Relaxed);
+    String::new()
+}
+
+/// Empty text stays empty.
 pub fn seal(text: &str) -> String {
     if text.is_empty() || is_sealed(text) {
         return text.to_string();
     }
     match crate::platform::seal(text.as_bytes()) {
         Some(sealed) => format!("{MARK}{}", base64(&sealed)),
-        None => text.to_string(),
+        None => unsealed(text),
     }
 }
 

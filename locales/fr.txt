@@ -419,6 +419,8 @@ settings.route.preview = Aperçu
 settings.audio = Son
 settings.take_on_air = Passer au direct
 settings.production_clocks = Horloges de production
+settings.hardware_decoding = Décodage par la carte graphique
+settings.hardware_decoding_hint = Pour les vidéos plus lourdes que du 1080p à 60 i/s et les flux réseau. En cas d'échec, le décodage repasse tout seul sur le processeur.
 settings.shortcuts_hint = Touche, fonction (Cut, Fade, OverlayInput1…), entrée, valeur
 settings.function = Fonction
 settings.input = Entrée
@@ -949,3 +951,6 @@ dvd.too_big = {name} est trop grand
 dvd.missing_in_image = {name} absent de l'image
 dvd.no_iso = image sans système de fichiers ISO 9660
 dvd.no_root = répertoire racine illisible
+
+# src/secret.rs
+secret.not_saved = Les clés et mots de passe n'ont pas pu être protégés : ils ne sont pas enregistrés et sont à ressaisir au prochain démarrage

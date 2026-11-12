@@ -2,6 +2,7 @@
 //! nothing waits on a slow source. Files, cameras, the screen and microphones
 //! are decoded by an ffmpeg process that already scales to the output size.
 
+use crate::decode::{self, Hardware};
 use crate::frame::Frame;
 use crate::model::{Input, Kind, ListItem, TitleObject, TitleStyle};
 use crate::netvideo::{self, Net};
@@ -123,6 +124,8 @@ pub struct InputRt {
     pub replay: Mutex<Option<ReplayPlay>>,
     pub strokes: Mutex<Vec<Stroke>>,
     pub strokes_gen: AtomicU64,
+    /// The running decoder was asked to use the graphics card.
+    pub hardware: AtomicBool,
     /// Only on a video call: what passes between the call and the desk.
     pub call: Option<Arc<crate::call::CallLink>>,
     /// Where each chapter starts, as the decoder announced them.
@@ -158,6 +161,7 @@ impl InputRt {
             replay: Mutex::new(None),
             strokes: Mutex::new(Vec::new()),
             strokes_gen: AtomicU64::new(0),
+            hardware: AtomicBool::new(false),
             call,
             chapters: Mutex::new(Vec::new()),
             titles: Mutex::new(Vec::new()),
@@ -229,6 +233,37 @@ impl InputRt {
         self.children.lock().unwrap().push(child);
     }
 
+    /// Whether the child with this id stopped with an error. A child that has
+    /// closed its output exits right after, so this waits only briefly: one
+    /// still running after that is hung (a stuck driver) and counts as bad.
+    pub(crate) fn ended_badly(&self, pid: u32) -> bool {
+        self.ended_badly_within(pid, Duration::from_secs(2))
+    }
+
+    fn ended_badly_within(&self, pid: u32, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        loop {
+            if let Some(c) = self.children.lock().unwrap().iter_mut().find(|c| c.id() == pid) {
+                match c.try_wait() {
+                    Ok(Some(status)) => return !status.success(),
+                    Ok(None) => {}
+                    Err(_) => return false,
+                }
+            } else {
+                return false;
+            }
+            if Instant::now() > deadline {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Process ids of the running decoders, for `--selftest` to break them.
+    pub(crate) fn child_ids(&self) -> Vec<u32> {
+        self.children.lock().unwrap().iter().map(Child::id).collect()
+    }
+
     pub(crate) fn kill_children(&self) {
         for mut c in self.children.lock().unwrap().drain(..) {
             thread::spawn(move || {
@@ -265,8 +300,9 @@ pub(crate) fn fit_scale(w: usize, h: usize) -> String {
     )
 }
 
-pub fn start(input: &Input, w: usize, h: usize, fps: u32) -> Arc<InputRt> {
-    start_seeded(input, w, h, fps, None, None)
+/// `hardware` allows decoding on the graphics card where it pays off.
+pub fn start(input: &Input, w: usize, h: usize, fps: u32, hardware: bool) -> Arc<InputRt> {
+    start_seeded(input, w, h, fps, hardware, None, None)
 }
 
 /// Like `start`, showing `seed` until the source has its first picture, and
@@ -276,6 +312,7 @@ pub fn start_seeded(
     w: usize,
     h: usize,
     fps: u32,
+    hardware: bool,
     seed: Option<Arc<Frame>>,
     resume: Option<Resume>,
 ) -> Arc<InputRt> {
@@ -303,11 +340,12 @@ pub fn start_seeded(
     }
     let kind = input.kind.clone();
     let worker = rt.clone();
-    thread::spawn(move || run(worker, kind, w, h, fps));
+    thread::spawn(move || run(worker, kind, w, h, fps, hardware));
     rt
 }
 
-fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
+fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32, hardware: bool) {
+    let card = hardware.then_some(decode::CARD);
     match kind {
         Kind::Bars => {
             rt.publish(titles::test_card(w, h));
@@ -345,11 +383,11 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
         Kind::Video { path, looped, mark_in, mark_out, rate } => {
             rt.end_ms.store(mark_out, Ordering::Relaxed);
             let spec = playback::Spec::file(path, looped, mark_in, mark_out, rate, true);
-            playback::run_file(&rt, spec, w, h, fps);
+            playback::run_file(&rt, spec, w, h, fps, card);
         }
         Kind::ImageSequence { first, fps: seq_fps, looped } => {
             match playback::Spec::sequence(&first, seq_fps, looped) {
-                Some(spec) => playback::run_file(&rt, spec, w, h, fps),
+                Some(spec) => playback::run_file(&rt, spec, w, h, fps, None),
                 None => rt.set_status(t!("sources.sequence_needs_number")),
             }
         }
@@ -357,9 +395,11 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
         Kind::Dvd { path, title } => playback::run_dvd(&rt, &path, title, w, h, fps),
         Kind::List { items, auto_next, looped, shuffle, .. } => {
             let enabled: Vec<ListItem> = items.into_iter().filter(|i| i.enabled).collect();
-            playback::run_list(&rt, enabled, auto_next, looped, shuffle, w, h, fps);
+            playback::run_list(&rt, enabled, auto_next, looped, shuffle, w, h, fps, card);
         }
-        Kind::Camera { device, .. } => run_capture(&rt, crate::platform::camera_input(&device), w, h, fps),
+        Kind::Camera { device, .. } => {
+            run_capture(&rt, crate::platform::camera_input(&device), w, h, fps, None)
+        }
         Kind::Network { url, buffer_ms } => {
             let mut args: Vec<String> = Vec::new();
             if url.starts_with("rtsp://") {
@@ -369,12 +409,12 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32) {
                 args.extend(["-fflags".into(), "nobuffer".into(), "-flags".into(), "low_delay".into()]);
             }
             args.extend(["-i".into(), url]);
-            run_capture(&rt, args, w, h, fps);
+            run_capture(&rt, args, w, h, fps, card);
         }
         Kind::Ndi { source } => netvideo::run_input(&rt, Net::Ndi, &source, w, h),
         Kind::Omt { source } => netvideo::run_input(&rt, Net::Omt, &source, w, h),
         Kind::Screen => match crate::platform::screen_input(fps) {
-            Ok(args) => run_capture(&rt, args, w, h, fps),
+            Ok(args) => run_capture(&rt, args, w, h, fps, None),
             Err(why) => rt.set_status(why),
         },
         Kind::Microphone { device } => run_audio_capture(
@@ -721,10 +761,116 @@ pub(crate) fn parse_duration(line: &str) -> Option<u64> {
     Some(((h * 3600.0 + m * 60.0 + s) * 1000.0) as u64)
 }
 
-fn run_capture(rt: &Arc<InputRt>, input_args: Vec<String>, w: usize, h: usize, fps: u32) {
+/// How long a stream on the graphics card may show nothing before the card is
+/// blamed. A decoder failing there can go quiet instead of ending ffmpeg.
+const CARD_STALL: Duration = Duration::from_secs(5);
+
+/// Ends the session when pictures stop for too long while ffmpeg still runs.
+/// Returns whether that happened.
+fn stall_guard(rt: &Arc<InputRt>, over: Arc<AtomicBool>) -> Arc<AtomicBool> {
+    let stalled = Arc::new(AtomicBool::new(false));
+    let (rt, flag) = (rt.clone(), stalled.clone());
+    thread::spawn(move || {
+        let mut seq = rt.seq();
+        let (mut seen, mut since) = (false, Instant::now());
+        while !over.load(Ordering::Relaxed) && !rt.stopped() {
+            thread::sleep(Duration::from_millis(100));
+            if rt.seq() != seq {
+                (seq, seen, since) = (rt.seq(), true, Instant::now());
+            } else if seen && since.elapsed() > CARD_STALL {
+                flag.store(true, Ordering::Relaxed);
+                rt.kill_children();
+                return;
+            }
+        }
+    });
+    stalled
+}
+
+/// Where a network input stands between the card and software.
+///
+/// A stream that shows nothing on the card is tried once in software at once.
+/// If software shows nothing either, the stream is unreachable and the card
+/// was not to blame: from then on there is one try per round, with a growing
+/// wait, instead of two. A card whose session goes quiet is handed to
+/// software for that round; it is blamed for the whole run only when that
+/// happens twice in a row, as one quiet spell may just be the sender.
+struct CardState {
+    on_card: bool,
+    /// The session running is software standing in for the card.
+    trial: bool,
+    stalls: u32,
+    unreachable: bool,
+    misses: u32,
+}
+
+/// What to do after a session ended.
+#[derive(Debug, PartialEq)]
+enum Next {
+    Now,
+    After(Duration),
+}
+
+impl CardState {
+    fn new(card: bool) -> Self {
+        Self { on_card: card, trial: false, stalls: 0, unreachable: false, misses: 0 }
+    }
+
+    fn backoff(&self) -> Duration {
+        Duration::from_secs(2u64 << self.misses.min(4))
+    }
+
+    fn after(&mut self, ran_on_card: bool, got_any: bool, stalled: bool) -> Next {
+        let wait = Next::After(Duration::from_secs(2));
+        if got_any {
+            (self.unreachable, self.misses) = (false, 0);
+        }
+        if ran_on_card {
+            if stalled {
+                self.stalls += 1;
+                (self.on_card, self.trial) = (false, true);
+                Next::Now
+            } else if got_any {
+                self.stalls = 0;
+                wait
+            } else if self.unreachable {
+                self.misses += 1;
+                Next::After(self.backoff())
+            } else {
+                (self.on_card, self.trial) = (false, true);
+                Next::Now
+            }
+        } else if self.trial {
+            self.trial = false;
+            if got_any {
+                self.on_card = self.stalls < 2;
+                wait
+            } else {
+                (self.on_card, self.unreachable) = (true, true);
+                self.misses += 1;
+                Next::After(self.backoff())
+            }
+        } else {
+            wait
+        }
+    }
+}
+
+pub(crate) fn run_capture(
+    rt: &Arc<InputRt>,
+    input_args: Vec<String>,
+    w: usize,
+    h: usize,
+    fps: u32,
+    card: Option<Hardware>,
+) {
     let size = w * h * 4;
+    let mut state = CardState::new(card.is_some());
     while !rt.stopped() {
+        let session_card = card.filter(|_| state.on_card);
         let mut cmd = ffmpeg();
+        cmd.args(session_card.unwrap_or_default());
+        rt.hardware.store(session_card.is_some(), Ordering::Relaxed);
         cmd.args(&input_args);
         cmd.args(["-map", "0:v:0", "-vf", &fit_filter(w, h, fps)]);
         cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"]);
@@ -745,6 +891,8 @@ fn run_capture(rt: &Arc<InputRt>, input_args: Vec<String>, w: usize, h: usize, f
         let log = watch_log(rt, &mut child);
         let mut out = child.stdout.take().unwrap();
         rt.adopt(child);
+        let over = Arc::new(AtomicBool::new(false));
+        let stalled = session_card.map(|_| stall_guard(rt, over.clone()));
         if let Some(listener) = audio_port {
             let worker = rt.clone();
             thread::spawn(move || {
@@ -774,13 +922,21 @@ fn run_capture(rt: &Arc<InputRt>, input_args: Vec<String>, w: usize, h: usize, f
             }
             buf = rt.publish(buf).unwrap_or_else(|| Frame::new(w, h));
         }
+        over.store(true, Ordering::Relaxed);
         rt.kill_children();
         if rt.stopped() {
             return;
         }
+        let stalled = stalled.is_some_and(|s| s.load(Ordering::Relaxed));
+        let next = state.after(session_card.is_some(), got_any, stalled);
+        if next == Next::Now {
+            continue;
+        }
         let why = log.lock().unwrap().clone();
         rt.set_status(t!("sources.source_lost", reason = why));
-        thread::sleep(Duration::from_secs(2));
+        if let Next::After(wait) = next {
+            thread::sleep(wait);
+        }
     }
 }
 
@@ -856,6 +1012,72 @@ pub(crate) fn pump_audio(rt: &InputRt, mut out: impl Read, session_stop: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn secs(s: u64) -> Next {
+        Next::After(Duration::from_secs(s))
+    }
+
+    #[test]
+    fn an_unreachable_stream_costs_one_try_per_round() {
+        let mut c = CardState::new(true);
+        assert_eq!(c.after(true, false, false), Next::Now, "nothing on the card: software at once");
+        assert!(!c.on_card);
+        assert_eq!(c.after(false, false, false), secs(4), "nothing in software either: wait");
+        assert!(c.on_card, "the card was not to blame");
+        // From now on one try per round, waiting longer each time.
+        assert_eq!(c.after(true, false, false), secs(8));
+        assert!(c.on_card, "no second software try in the same round");
+        assert_eq!(c.after(true, false, false), secs(16));
+        for _ in 0..5 {
+            c.after(true, false, false);
+        }
+        assert_eq!(c.after(true, false, false), secs(32), "growth stops");
+        // The stream shows up on the card: back to the normal rhythm.
+        assert_eq!(c.after(true, true, false), secs(2));
+        assert_eq!(c.after(true, false, false), Next::Now, "a lost stream is checked in software once");
+    }
+
+    #[test]
+    fn one_quiet_spell_does_not_blame_the_card_for_good() {
+        let mut c = CardState::new(true);
+        assert_eq!(c.after(true, true, true), Next::Now, "stall: software takes over");
+        assert!(!c.on_card);
+        // Software got pictures, then the stream was lost: the card is tried again.
+        assert_eq!(c.after(false, true, false), secs(2));
+        assert!(c.on_card, "a single stall is not held against the card");
+        // The card then runs well for a while.
+        assert_eq!(c.after(true, true, false), secs(2));
+        assert_eq!(c.stalls, 0);
+        // Two stalls in a row: the card is blamed for the run.
+        c.after(true, true, true);
+        c.after(false, true, false);
+        assert!(c.on_card);
+        c.after(true, true, true);
+        assert_eq!(c.after(false, true, false), secs(2));
+        assert!(!c.on_card, "stalling twice in a row blames the card");
+        assert_eq!(c.after(false, true, false), secs(2));
+        assert!(!c.on_card, "and software stays");
+    }
+
+    // Uses `cmd` and `ping`.
+    #[cfg(windows)]
+    #[test]
+    fn a_decoder_that_hangs_or_fails_after_its_pipe_closed_is_bad() {
+        let rt = InputRt::new(false, false);
+        let spawn = |args: &[&str]| {
+            let child = Command::new(args[0]).args(&args[1..]).stdout(Stdio::null()).spawn().unwrap();
+            let pid = child.id();
+            rt.adopt(child);
+            pid
+        };
+        let failed = spawn(&["cmd", "/c", "exit", "3"]);
+        assert!(rt.ended_badly_within(failed, Duration::from_secs(30)), "exit code 3");
+        let fine = spawn(&["cmd", "/c", "exit", "0"]);
+        assert!(!rt.ended_badly_within(fine, Duration::from_secs(30)), "clean exit");
+        let hung = spawn(&["ping", "-n", "60", "127.0.0.1"]);
+        assert!(rt.ended_badly_within(hung, Duration::from_millis(300)), "still running: hung");
+        rt.shutdown();
+    }
 
     #[test]
     fn reads_file_length_from_log() {

@@ -31,10 +31,10 @@ pub use os::{
 
 #[cfg(windows)]
 pub use windows::{
-    ProcessTree, end_process_tree, open_sealed, prepare_child, seal, tie_children_to_this_process,
+    ProcessTree, end_process_tree, has_exited, open_sealed, prepare_child, seal, tie_children_to_this_process,
 };
 
 #[cfg(unix)]
 pub use unix::{
-    ProcessTree, end_process_tree, open_sealed, prepare_child, seal, tie_children_to_this_process,
+    ProcessTree, end_process_tree, has_exited, open_sealed, prepare_child, seal, tie_children_to_this_process,
 };

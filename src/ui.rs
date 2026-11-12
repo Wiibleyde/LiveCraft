@@ -743,6 +743,9 @@ impl eframe::App for App {
         self.screen_windows(&ctx, &project);
         self.run_pending_restart();
         self.autosave(&project);
+        if secret::take_dropped() {
+            self.say(t!("secret.not_saved"));
+        }
         self.handle_screenshot(&ctx);
         // Clock and meters tick over even when the picture is still.
         ctx.request_repaint_after(Duration::from_millis(100));

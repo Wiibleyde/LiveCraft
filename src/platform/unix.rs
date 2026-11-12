@@ -15,10 +15,41 @@ pub fn prepare_child(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
+/// Whether the child has ended, without reaping it: while it stays a zombie
+/// its number cannot be given to another program, so a group kill aimed at it
+/// is still safe. `None` when it was reaped already, and the number is free.
+fn exit_state(child: &Child) -> Option<bool> {
+    let pid = libc::id_t::try_from(child.id()).ok()?;
+    // SAFETY: an all-zero siginfo_t is a valid value for waitid to fill in.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: waitid only reads its arguments and writes `info`; WNOWAIT leaves the child to be reaped later.
+    let r =
+        unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    if r != 0 {
+        return None;
+    }
+    // SAFETY: waitid filled `info`; the process number is zero while the child still runs.
+    #[cfg(target_os = "linux")]
+    let who = unsafe { info.si_pid() };
+    #[cfg(not(target_os = "linux"))]
+    let who = info.si_pid;
+    Some(who != 0)
+}
+
+/// Whether the child has ended. It is not reaped, so `end_process_tree` can
+/// still end what it left behind before `wait` frees its number.
+pub fn has_exited(child: &mut Child) -> bool {
+    !matches!(exit_state(child), Some(false))
+}
+
 /// A child can have children of its own: ffmpeg is often started through a
 /// launcher, and a browser is dozens of processes. Stopping only the first
-/// would leave the real work running.
+/// would leave the real work running. A child that was reaped already is left
+/// alone: its number may belong to someone else by now.
 pub fn end_process_tree(child: &mut Child) {
+    if exit_state(child).is_none() {
+        return;
+    }
     // Only children started with `prepare_child` lead a group; for any other
     // there is no group of that number and nothing happens.
     if let Ok(group) = i32::try_from(child.id()) {
@@ -108,9 +139,9 @@ fn gather_keys(store: &Keystore, file: &Path) -> Vec<SealKey> {
         stored = Ok(fresh.filter(|k| (store.save)(k)).map(Vec::from));
     }
     let stored = stored.ok().flatten().and_then(from);
-    let mut filed = std::fs::read(file).ok().and_then(from);
+    let mut filed = read_key_file(file);
     if stored.is_none() && filed.is_none() {
-        filed = new_key().filter(|k| write_key_file(file, k));
+        filed = new_key().and_then(|k| install_key_file(file, &k));
     }
     stored.into_iter().chain(filed).collect()
 }
@@ -121,14 +152,55 @@ fn new_key() -> Option<SealKey> {
     Some(key)
 }
 
-fn write_key_file(file: &Path, key: &SealKey) -> bool {
-    use std::os::unix::fs::OpenOptionsExt;
-    if let Some(dir) = file.parent() {
-        let _ = std::fs::create_dir_all(dir);
+/// The key in the file, if the file is what this program wrote: a regular
+/// file (never a link followed), owned by this account, holding exactly one
+/// key. One this account owns but left open to others is closed again; any
+/// other is ignored, and the key in it is never trusted.
+fn read_key_file(file: &Path) -> Option<SealKey> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(file).ok()?;
+    let meta = f.metadata().ok()?;
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.len() != 32 {
+        return None;
     }
+    if meta.mode() & 0o077 != 0 {
+        f.set_permissions(std::fs::Permissions::from_mode(0o600)).ok()?;
+    }
+    let mut key = [0u8; 32];
+    f.read_exact(&mut key).ok()?;
+    Some(key)
+}
+
+/// Puts a key in place and returns the one that is there now. It is written
+/// whole to a file of its own and then linked in, so no reader ever sees half
+/// a key; if another instance got there first its key is kept, and a file that
+/// is not a valid key (cut short, empty, a link) is replaced.
+fn install_key_file(file: &Path, key: &SealKey) -> Option<SealKey> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = file.parent()?;
+    let _ = std::fs::create_dir_all(dir);
+    let mut random = [0u8; 8];
+    getrandom::fill(&mut random).ok()?;
+    let side = dir.join(format!(".secret.key.{}.{}", std::process::id(), u64::from_le_bytes(random)));
     // Created readable by this account only, never widened afterwards.
-    let opened = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(file);
-    opened.and_then(|mut f| f.write_all(key).and_then(|_| f.sync_all())).is_ok()
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&side).ok()?;
+    let written = f.write_all(key).and_then(|_| f.sync_all());
+    drop(f);
+    let placed = if written.is_err() {
+        None
+    } else {
+        match std::fs::hard_link(&side, file) {
+            Ok(()) => Some(*key),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                read_key_file(file).or_else(|| std::fs::rename(&side, file).ok().map(|_| *key))
+            }
+            Err(_) => None,
+        }
+    };
+    let _ = std::fs::remove_file(&side);
+    placed
 }
 
 /// Read or made once, on first use: the keyring can be slow to answer.
@@ -185,6 +257,82 @@ mod tests {
         assert!(!sealed.windows(8).any(|w| w == b"rtmp-key"));
         assert_eq!(open_by(&first[0], &sealed).unwrap(), b"rtmp-key");
         let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn a_damaged_key_file_is_replaced_not_left_to_disable_sealing() {
+        use std::os::unix::fs::PermissionsExt;
+        for (name, bytes) in [("empty", &b""[..]), ("short", &b"half a key"[..]), ("long", &[1u8; 40][..])] {
+            let file = temp_file(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, bytes).unwrap();
+            let keys = gather_keys(&unreachable_store(), &file);
+            assert_eq!(keys.len(), 1, "{name}: a key is made again");
+            assert_eq!(std::fs::read(&file).unwrap(), keys[0], "{name}: and kept");
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(gather_keys(&unreachable_store(), &file), keys, "{name}: the same one next time");
+            let left: Vec<_> = std::fs::read_dir(file.parent().unwrap()).unwrap().collect();
+            assert_eq!(left.len(), 1, "{name}: no side file is left behind");
+            let _ = std::fs::remove_dir_all(file.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_key_file_that_is_a_link_is_not_followed() {
+        let file = temp_file("link");
+        let dir = file.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("elsewhere");
+        std::fs::write(&target, [9u8; 32]).unwrap();
+        std::os::unix::fs::symlink(&target, &file).unwrap();
+        let keys = gather_keys(&unreachable_store(), &file);
+        assert_eq!(keys.len(), 1);
+        assert_ne!(keys[0], [9u8; 32], "the planted key is not used");
+        assert_eq!(std::fs::read(&target).unwrap(), [9u8; 32], "and its target is untouched");
+        assert!(!std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_key_file_open_to_others_is_closed_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = temp_file("wide");
+        let key = gather_keys(&unreachable_store(), &file)[0];
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(gather_keys(&unreachable_store(), &file), [key]);
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn two_instances_starting_together_end_up_with_one_key() {
+        let file = temp_file("race");
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let file = file.clone();
+                std::thread::spawn(move || gather_keys(&unreachable_store(), &file))
+            })
+            .collect();
+        let all: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(all.iter().all(|k| k.len() == 1 && *k == all[0]), "{all:?}");
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn a_child_already_reaped_is_not_signalled_again() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "exit 0"]);
+        prepare_child(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+        let t0 = Instant::now();
+        while !has_exited(&mut child) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(has_exited(&mut child));
+        assert!(exit_state(&child).is_some(), "still a zombie: not reaped by looking");
+        child.wait().unwrap();
+        assert!(exit_state(&child).is_none(), "reaped: its number is free");
+        end_process_tree(&mut child); // must do nothing, not signal a stranger
     }
 
     #[test]

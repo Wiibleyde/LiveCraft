@@ -86,7 +86,7 @@ static HOST: Mutex<Option<Host>> = Mutex::new(None);
 
 fn launch(exe: &PathBuf) -> Option<Host> {
     let port = free_port()?;
-    let profile = std::env::temp_dir().join(format!("LiveCraft-web-{port}"));
+    let profile = private_profile("LiveCraft-web", port)?;
     let mut cmd = Command::new(exe);
     cmd.args(["--headless=new", "--hide-scrollbars", "--mute-audio", "--no-first-run"])
         .args(["--no-default-browser-check", "--disable-sync", "--disable-extensions"])
@@ -109,9 +109,14 @@ fn launch(exe: &PathBuf) -> Option<Host> {
 /// Joins the running browser, starting it if needed. Returns its port.
 fn join_host(exe: &PathBuf) -> Option<u16> {
     let mut slot = HOST.lock().unwrap();
-    let dead = slot.as_mut().is_some_and(|h| !matches!(h.child.try_wait(), Ok(None)));
-    if dead {
-        *slot = None;
+    let dead = slot.as_mut().is_some_and(|h| crate::platform::has_exited(&mut h.child));
+    if dead && let Some(mut host) = slot.take() {
+        // Ended, but not reaped yet: its number is still its own, so what it
+        // left behind can be ended and the tree let go before the number is freed.
+        crate::platform::end_process_tree(&mut host.child);
+        clear_profile_later(host.profile.clone());
+        drop(host.tree.take());
+        let _ = host.child.wait();
     }
     if slot.is_none() {
         *slot = launch(exe);
@@ -224,13 +229,47 @@ pub(crate) fn run_page(
     }
 }
 
+/// A browser's profile folder, made new and private: in the account's own
+/// runtime folder where there is one (not the shared temporary folder), under
+/// a name nobody can predict, and refused if it already exists.
+pub(crate) fn private_profile(prefix: &str, port: u16) -> Option<PathBuf> {
+    let base = profile_base();
+    for _ in 0..8 {
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).ok()?;
+        let path = base.join(format!("{prefix}-{port}-{:016x}", u64::from_le_bytes(random)));
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut make = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut make, 0o700);
+        if make.create(&path).is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn profile_base() -> PathBuf {
+    #[cfg(unix)]
+    if let Some(dir) =
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_absolute() && d.is_dir())
+    {
+        return dir;
+    }
+    std::env::temp_dir()
+}
+
 /// Profiles left by a run that ended abruptly; a day old means nothing uses them.
 fn clear_old_profiles() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         thread::spawn(|| {
-            let Ok(list) = std::fs::read_dir(std::env::temp_dir()) else { return };
             let day = Duration::from_secs(86_400);
+            let mut folders = vec![std::env::temp_dir()];
+            if profile_base() != folders[0] {
+                folders.push(profile_base());
+            }
+            let list = folders.into_iter().filter_map(|d| std::fs::read_dir(d).ok()).flatten();
             for entry in list.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 // The program was called Regie before, and left the same kind.
@@ -369,4 +408,24 @@ fn show(rt: &InputRt, data: &str, size: (usize, usize), last_hash: &mut u64) -> 
     rt.clear_status();
     rt.publish(f);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_profile_is_new_private_and_hard_to_guess() {
+        let a = private_profile("LiveCraft-web-test", 1234).unwrap();
+        let b = private_profile("LiveCraft-web-test", 1234).unwrap();
+        assert_ne!(a, b, "never the same name twice");
+        assert!(a.is_dir() && a.starts_with(profile_base()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let _ = std::fs::remove_dir_all(a);
+        let _ = std::fs::remove_dir_all(b);
+    }
 }

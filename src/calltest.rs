@@ -24,6 +24,9 @@ struct Guest {
 impl Drop for Guest {
     fn drop(&mut self) {
         crate::platform::end_process_tree(&mut self.child);
+        // The tree lets go before the browser is reaped, so the number it
+        // holds can never belong to another program by then.
+        drop(self._tree.take());
         let _ = self.child.wait();
         sleep(Duration::from_millis(500));
         let _ = std::fs::remove_dir_all(&self.profile);
@@ -33,7 +36,8 @@ impl Drop for Guest {
 fn start_guest(link: &str) -> Result<(Guest, u16), String> {
     let exe = browser::find_browser().ok_or("Edge ou Chrome introuvable")?;
     let port = browser::free_port().ok_or("aucun port libre")?;
-    let profile = std::env::temp_dir().join(format!("LiveCraft-guest-{port}"));
+    let profile =
+        browser::private_profile("LiveCraft-web-guest", port).ok_or("dossier du navigateur impossible")?;
     let mut cmd = Command::new(exe);
     cmd.args(["--headless=new", "--no-first-run", "--no-default-browser-check", "--mute-audio"])
         .args(["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"])
@@ -45,6 +49,7 @@ fn start_guest(link: &str) -> Result<(Guest, u16), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    crate::platform::prepare_child(&mut cmd);
     let child = cmd.spawn().map_err(|e| e.to_string())?;
     let tree = ProcessTree::hold(&child);
     Ok((Guest { child, profile, _tree: tree }, port))
