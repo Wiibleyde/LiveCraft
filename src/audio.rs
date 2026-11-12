@@ -5,7 +5,7 @@ use crate::clap;
 use crate::clock::{self, Drift, Pace, Take};
 use crate::dsp::Chain;
 use crate::engine::Engine;
-use crate::model::{AudioCfg, AudioPick, Kind};
+use crate::model::{AudioCfg, AudioPick, Kind, ReturnSound};
 use crate::plugins::{Owner, Rack};
 use crate::sources::{AUDIO_RATE, Ring};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -133,6 +133,8 @@ struct Strip {
     /// A stream fetched as fast as its sound is taken, which can run ahead
     /// and wait for room.
     may_wait: bool,
+    /// What a video call guest hears back.
+    call: Option<ReturnSound>,
 }
 
 struct Mix {
@@ -162,6 +164,10 @@ impl Engine {
                 always_on: is_always_on(&i.kind),
                 live: is_live(&i.kind),
                 may_wait: matches!(&i.kind, Kind::Network { url, .. } if may_run_ahead(url)),
+                call: match i.kind {
+                    Kind::VideoCall { return_sound, .. } => Some(return_sound),
+                    _ => None,
+                },
             })
             .collect();
         let fade = if p.ftb_audio { 1.0 - s.ftb_level } else { 1.0 };
@@ -216,6 +222,13 @@ impl Engine {
         let mut tmp = vec![0f32; BLOCK];
         let mut buses = vec![vec![0f32; BLOCK]; 8];
         let mut solo = vec![0f32; BLOCK];
+        // What each video call guest adds to Master, to take back out of
+        // what they hear. It is taken out of `dry`, Master as the inputs
+        // send it, before the plug-ins of buses and Master: those change the
+        // guest's voice in the mix, which would then no longer cancel.
+        let mut own: HashMap<u64, Vec<f32>> = HashMap::new();
+        let mut dry = vec![0f32; BLOCK];
+        let mut back = vec![0f32; BLOCK];
         let mut rack = Rack::new(&self.plugins);
         let mut pace = Pace::new(clock::now(), (AUDIO_RATE / FRAMES) as u32);
         let mut skipped = 0;
@@ -227,6 +240,10 @@ impl Engine {
             chains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             gains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             drifts.retain(|id, _| mix.strips.iter().any(|s| s.id == *id && s.live));
+            own.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
+            own.values_mut().for_each(|v| v.fill(0.0));
+            dry.fill(0.0);
+            let minus = mix.strips.iter().any(|s| s.call == Some(ReturnSound::MasterMinusGuest));
             for strip in &mix.strips {
                 let Some(rt) = self.rt(strip.id) else { continue };
                 let Some(ring) = &rt.audio else { continue };
@@ -258,6 +275,9 @@ impl Engine {
                 gains.insert(strip.id, target);
                 let step = (target - from) / FRAMES as f32;
                 let (pan_l, pan_r) = balance(strip.cfg.balance);
+                let mut own_block = (strip.call == Some(ReturnSound::MasterMinusGuest))
+                    .then(|| own.entry(strip.id).or_insert_with(|| vec![0f32; BLOCK]));
+                let to_master = if minus { reach_of_master(&strip.cfg, &mix.buses) } else { 0.0 };
                 let mut peak = 0f32;
                 for (n, pair) in tmp.as_chunks::<2>().0.iter().enumerate() {
                     let g = from + step * n as f32;
@@ -271,6 +291,14 @@ impl Engine {
                             bus[n * 2] += l * send;
                             bus[n * 2 + 1] += r * send;
                         }
+                    }
+                    if minus {
+                        dry[n * 2] += l * to_master;
+                        dry[n * 2 + 1] += r * to_master;
+                    }
+                    if let Some(block) = own_block.as_mut() {
+                        block[n * 2] = l * to_master;
+                        block[n * 2 + 1] = r * to_master;
                     }
                     if strip.solo {
                         // Pre-fader hears the source itself; otherwise what
@@ -305,6 +333,7 @@ impl Engine {
             let default = default_name.lock().unwrap().clone();
             play_routes(&mix, &buses, &solo, &mut devices, &default);
             self.feed_encoders(&buses, pace.stamp());
+            self.feed_calls(&mix, &buses, (&dry, &own), &mut back);
             rack.idle();
 
             let step = pace.advance(clock::now(), CATCH_UP);
@@ -344,6 +373,50 @@ impl Engine {
             cam.encoder.push_audio(pcm(cam.encoder.pick), at);
         }
     }
+
+    /// Sends each connected guest what they asked to hear.
+    /// `dry` is Master as the inputs send it, `own` what each guest sends it.
+    fn feed_calls(
+        &self,
+        mix: &Mix,
+        buses: &[Vec<f32>],
+        (dry, own): (&[f32], &HashMap<u64, Vec<f32>>),
+        back: &mut [f32],
+    ) {
+        for strip in &mix.strips {
+            let Some(sound) = strip.call else { continue };
+            let Some(rt) = self.rt(strip.id) else { continue };
+            let Some(link) = rt.call.as_ref().filter(|l| l.is_connected()) else { continue };
+            match sound {
+                ReturnSound::MasterMinusGuest => {
+                    let mine = own.get(&strip.id);
+                    for (n, v) in back.iter_mut().enumerate() {
+                        let guest = mine.map_or(0.0, |m| m[n]);
+                        *v = ((dry[n] - guest) * mix.master).clamp(-1.0, 1.0);
+                    }
+                    link.sound.push(back);
+                }
+                ReturnSound::Bus(b) => {
+                    if let Some(bus) = buses.get(b as usize) {
+                        link.sound.push(bus);
+                    }
+                }
+                ReturnSound::Off => {}
+            }
+        }
+    }
+}
+
+/// How much of an input reaches Master: straight, and through the buses
+/// that feed it.
+fn reach_of_master(cfg: &AudioCfg, buses: &[(f32, bool)]) -> f32 {
+    let mut total = if cfg.buses & 1 != 0 { cfg.bus_levels[0] } else { 0.0 };
+    for (b, (level, to_master)) in buses.iter().enumerate() {
+        if *to_master && cfg.buses & (1 << (b + 1)) != 0 {
+            total += cfg.bus_levels[b + 1] * level;
+        }
+    }
+    total
 }
 
 fn default_output_name() -> String {
@@ -399,6 +472,7 @@ fn is_always_on(kind: &Kind) -> bool {
             | Kind::Network { .. }
             | Kind::Ndi { .. }
             | Kind::Omt { .. }
+            | Kind::VideoCall { .. }
     )
 }
 
@@ -650,5 +724,73 @@ mod tests {
         if let Err(e) = crate::livecheck::judge_tone(read, AUDIO_RATE) {
             panic!("{e}");
         }
+    }
+
+    /// The trap of any return feed: the guest hears their own voice come
+    /// back a moment late. What they hear is Master without them.
+    #[test]
+    fn a_guest_hears_the_show_but_not_themselves() {
+        use crate::model::{Input, Project};
+        let mut p = Project::blank();
+        p.inputs.push(Input::new(1, "Son", Kind::Tone));
+        let mut guest = Input::new(2, "Invité", crate::call::new_call());
+        guest.audio.follow = false;
+        p.inputs.push(guest);
+        let engine = Engine::start(p);
+        let rt = engine.rt(2).unwrap();
+        let link = rt.call.clone().unwrap();
+        // The guest's voice: a steady level, easy to find in what comes back,
+        // kept a little ahead so a late wake-up does not make a gap in it.
+        // Connected again each time, as the page opening meanwhile resets it.
+        let voice = rt.audio.clone().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (talking, connection) = (stop.clone(), link.clone());
+        let talker = thread::spawn(move || {
+            while !talking.load(Ordering::Relaxed) {
+                connection.set_connected(true);
+                while voice.len() < 9600 {
+                    voice.push(&[0.3f32; 960]);
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        // The sound thread first lists the devices, and on a busy machine a
+        // source can start late: wait until the show's tone and the guest
+        // are both on their meters, then take a fresh stretch.
+        let tone = engine.rt(1).unwrap();
+        let (mut tone_seen, mut guest_seen) = (false, false);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(tone_seen && guest_seen) && Instant::now() < deadline {
+            tone_seen |= tone.peak() > 0.05;
+            guest_seen |= rt.peak() > 0.2;
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Master is read during that stretch, while the guest talks: read
+        // after they stop, it only holds the rest of the show.
+        let until = |enough: usize| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut master = 0f32;
+            loop {
+                master = master.max(f32::from_bits(engine.bus_peaks[0].load(Ordering::Relaxed)));
+                if link.sound.len() >= enough || Instant::now() > deadline {
+                    return master;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        until(1);
+        link.sound.clear();
+        let master_peak = until(9600);
+        let mut back = vec![0f32; link.sound.len()];
+        link.sound.pull(&mut back);
+        stop.store(true, Ordering::Relaxed);
+        let _ = talker.join();
+        engine.shutdown();
+        assert!(back.len() > 4800, "sound goes back: {}", back.len());
+        let mean = back.iter().sum::<f32>() / back.len() as f32;
+        let loudest = back.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(master_peak > 0.3, "the guest is on Master: {master_peak}");
+        assert!(mean.abs() < 0.02, "the guest's own voice came back: {mean}");
+        assert!(loudest > 0.05, "the rest of the show is heard: {loudest}");
     }
 }

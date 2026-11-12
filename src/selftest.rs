@@ -255,6 +255,7 @@ fn check(dir: &str) -> Result<String, String> {
         return Err(format!("page web mal rendue : {:?}", &picture.data[middle..middle + 3]));
     }
     engine.close_input(web);
+    let call = crate::calltest::check(&engine)?;
 
     // Remote control drives the desk and auto-play starts the video.
     let inputs = engine.state.lock().unwrap().project.inputs.len();
@@ -375,7 +376,7 @@ fn check(dir: &str) -> Result<String, String> {
     Ok(format!(
         "enregistreurs {one}/ {second}| diffusion {streamed}(images coupées {cut}) | cadence {fps}/s, rendu {mix_us} µs, \
          images perdues {dropped}, répétées {repeated}, écart son-image {}, fin égalisée de {:.0} ms, \
-         crête son {peak:.2}",
+         crête son {peak:.2}| {call}",
         apart.join(" / "),
         padded * 1000.0
     ))

@@ -87,7 +87,7 @@ impl App {
             }
         }
         if input != before {
-            let source_changed = input.kind != before.kind;
+            let source_changed = input.kind.restarts_source(&before.kind);
             let live = !matches!(input.kind, Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. });
             let keep = input.kind.same_source(&before.kind);
             self.with(|s| {
@@ -519,6 +519,43 @@ impl App {
                 if ui.button(t!("input_settings.draw")).clicked() {
                     self.telestrator_for = Some(id);
                 }
+            }
+            Kind::VideoCall { token, address, stun, turn, turn_user, turn_password, return_sound } => {
+                let connected = rt.as_ref().and_then(|r| r.call.as_ref()).is_some_and(|c| c.is_connected());
+                call_editor(ui, token, address, self.api_lan, connected);
+                ui.horizontal(|ui| {
+                    ui.label(t!("input_settings.call.return_sound"));
+                    egui::ComboBox::from_id_salt("retour-appel").selected_text(return_sound.label()).show_ui(
+                        ui,
+                        |ui| {
+                            for choice in ReturnSound::all() {
+                                ui.selectable_value(return_sound, choice, choice.label());
+                            }
+                        },
+                    );
+                });
+                egui::CollapsingHeader::new(t!("input_settings.call.outside")).id_salt("appel-ice").show(
+                    ui,
+                    |ui| {
+                        ui.label(RichText::new(t!("input_settings.call.ice_hint")).small().color(DIM));
+                        egui::Grid::new("ice").num_columns(2).show(ui, |ui| {
+                            ui.label("STUN");
+                            ui.text_edit_singleline(stun);
+                            ui.end_row();
+                            ui.label("TURN");
+                            ui.text_edit_singleline(turn);
+                            ui.end_row();
+                            ui.label(t!("input_settings.call.turn_user"));
+                            ui.text_edit_singleline(turn_user);
+                            ui.end_row();
+                            ui.label(t!("input_settings.call.turn_password"));
+                            ui.add(egui::TextEdit::singleline(turn_password).password(true));
+                            ui.end_row();
+                        });
+                        // Hidden here, but not from the guest: say so where it is typed.
+                        ui.label(RichText::new(t!("input_settings.call.turn_exposed")).small().color(ORANGE));
+                    },
+                );
             }
             other => {
                 ui.label(RichText::new(other.label()).color(DIM));
@@ -991,4 +1028,52 @@ fn tab_copy(ui: &mut egui::Ui, input: &Input, project: &Project) -> Option<u64> 
         }
     }
     chosen
+}
+
+/// The guest's link, and what it takes for the guest to reach it.
+fn call_editor(ui: &mut egui::Ui, token: &mut String, address: &mut String, lan: bool, connected: bool) {
+    ui.label(RichText::new(t!("input_settings.call.link")).strong());
+    match crate::call::guest_link(token, address, lan) {
+        Some(link) => {
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(RichText::new(&link).monospace()).selectable(true));
+                if ui.button(t!("input_settings.call.copy_link")).clicked() {
+                    ui.ctx().copy_text(link.clone());
+                }
+            });
+        }
+        None => {
+            ui.label(RichText::new(t!("input_settings.call.no_link")).color(DIM));
+        }
+    }
+    ui.horizontal(|ui| {
+        let fresh = ui
+            .button(t!("input_settings.call.new_link"))
+            .on_hover_text(t!("input_settings.call.new_link_tip"));
+        if fresh.clicked() {
+            *token = crate::call::new_token();
+        }
+        if connected {
+            ui.label(RichText::new(t!("input_settings.call.connected")).color(GREEN).strong());
+        } else {
+            ui.label(RichText::new(t!("input_settings.call.waiting")).color(DIM));
+        }
+    });
+    if !lan && address.trim().is_empty() {
+        // Named with the words the settings window shows, so the way there
+        // reads the same as the screen in any language.
+        let hint = t!(
+            "input_settings.call.local_only",
+            lan = t!("settings.remote_lan"),
+            settings = t!("settings.title"),
+            tab = t!("settings.tab.remote"),
+        );
+        ui.label(RichText::new(hint).small().color(ORANGE));
+    }
+    ui.label(RichText::new(t!("input_settings.call.certificate")).small().color(DIM));
+    ui.horizontal(|ui| {
+        ui.label(t!("input_settings.call.address"));
+        ui.text_edit_singleline(address)
+            .on_hover_text(t!("input_settings.call.address_tip", port = crate::api::HTTP_PORT));
+    });
 }
