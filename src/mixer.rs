@@ -206,8 +206,13 @@ impl Mixer {
     }
 
     /// Moves composing to or from the graphics card. Everything is composed
-    /// again on the new side, so nothing stale carries over.
-    fn choose_painter(&mut self, wanted: bool) -> Option<Compositor> {
+    /// again on the new side, so nothing stale carries over. `open` gives the
+    /// card once it is ready, `None` before.
+    fn choose_painter(
+        &mut self,
+        wanted: bool,
+        open: impl FnOnce() -> Option<Result<gpu::Painter, String>>,
+    ) -> Option<Compositor> {
         let failed = self.gpu.as_ref().and_then(|g| g.painter.failed());
         if let Some(why) = failed {
             self.gpu = None;
@@ -227,10 +232,12 @@ impl Mixer {
         if self.gpu.is_some() || self.gpu_refused {
             return None;
         }
-        self.last_sig = 0;
-        self.preview_sig = 0;
-        match gpu::Painter::open(false) {
+        // Opening the card takes up to a second: the processor composes
+        // meanwhile, so the picture never waits for it.
+        match open()? {
             Ok(painter) => {
+                self.last_sig = 0;
+                self.preview_sig = 0;
                 let name = painter.adapter_name().to_string();
                 self.gpu = Some(Box::new(OnGpu { painter, pics: Pictures::default(), program: None }));
                 Some(Compositor::Gpu(name))
@@ -589,7 +596,7 @@ impl Engine {
             self.playlist_tick(now);
 
             let wanted = self.use_gpu.load(Ordering::Relaxed);
-            if let Some(now_using) = m.choose_painter(wanted) {
+            if let Some(now_using) = m.choose_painter(wanted, gpu::Painter::open_soon) {
                 *self.compositor.lock().unwrap() = now_using;
             }
             let c = Ctx { plan: &plan, rts: &rts };

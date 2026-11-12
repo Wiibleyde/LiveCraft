@@ -273,6 +273,23 @@ fn every_transition_looks_the_same_on_the_card() {
     }
 }
 
+/// Opening the card takes up to a second, and the picture must not wait for
+/// it: the processor composes until it is open, then the card takes over.
+#[test]
+fn the_processor_composes_until_the_card_is_open() {
+    let mut d = desk(334, 190);
+    let plan = d.state.plan(Instant::now(), Vec::new());
+    let c = Ctx { plan: &plan, rts: &d.rts };
+    let mut m = Mixer::default();
+    assert_eq!(m.choose_painter(true, || None), None, "still starting");
+    assert!(m.gpu.is_none() && !m.gpu_refused, "the card is still awaited");
+    let meanwhile = m.compose_program(&c).expect("composed at once by the processor");
+    let Some(painter) = card() else { return };
+    assert!(matches!(m.choose_painter(true, || Some(Ok(painter))), Some(Compositor::Gpu(_))));
+    assert!(m.gpu.is_some());
+    assert_close("une fois la carte ouverte", &meanwhile, &program(&mut m, &c));
+}
+
 /// The comparison itself must see a wrong picture: one that always passes
 /// would let the card show anything.
 #[test]

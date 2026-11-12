@@ -12,7 +12,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
 use std::time::Duration;
 use wgpu::util::DeviceExt;
 
@@ -107,12 +107,16 @@ struct Device {
     broken: Arc<Mutex<Option<String>>>,
 }
 
-static HARDWARE: LazyLock<Result<Arc<Device>, String>> = LazyLock::new(|| Device::open(false).map(Arc::new));
+static HARDWARE: OnceLock<Result<Arc<Device>, String>> = OnceLock::new();
 static ANY: LazyLock<Result<Arc<Device>, String>> = LazyLock::new(|| Device::open(true).map(Arc::new));
 
 impl Device {
+    fn hardware() -> &'static Result<Arc<Device>, String> {
+        HARDWARE.get_or_init(|| Device::open(false).map(Arc::new))
+    }
+
     fn shared(software: bool) -> Result<Arc<Device>, String> {
-        let device = if software { &*ANY } else { &*HARDWARE }.clone()?;
+        let device = if software { &*ANY } else { Device::hardware() }.clone()?;
         let broken = device.broken.lock().unwrap().clone();
         broken.map_or(Ok(device), Err)
     }
@@ -918,6 +922,18 @@ impl Painter {
             luts: HashMap::new(),
             masks: HashMap::new(),
         })
+    }
+
+    /// `open` for a real card, without waiting: opening one takes up to a
+    /// second (its programs are built for it), so it happens on a thread of
+    /// its own. `None` until it is done.
+    pub fn open_soon() -> Option<Result<Painter, String>> {
+        static STARTED: Once = Once::new();
+        STARTED.call_once(|| {
+            std::thread::spawn(Device::hardware);
+        });
+        HARDWARE.get()?;
+        Some(Painter::open(false))
     }
 
     pub fn adapter_name(&self) -> &str {
