@@ -290,6 +290,27 @@ fn the_processor_composes_until_the_card_is_open() {
     assert_close("une fois la carte ouverte", &meanwhile, &program(&mut m, &c));
 }
 
+/// A source frame stays on the card only while something drawn from it is
+/// kept. Held any longer, every frame of a corrected live preview stayed in
+/// memory and on the card until the output next changed: under a still output
+/// the card ran out of memory, and decoders never got their buffers back.
+#[test]
+fn a_live_preview_under_a_still_output_lets_its_frames_go() {
+    let Some(painter) = card() else { return };
+    let (w, h) = (64, 36);
+    let mut d = desk(w, h);
+    let mut m = on_card(painter);
+    // Zoomed and corrected: drawn from its source frame, then processed.
+    let rt = d.rts[&10].clone();
+    for n in 0..10 {
+        let plan = d.state.plan(Instant::now(), Vec::new());
+        let c = Ctx { plan: &plan, rts: &d.rts };
+        m.picture(10, &c, 0).expect("the preview");
+        let given_back = rt.publish(picture(w, h, n, false));
+        assert!(given_back.is_some(), "frame {n} still held once drawn");
+    }
+}
+
 /// The comparison itself must see a wrong picture: one that always passes
 /// would let the card show anything.
 #[test]

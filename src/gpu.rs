@@ -10,7 +10,7 @@ use crate::model::{EffectKind, Input, KeyMode, Position};
 use rayon::prelude::*;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
 use std::time::Duration;
@@ -894,8 +894,10 @@ impl canvas::Canvas for Canvas {
 /// Composes on the graphics card for one mixer.
 pub struct Painter {
     work: Rc<Work>,
-    /// Source frames already on the card, by where they sit in memory.
-    sources: HashMap<usize, Pic>,
+    /// Source frames already on the card, by where they sit in memory, for
+    /// as long as something drawn from them is kept. Holding them here would
+    /// keep every frame a source has moved on from, and its copy on the card.
+    sources: HashMap<usize, Weak<PicData>>,
     black: Option<Pic>,
     tables: HashMap<Vec<u8>, Rc<Tex>>,
     luts: HashMap<usize, (Arc<fx::Lut>, wgpu::Buffer)>,
@@ -953,10 +955,6 @@ impl Painter {
     /// Sends a finished canvas on its way back, to be collected with
     /// `finish_readback` once something else has been done meanwhile.
     pub fn start_readback(&mut self, c: Canvas) -> Readback {
-        // Frames the sources have moved on from, and nobody draws any more.
-        self.sources.retain(|_, p| {
-            Rc::strong_count(&p.0) > 1 || p.0.frame.get().is_some_and(|f| Arc::strong_count(f) > 1)
-        });
         self.work.start_readback(&c.tex)
     }
 
@@ -1100,7 +1098,14 @@ impl canvas::Painter for Painter {
 
     fn source(&mut self, f: Arc<Frame>) -> Pic {
         let key = Arc::as_ptr(&f) as usize;
-        self.sources.entry(key).or_insert_with(|| Pic::of_frame(f)).clone()
+        // While the entry lives it holds the frame, so the address is its own.
+        if let Some(p) = self.sources.get(&key).and_then(Weak::upgrade) {
+            return Pic(p);
+        }
+        self.sources.retain(|_, p| p.strong_count() > 0);
+        let pic = Pic::of_frame(f);
+        self.sources.insert(key, Rc::downgrade(&pic.0));
+        pic
     }
 
     fn canvas(&mut self, w: usize, h: usize) -> Canvas {
