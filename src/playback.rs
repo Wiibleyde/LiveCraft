@@ -420,6 +420,9 @@ fn shuffle_items(items: &mut [ListItem]) {
 /// Waits for clips. One camera plays whole; several share the screen in four.
 pub fn run_replay(rt: &Arc<InputRt>, w: usize, h: usize, fps: u32) {
     rt.publish(Frame::solid(w, h, [10, 10, 14]));
+    // Where each file's pictures start never changes; asking ffmpeg costs a
+    // few hundred milliseconds per press.
+    let mut starts = std::collections::HashMap::new();
     while !rt.stopped() {
         let Some(play) = rt.replay.lock().unwrap().take() else {
             thread::sleep(Duration::from_millis(30));
@@ -427,42 +430,124 @@ pub fn run_replay(rt: &Arc<InputRt>, w: usize, h: usize, fps: u32) {
         };
         rt.playing.store(true, Ordering::Relaxed);
         rt.pos_ms.store(0, Ordering::Relaxed);
-        rt.dur_ms.store(((play.end_s - play.start_s).max(0.0) * 1000.0) as u64, Ordering::Relaxed);
-        play_clip(rt, &play, w, h, fps);
+        rt.dur_ms.store((play.span_s.max(0.0) * 1000.0) as u64, Ordering::Relaxed);
+        play_clip(rt, &play, w, h, fps, &mut starts);
         rt.completions.fetch_add(1, Ordering::Relaxed);
         rt.playing.store(false, Ordering::Relaxed);
     }
 }
 
-fn clip_decoder(file: &str, play: &ReplayPlay, w: usize, h: usize, fps: u32) -> Option<std::process::Child> {
-    let vf = format!("setpts=PTS/{},{}", play.speed.max(0.01), fit_filter(w, h, fps));
+/// The timestamp of the first picture in `framecrc` output, in seconds. A
+/// file's other streams may start earlier, as AAC primes its sound.
+fn first_pts(framecrc: &str) -> Option<f64> {
+    let mut unit = None;
+    for line in framecrc.lines() {
+        if let Some(tb) = line.strip_prefix("#tb 0:") {
+            let (num, den) = tb.trim().split_once('/')?;
+            unit = Some(num.trim().parse::<f64>().ok()? / den.trim().parse::<f64>().ok()?);
+        } else if !line.starts_with('#') {
+            return Some(line.split(',').nth(2)?.trim().parse::<f64>().ok()? * unit?);
+        }
+    }
+    None
+}
+
+/// When a file's first picture is stamped, in seconds, or None before it has one.
+fn first_picture_s(file: &str) -> std::io::Result<Option<f64>> {
+    let probe = ffmpeg()
+        .args(["-v", "error", "-copyts", "-i", file, "-map", "0:v:0", "-c", "copy"])
+        .args(["-frames:v", "1", "-f", "framecrc", "-"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()?;
+    Ok(first_pts(&String::from_utf8_lossy(&probe.stdout)))
+}
+
+/// Decodes the clip's pictures as they are in the file; the player times them
+/// itself. Seeking in MPEG-TS lands a few pictures off, so decoding starts
+/// well before, past a keyframe (one every two seconds), and the pictures are
+/// picked by their own timestamps, `first` being the file's first picture.
+fn clip_decoder(clip: &ReplayClip, first: f64, w: usize, h: usize) -> std::io::Result<std::process::Child> {
+    let rough = (clip.from_s - 3.0).max(0.0);
+    let pick =
+        format!("trim=start={:.6}:end={:.6},{}", first + clip.from_s, first + clip.to_s, fit_scale(w, h));
     ffmpeg()
-        .args(["-ss", &format!("{:.3}", play.start_s), "-to", &format!("{:.3}", play.end_s)])
-        .args(["-i", file, "-an", "-vf", &vf, "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
+        .args(["-copyts", "-noaccurate_seek", "-ss", &format!("{rough:.6}"), "-i", &clip.file])
+        .args([
+            "-an",
+            "-vf",
+            &pick,
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "pipe:1",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()
 }
 
-fn play_clip(rt: &Arc<InputRt>, play: &ReplayPlay, w: usize, h: usize, fps: u32) {
-    let quad = play.files.len() > 1;
+struct Tile {
+    out: Option<std::process::ChildStdout>,
+    picture: Frame,
+    read: usize,
+    ended: bool,
+}
+
+fn play_clip(
+    rt: &Arc<InputRt>,
+    play: &ReplayPlay,
+    w: usize,
+    h: usize,
+    fps: u32,
+    starts: &mut std::collections::HashMap<String, f64>,
+) {
+    let quad = play.clips.len() > 1;
     let (cw, ch) = if quad { (w / 2, h / 2) } else { (w, h) };
-    let mut outs = Vec::new();
-    for file in play.files.iter().take(4) {
-        let Some(mut child) = clip_decoder(file, play, cw, ch, fps) else {
-            rt.set_status(ffmpeg_missing());
+    let mut tiles = Vec::new();
+    for clip in play.clips.iter().take(4) {
+        // Probing a file takes a while: give up if the show is closing or
+        // another moment was asked for meanwhile.
+        if rt.stopped() || rt.replay.lock().unwrap().is_some() {
+            rt.kill_children();
             return;
+        }
+        let first = match starts.get(&clip.file) {
+            Some(s) => Ok(Some(*s)),
+            None => first_picture_s(&clip.file),
         };
-        outs.push(child.stdout.take().unwrap());
-        rt.adopt(child);
+        let decoder = match first {
+            Ok(Some(first)) => {
+                starts.insert(clip.file.clone(), first);
+                clip_decoder(clip, first, cw, ch).map(Some)
+            }
+            other => other.map(|_| None),
+        };
+        let out = match decoder {
+            Err(_) => {
+                rt.set_status(ffmpeg_missing());
+                return;
+            }
+            Ok(None) => None,
+            Ok(Some(mut child)) => {
+                let out = child.stdout.take();
+                rt.adopt(child);
+                out
+            }
+        };
+        tiles.push(Tile { ended: out.is_none(), out, picture: Frame::new(cw, ch), read: 0 });
     }
     let period = Duration::from_secs_f64(1.0 / fps as f64);
-    let mut tiles = vec![Frame::new(cw, ch); outs.len()];
+    // Slow motion walks through the moment slower than the show's clock.
+    let step = play.speed.max(0.01) as f64 / fps as f64;
     let mut next = Instant::now();
-    let mut frames = 0u64;
-    'clip: while !rt.stopped() {
+    let mut ticks = 0u64;
+    let mut last_shown = false;
+    while !rt.stopped() {
         if rt.replay.lock().unwrap().is_some() {
             break;
         }
@@ -471,24 +556,45 @@ fn play_clip(rt: &Arc<InputRt>, play: &ReplayPlay, w: usize, h: usize, fps: u32)
             next = Instant::now();
             continue;
         }
-        for (out, tile) in outs.iter_mut().zip(&mut tiles) {
-            if out.read_exact(&mut tile.data).is_err() {
-                break 'clip;
+        let mut clock = ticks as f64 * step;
+        if clock >= play.span_s {
+            // Ticks rarely land on the out mark. The picture on screen at that
+            // moment is the moment's last, so show it once before stopping
+            // instead of ending a tick early on the picture before.
+            if last_shown {
+                break;
             }
+            last_shown = true;
+            clock = play.span_s - 1e-6;
+        }
+        // Each camera shows the picture it had at this moment: pictures lost
+        // while recording hold the one before for as long as they lasted, and
+        // copies made to fill a late tick are passed over.
+        for (tile, clip) in tiles.iter_mut().zip(&play.clips) {
+            while !tile.ended && clip.due(tile.read, fps).is_some_and(|t| t <= clock + 1e-6) {
+                let picture = &mut tile.picture.data;
+                if tile.out.as_mut().is_some_and(|out| out.read_exact(picture).is_ok()) {
+                    tile.read += 1;
+                } else {
+                    tile.ended = true;
+                }
+            }
+        }
+        if tiles.iter().all(|t| t.ended && t.read == 0) {
+            break;
         }
         let mut picture = Frame::solid(w, h, [0, 0, 0]);
         for (n, tile) in tiles.iter().enumerate() {
             if quad {
                 let (x, y) = ((n % 2 * cw) as f32, (n / 2 * ch) as f32);
-                picture.blit_region(tile, [0.0; 4], x, y, cw as f32, ch as f32, 255, 0.0);
+                picture.blit_region(&tile.picture, [0.0; 4], x, y, cw as f32, ch as f32, 255, 0.0);
             } else {
-                picture.copy_from(tile);
+                picture.copy_from(&tile.picture);
             }
         }
         rt.publish(picture);
-        frames += 1;
-        let done = frames as f64 / fps as f64 * play.speed as f64 * 1000.0;
-        rt.pos_ms.store(done as u64, Ordering::Relaxed);
+        ticks += 1;
+        rt.pos_ms.store((ticks as f64 * step * 1000.0) as u64, Ordering::Relaxed);
         next += period;
         let now = Instant::now();
         if next > now {
@@ -517,6 +623,16 @@ mod tests {
         assert_eq!(tempo_filter(1.0), None);
         assert_eq!(tempo_filter(1.5).unwrap(), "atempo=1.5000");
         assert_eq!(tempo_filter(0.25).unwrap(), "atempo=0.5,atempo=0.5000");
+    }
+
+    #[test]
+    fn a_replay_finds_where_its_pictures_start() {
+        // As ffmpeg 9 prints it for a replay recording: pictures start 1024
+        // sound samples after the file does.
+        let crc = "#extradata 0:       36, 0x9ae208ea\n#tb 0: 1/90000\n#media_type 0: video\n\
+                   0,     127920,     127920,     3000,      924, 0xde1b4f8f, S=1\n";
+        assert_eq!(first_pts(crc), Some(127920.0 / 90000.0));
+        assert_eq!(first_pts("#tb 0: 1/90000\n"), None, "no picture recorded yet");
     }
 
     #[test]
