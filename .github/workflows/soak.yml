@@ -1,0 +1,64 @@
+name: Long run
+
+# A whole show for most of an hour, watching memory, timing and outputs.
+# Too long for every pull request: weekly, or by hand with a chosen length.
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      length:
+        description: "Show length, at most 2h (e.g. 45m, 90s, 1h)"
+        default: "45m"
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: windows-latest
+    # The longest show `--soak` accepts (2 h), plus the build and the report.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - name: Install FFmpeg
+        run: |
+          # The same dated BtbN release as the live check, and the SHA-256 that release publishes.
+          $release = 'autobuild-2026-11-09-12-42'
+          $name = 'ffmpeg-n9.0.2-48-gd4070a14ce-win64-gpl-shared-9.0.zip'
+          $sha256 = '391c241f4c940dd4cdc082282a2ea54b1b2673d1c14246517fda6d55403c2d11'
+          $zip = "$env:RUNNER_TEMP/ffmpeg.zip"
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/$release/$name" -OutFile $zip
+          $got = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($got -ne $sha256) { throw "FFmpeg zip has SHA-256 $got, expected $sha256" }
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP/ffmpeg"
+          (Get-ChildItem "$env:RUNNER_TEMP/ffmpeg" -Recurse -Filter ffmpeg.exe).DirectoryName | Out-File -Append $env:GITHUB_PATH
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: soak-cargo-${{ hashFiles('Cargo.lock') }}
+      - run: cargo build
+      - name: Run the show
+        shell: bash
+        # Through the environment, so the typed length is never read as script.
+        env:
+          LENGTH: ${{ inputs.length || '45m' }}
+        run: |
+          mkdir -p target/soak
+          cargo run -- --soak target/soak "$LENGTH" 2>&1 | tee target/soak/console.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: soak-report
+          path: |
+            target/soak/soak.csv
+            target/soak/soak.json
+            target/soak/recepteur.log
+            target/soak/console.txt
+          if-no-files-found: warn
