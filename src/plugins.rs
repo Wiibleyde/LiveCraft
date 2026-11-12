@@ -4,8 +4,9 @@
 //!
 //! Two threads share the work, as CLAP asks. The plug-in thread starts and
 //! stops instances, saves their state and drives their windows. The sound
-//! thread only runs blocks through them; it never waits on a lock, and
-//! takes no memory once a chain is set up.
+//! thread only runs blocks through them; it never waits on a lock and takes
+//! no memory per block. Each plug-in's buffers are made on the plug-in
+//! thread; the sound thread only builds the small list of a changed chain.
 
 use crate::audio::FRAMES;
 use crate::clap::{self, Library, Param, Plugin, PluginInfo, Processor, Requests};
@@ -47,6 +48,9 @@ pub fn chain_mut(p: &mut Project, owner: Owner) -> Option<&mut Vec<PluginSlot>> 
 
 /// A plug-in both threads hold.
 struct Live {
+    /// Made on the plug-in thread, taken by the sound thread once. Before
+    /// `plugin`: a processor that was never taken must go before it.
+    processor: Mutex<Option<Processor>>,
     plugin: Plugin,
     bypass: AtomicBool,
     /// Parameter changes from our own window, waiting for the next block.
@@ -96,9 +100,29 @@ pub struct PluginHost {
     catalog: Arc<Mutex<Catalog>>,
     commands: Mutex<Vec<Command>>,
     views: Mutex<HashMap<(Owner, u64), SlotView>>,
+    /// Files the user picked by hand in this session, as full paths.
+    picked: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl PluginHost {
+    /// Whether a project may have this file loaded and run. A project file
+    /// can come from anyone, so the path it holds is not enough: the file
+    /// must be one found by a scan, picked by hand in this session, or lie
+    /// in one of the plug-in folders of this computer. Network paths only
+    /// qualify when picked.
+    pub fn may_load(&self, path: &str) -> bool {
+        // A file that cannot be reached is not run, and the slot says so.
+        let Ok(file) = std::fs::canonicalize(path) else { return false };
+        if self.picked.lock().unwrap().contains(&file) {
+            return true;
+        }
+        let found = self.catalog.lock().unwrap().found.clone();
+        if found.iter().any(|i| std::fs::canonicalize(&i.path).is_ok_and(|c| c == file)) {
+            return true;
+        }
+        plugin_folders().iter().filter_map(|d| std::fs::canonicalize(d).ok()).any(|d| file.starts_with(d))
+    }
+
     pub fn view(&self, owner: Owner, key: u64) -> Option<SlotView> {
         self.views.lock().unwrap().get(&(owner, key)).cloned()
     }
@@ -118,6 +142,18 @@ impl PluginHost {
 
     /// Looks through the usual plug-in folders, beside the show.
     pub fn scan(&self) {
+        self.scan_with(|| {
+            let mut files = Vec::new();
+            for dir in plugin_folders() {
+                find_plugin_files(&dir, 0, &mut files);
+            }
+            files.sort();
+            files.dedup();
+            describe_all(&files)
+        });
+    }
+
+    fn scan_with(&self, work: impl FnOnce() -> (Vec<PluginInfo>, Vec<String>) + Send + 'static) {
         let catalog = self.catalog.clone();
         {
             let mut c = catalog.lock().unwrap();
@@ -127,22 +163,25 @@ impl PluginHost {
             c.scanning = true;
         }
         thread::spawn(move || {
-            let mut files = Vec::new();
-            for dir in plugin_folders() {
-                find_plugin_files(&dir, 0, &mut files);
-            }
-            files.sort();
-            files.dedup();
-            let (found, problems) = describe_all(&files);
-            *catalog.lock().unwrap() = Catalog { scanned: true, scanning: false, found, problems };
+            // Whatever happens in `work`, the window stops saying "looking".
+            let _done = EndScan(catalog.clone());
+            let (found, problems) = work();
+            *catalog.lock().unwrap_or_else(|e| e.into_inner()) =
+                Catalog { scanned: true, scanning: false, found, problems };
         });
     }
 
     /// Adds the plug-ins of a file picked by hand.
     pub fn scan_file(&self, path: PathBuf) {
         let catalog = self.catalog.clone();
+        let picked = self.picked.clone();
         thread::spawn(move || {
-            let (found, problems) = describe_all(&[path]);
+            let (found, problems) = describe_all(std::slice::from_ref(&path));
+            if !found.is_empty()
+                && let Ok(full) = std::fs::canonicalize(&path)
+            {
+                picked.lock().unwrap().push(full);
+            }
             let mut c = catalog.lock().unwrap();
             for info in found {
                 if !c.found.iter().any(|f| f.path == info.path && f.id == info.id) {
@@ -151,6 +190,15 @@ impl PluginHost {
             }
             c.problems.extend(problems);
         });
+    }
+}
+
+/// Ends a scan, even one that panicked.
+struct EndScan(Arc<Mutex<Catalog>>);
+
+impl Drop for EndScan {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).scanning = false;
     }
 }
 
@@ -214,10 +262,11 @@ fn describe_apart(file: &Path) -> Result<Vec<PluginInfo>, String> {
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let mut stdout = child.stdout.take().ok_or(t!("plugins.no_output"))?;
-    let reader = thread::spawn(move || {
+    let (sender, answer) = std::sync::mpsc::channel();
+    thread::spawn(move || {
         let mut text = String::new();
         let _ = std::io::Read::read_to_string(&mut stdout, &mut text);
-        text
+        let _ = sender.send(text);
     });
     let deadline = Instant::now() + Duration::from_secs(20);
     let status = loop {
@@ -231,10 +280,12 @@ fn describe_apart(file: &Path) -> Result<Vec<PluginInfo>, String> {
         }
         thread::sleep(Duration::from_millis(30));
     };
-    let text = reader.join().unwrap_or_default();
+    // A helper the plug-in left running may hold the pipe open for ever.
+    let text = answer.recv_timeout(Duration::from_secs(2));
     if !status.success() {
         return Err(t!("plugins.crashed_scan").into());
     }
+    let text = text.map_err(|_| t!("plugins.no_answer").to_string())?;
     serde_json::from_str::<Result<Vec<PluginInfo>, String>>(&text).map_err(|e| e.to_string())?
 }
 
@@ -276,6 +327,17 @@ pub fn wanted(p: &Project) -> Vec<(Owner, Vec<Want>)> {
     out
 }
 
+/// A slot key no other slot of the project has, whatever chain it is in.
+pub fn next_key(p: &Project) -> u64 {
+    let all = p
+        .inputs
+        .iter()
+        .flat_map(|i| i.audio.plugins.iter())
+        .chain(&p.master_plugins)
+        .chain(p.buses.iter().flat_map(|b| b.plugins.iter()));
+    all.map(|s| s.key).max().unwrap_or(0) + 1
+}
+
 pub fn decode_state(text: &str) -> Option<Vec<u8>> {
     if text.is_empty() { None } else { BASE64_STANDARD.decode(text).ok() }
 }
@@ -300,6 +362,8 @@ pub struct MainSide {
     /// Removed, but perhaps still in the sound thread's hands.
     retiring: Vec<(u64, Arc<Live>)>,
     version: u64,
+    /// Which opening of a project the instances belong to.
+    generation: u64,
     saved_at: Option<Instant>,
     viewed_at: Option<Instant>,
 }
@@ -309,6 +373,7 @@ impl MainSide {
     pub fn sync(
         &mut self,
         host: &PluginHost,
+        generation: u64,
         wanted: &[(Owner, Vec<Want>)],
         state_of: impl Fn(Owner, u64) -> Option<Vec<u8>>,
     ) {
@@ -316,10 +381,18 @@ impl MainSide {
             wanted.iter().filter(|(o, _)| *o == k.0).flat_map(|(_, w)| w).find(|w| w.key == k.1)
         };
         let mut changed = false;
+        // Another project was opened: what runs belongs to the one before,
+        // whatever its slots are called, and must start again from the new
+        // saved state.
+        let reopened = generation != self.generation;
+        self.generation = generation;
+        if reopened {
+            self.failed.clear();
+        }
         let gone: Vec<(Owner, u64)> = self
             .instances
             .iter()
-            .filter(|(k, i)| !find(k).is_some_and(|w| w.path == i.path && w.id == i.id))
+            .filter(|(k, i)| reopened || !find(k).is_some_and(|w| w.path == i.path && w.id == i.id))
             .map(|(k, _)| *k)
             .collect();
         for k in gone {
@@ -332,7 +405,11 @@ impl MainSide {
             for w in wants {
                 let k = (*owner, w.key);
                 let failed_before = self.failed.get(&k).is_some_and(|f| f.0 == w.path && f.1 == w.id);
-                if !self.instances.contains_key(&k) && !failed_before {
+                if !self.instances.contains_key(&k) && !failed_before && !host.may_load(&w.path) {
+                    // Not remembered as failed: picking the file again fixes it.
+                    let error = Some(t!("plugins.not_trusted").into());
+                    host.views.lock().unwrap().insert(k, SlotView { error, ..SlotView::default() });
+                } else if !self.instances.contains_key(&k) && !failed_before {
                     match self.start(w, state_of(*owner, w.key)) {
                         Ok(inst) => {
                             host.views.lock().unwrap().insert(k, view_of(&inst));
@@ -385,8 +462,14 @@ impl MainSide {
             plugin.load_state(&bytes);
         }
         plugin.activate(AUDIO_RATE as f64, FRAMES as u32)?;
-        let live =
-            Live { plugin, bypass: AtomicBool::new(w.bypass), pending: Mutex::new(Vec::new()), requests };
+        let processor = plugin.processor(FRAMES);
+        let live = Live {
+            processor: Mutex::new(Some(processor)),
+            plugin,
+            bypass: AtomicBool::new(w.bypass),
+            pending: Mutex::new(Vec::new()),
+            requests,
+        };
         Ok(Instance {
             path: w.path.clone(),
             id: w.id.clone(),
@@ -546,7 +629,11 @@ impl MainSide {
         }
         if !host.audio_done.load(Ordering::Acquire) {
             std::mem::forget(self);
+            return;
         }
+        // The published list also holds the plug-ins: let go of them here, so
+        // that they end on this thread, not whichever one drops the host.
+        host.published.lock().unwrap_or_else(|e| e.into_inner()).chains.clear();
     }
 }
 
@@ -563,10 +650,22 @@ fn view_of(i: &Instance) -> SlotView {
 }
 
 struct Running {
-    // Before `live`: the processor must stop before the plug-in can go.
-    processor: Processor,
+    processor: Option<Processor>,
     live: Arc<Live>,
     ran: bool,
+}
+
+impl Drop for Running {
+    /// Stops the processor here, on the sound thread, and hands it back to
+    /// its plug-in, so that a new rack (another sound device, say) can take it.
+    fn drop(&mut self) {
+        if let Some(mut p) = self.processor.take() {
+            p.stop();
+            if let Ok(mut slot) = self.live.processor.try_lock() {
+                *slot = Some(p);
+            }
+        }
+    }
 }
 
 /// The sound thread's side.
@@ -596,11 +695,14 @@ impl<'a> Rack<'a> {
             for live in lives {
                 match old.iter().position(|r| Arc::ptr_eq(&r.live, live)) {
                     Some(n) => list.push(old.swap_remove(n)),
-                    None => list.push(Running {
-                        processor: live.plugin.processor(FRAMES),
-                        live: live.clone(),
-                        ran: false,
-                    }),
+                    None => {
+                        // Made by the plug-in thread; if it is not there, the
+                        // plug-in is not run.
+                        let taken = live.processor.try_lock().ok().and_then(|mut p| p.take());
+                        if let Some(processor) = taken {
+                            list.push(Running { processor: Some(processor), live: live.clone(), ran: false });
+                        }
+                    }
                 }
             }
             chains.insert(*owner, list);
@@ -619,10 +721,13 @@ impl<'a> Rack<'a> {
         let Some(list) = self.chains.get_mut(&owner) else { return };
         for r in list {
             if r.live.bypass.load(Ordering::Relaxed) {
+                // Parameters may still be flushed, which CLAP only allows
+                // while it is not processing: idle() handles it.
                 continue;
             }
             take_changes(&r.live, &mut self.changes);
-            r.processor.run(block, &self.changes);
+            let Some(processor) = r.processor.as_mut() else { continue };
+            processor.run(block, &self.changes);
             if !self.changes.is_empty() {
                 r.live.requests.dirty.store(true, Ordering::Relaxed);
             }
@@ -637,7 +742,12 @@ impl<'a> Rack<'a> {
                 take_changes(&r.live, &mut self.changes);
                 let asked = r.live.requests.flush.swap(false, Ordering::Relaxed);
                 if !self.changes.is_empty() || asked {
-                    r.processor.flush(&self.changes);
+                    // `flush` is for a plug-in that is not processing; the next
+                    // block with sound starts it again.
+                    if let Some(processor) = r.processor.as_mut() {
+                        processor.stop();
+                        processor.flush(&self.changes);
+                    }
                 }
                 if !self.changes.is_empty() {
                     r.live.requests.dirty.store(true, Ordering::Relaxed);
@@ -671,8 +781,11 @@ impl Engine {
         while !self.quit.load(Ordering::Relaxed) {
             clap::editor::pump();
             if Instant::now() >= next_sync {
+                // Read before the project: a project opened in between is then
+                // seen as new on the next round, never as old.
+                let generation = self.project_generation.load(Ordering::Acquire);
                 let wanted = wanted(&self.state.lock().unwrap().project);
-                side.sync(&self.plugins, &wanted, |owner, key| self.plugin_state(owner, key));
+                side.sync(&self.plugins, generation, &wanted, |owner, key| self.plugin_state(owner, key));
                 next_sync = Instant::now() + Duration::from_millis(50);
             }
             side.serve(&self.plugins, |owner, key, state| self.store_plugin_state(owner, key, state));
@@ -761,12 +874,16 @@ pub(crate) mod tests {
         host: PluginHost,
         side: MainSide,
         project: Project,
+        generation: u64,
     }
 
     impl Bench {
         fn new(project: Project) -> Self {
             clap::this_thread_is_main();
-            let mut b = Bench { host: PluginHost::default(), side: MainSide::default(), project };
+            let mut b =
+                Bench { host: PluginHost::default(), side: MainSide::default(), project, generation: 0 };
+            // As if the plug-in had been found by a scan.
+            b.host.set_catalog(vec![test_plugin()]);
             b.sync();
             b
         }
@@ -774,7 +891,7 @@ pub(crate) mod tests {
         fn sync(&mut self) {
             let wanted = wanted(&self.project);
             let p = &self.project;
-            self.side.sync(&self.host, &wanted, |o, k| {
+            self.side.sync(&self.host, self.generation, &wanted, |o, k| {
                 decode_state(&chain(p, o)?.iter().find(|s| s.key == k)?.state)
             });
         }
@@ -897,6 +1014,168 @@ pub(crate) mod tests {
         let view = b.host.view(MIC, 5).unwrap();
         assert!(!view.running && view.error.is_some());
         assert_eq!(b.play(MIC, 1, 0.5), tone(0.5));
+    }
+
+    /// A copy of the test plug-in somewhere no scan or folder knows.
+    fn stray_copy() -> (PathBuf, PluginInfo) {
+        let info = test_plugin();
+        let dir = std::env::temp_dir().join(format!("livecraft-stray-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let to = dir.join(Path::new(&info.path).file_name().unwrap());
+        std::fs::copy(&info.path, &to).unwrap();
+        let stray = PluginInfo { path: to.to_string_lossy().into_owned(), ..info };
+        (dir, stray)
+    }
+
+    #[test]
+    fn a_project_cannot_make_us_load_a_file_nobody_picked() {
+        let (dir, stray) = stray_copy();
+        let mut b = Bench::new(one_input(vec![slot(&stray, 2)]));
+        let view = b.host.view(MIC, 2).unwrap();
+        assert!(!view.running);
+        assert_eq!(view.error.as_deref(), Some(t!("plugins.not_trusted")));
+        assert!(b.side.instances.is_empty(), "nothing was loaded");
+        assert!(b.side.libs.is_empty(), "the file was not even opened");
+        assert_eq!(b.play(MIC, 1, 0.5), tone(0.5), "the sound goes through");
+
+        // Picking it by hand in this session is what allows it.
+        b.host.picked.lock().unwrap().push(std::fs::canonicalize(&stray.path).unwrap());
+        b.sync();
+        assert!(b.host.view(MIC, 2).unwrap().running);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn network_and_missing_paths_are_not_loaded() {
+        let host = PluginHost::default();
+        assert!(!host.may_load(r"\\evil-host\share\x.clap"));
+        assert!(!host.may_load("C:/nulle/part.clap"));
+        host.set_catalog(vec![test_plugin()]);
+        assert!(host.may_load(&test_plugin().path));
+    }
+
+    #[test]
+    fn slot_keys_stay_unique_after_a_project_is_opened() {
+        let info = test_plugin();
+        let mut p = one_input(vec![slot(&info, 5), slot(&info, 8)]);
+        p.master_plugins.push(slot(&info, 12));
+        p.buses[2].plugins.push(slot(&info, 3));
+        let mut keys = Vec::new();
+        for _ in 0..3 {
+            let key = next_key(&p);
+            keys.push(key);
+            p.master_plugins.push(slot(&info, key));
+        }
+        assert_eq!(keys, [13, 14, 15]);
+        let all: Vec<u64> = p
+            .inputs
+            .iter()
+            .flat_map(|i| i.audio.plugins.iter())
+            .chain(&p.master_plugins)
+            .chain(p.buses.iter().flat_map(|b| b.plugins.iter()))
+            .map(|s| s.key)
+            .collect();
+        let mut sorted = all.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), all.len());
+        assert_eq!(next_key(&Project::blank()), 1);
+    }
+
+    #[test]
+    fn opening_another_project_starts_its_plugins_from_its_own_state() {
+        let info = test_plugin();
+        let mut quiet = slot(&info, 1);
+        quiet.state = BASE64_STANDARD.encode((-40f64).to_le_bytes());
+        let mut b = Bench::new(one_input(vec![quiet]));
+        assert!(peak(&b.play(MIC, 2, 0.5)) < 0.01);
+        // The same slot, on the same input, saved loud, and bypassed.
+        let mut loud = slot(&info, 1);
+        loud.state = BASE64_STANDARD.encode(0f64.to_le_bytes());
+        b.project = one_input(vec![loud]);
+        b.sync();
+        assert!(peak(&b.play(MIC, 2, 0.5)) < 0.01, "same slot: nothing has told it it is new");
+        b.generation += 1;
+        b.sync();
+        assert!((peak(&b.play(MIC, 3, 0.5)) - 0.5).abs() < 0.01, "the new state was read");
+    }
+
+    #[test]
+    fn a_scan_that_panics_still_ends() {
+        let host = PluginHost::default();
+        host.scan_with(|| panic!("a plug-in took the scanner down"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.catalog().scanning {
+            assert!(Instant::now() < deadline, "still looking");
+            thread::sleep(Duration::from_millis(10));
+        }
+        host.scan_with(|| (Vec::new(), Vec::new()));
+        while host.catalog().scanning {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(host.catalog().scanned, "and the next scan works");
+    }
+
+    #[test]
+    fn a_bypassed_plugin_takes_its_changes_while_not_processing() {
+        let info = test_plugin();
+        let mut b = Bench::new(one_input(vec![slot(&info, 1)]));
+        let Bench { host, side, project, .. } = &mut b;
+        let mut rack = Rack::new(host);
+        let sync = |side: &mut MainSide, project: &Project| {
+            let wanted = wanted(project);
+            side.sync(host, 0, &wanted, |_, _| None);
+        };
+        rack.refresh();
+        let mut block = tone(0.5);
+        rack.run(MIC, &mut block);
+        rack.idle();
+        // Bypassed while it was processing; the test plug-in mutes itself if
+        // it is flushed while still processing.
+        chain_mut(project, MIC).unwrap()[0].bypass = true;
+        sync(side, project);
+        host.send(Command::SetParam { owner: MIC, key: 1, id: 0, value: -6.0206 });
+        side.serve(host, |_, _, _| {});
+        for _ in 0..3 {
+            let mut block = tone(0.5);
+            rack.run(MIC, &mut block);
+            rack.idle();
+        }
+        chain_mut(project, MIC).unwrap()[0].bypass = false;
+        sync(side, project);
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            out = tone(0.8);
+            rack.run(MIC, &mut out);
+            rack.idle();
+        }
+        assert!((peak(&out) - 0.4).abs() < 0.01, "got {}", peak(&out));
+    }
+
+    #[test]
+    fn the_sound_thread_is_handed_a_ready_processor() {
+        let info = test_plugin();
+        let b = Bench::new(one_input(vec![slot(&info, 1)]));
+        let live = b.side.instances[&(MIC, 1)].live.clone();
+        assert!(live.processor.lock().unwrap().is_some(), "made by the plug-in thread");
+        let mut rack = Rack::new(&b.host);
+        rack.refresh();
+        assert!(live.processor.lock().unwrap().is_none(), "taken by the sound thread");
+        assert!(rack.chains.get(&MIC).is_some_and(|l| l.len() == 1));
+        drop(rack);
+        assert!(live.processor.lock().unwrap().is_some(), "and handed back for the next rack");
+    }
+
+    #[test]
+    fn shutdown_lets_go_of_the_published_plugins() {
+        let info = test_plugin();
+        let mut b = Bench::new(one_input(vec![slot(&info, 1)]));
+        let mut rack = Rack::new(&b.host);
+        rack.refresh();
+        rack.stop();
+        let side = std::mem::take(&mut b.side);
+        side.shutdown(&b.host);
+        assert!(b.host.published.lock().unwrap().chains.is_empty());
     }
 
     #[test]

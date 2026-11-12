@@ -103,15 +103,15 @@ unsafe impl Sync for Library {}
 impl Library {
     pub fn open(path: &Path) -> Result<Arc<Library>, String> {
         let lib = unsafe { libloading::Library::new(binary_of(path)) }
-            .map_err(|e| format!("impossible de charger {} : {e}", path.display()))?;
+            .map_err(|e| t!("clap.cannot_load", path = path.display(), error = e))?;
         let entry = unsafe { lib.get::<*const clap_plugin_entry>(b"clap_entry\0") }
-            .map_err(|_| "ce fichier n'est pas un plug-in CLAP".to_string())?;
+            .map_err(|_| t!("clap.not_clap").to_string())?;
         let entry: *const clap_plugin_entry = *entry;
         if entry.is_null() || !clap_version_is_compatible(unsafe { (*entry).clap_version }) {
-            return Err("version de CLAP non prise en charge".into());
+            return Err(t!("clap.bad_version").into());
         }
         let c_path = CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
-        let init = unsafe { (*entry).init }.ok_or("plug-in incomplet")?;
+        let init = unsafe { (*entry).init }.ok_or(t!("clap.incomplete"))?;
         if !unsafe { init(c_path.as_ptr()) } {
             return Err(t!("clap.refused_start").into());
         }
@@ -351,7 +351,7 @@ unsafe impl Sync for Plugin {}
 impl Plugin {
     pub fn create(lib: Arc<Library>, id: &str, requests: Arc<Requests>) -> Result<Plugin, String> {
         let factory = lib.factory().ok_or(t!("clap.offers_nothing"))?;
-        let create = factory.create_plugin.ok_or("plug-in incomplet")?;
+        let create = factory.create_plugin.ok_or(t!("clap.incomplete"))?;
         let mut shell = Box::new(Shell {
             host: clap_host {
                 clap_version: CLAP_VERSION,
@@ -430,7 +430,7 @@ impl Plugin {
     }
 
     pub fn activate(&mut self, rate: f64, max_frames: u32) -> Result<(), String> {
-        let activate = unsafe { (*self.raw).activate }.ok_or("plug-in incomplet")?;
+        let activate = unsafe { (*self.raw).activate }.ok_or(t!("clap.incomplete"))?;
         if !unsafe { activate(self.raw, rate, 1, max_frames) } {
             return Err(t!("clap.refused_activate").into());
         }
@@ -795,7 +795,7 @@ pub mod editor {
     pub fn open(plugin: &Plugin, title: &str) -> Result<Editor, String> {
         let floating = supported(plugin).ok_or(t!("clap.no_window"))?;
         let gui = unsafe { &*plugin.gui };
-        let create = gui.create.ok_or("plug-in incomplet")?;
+        let create = gui.create.ok_or(t!("clap.incomplete"))?;
         if !unsafe { create(plugin.raw, CLAP_WINDOW_API_WIN32.as_ptr(), floating) } {
             return Err(t!("clap.window_not_opened").into());
         }

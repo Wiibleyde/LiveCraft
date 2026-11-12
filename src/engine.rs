@@ -62,6 +62,8 @@ pub struct Engine {
     pub(crate) repaint: Mutex<Option<eframe::egui::Context>>,
     pub(crate) quit: AtomicBool,
     next_id: AtomicU64,
+    /// Counts the projects opened, so that what ran for the last one is not kept.
+    pub(crate) project_generation: AtomicU64,
     pub(crate) thumb_clock: AtomicU64,
     pub script_stop: AtomicU64,
 }
@@ -97,6 +99,7 @@ impl Engine {
             repaint: Mutex::new(None),
             quit: AtomicBool::new(false),
             next_id: AtomicU64::new(next),
+            project_generation: AtomicU64::new(0),
             thumb_clock: AtomicU64::new(0),
             script_stop: AtomicU64::new(0),
         });
@@ -248,6 +251,8 @@ impl Engine {
         *self.program.lock().unwrap() = Arc::new(Frame::solid(w, h, [0, 0, 0]));
         self.program_seq.fetch_add(1, Ordering::Release);
         self.thumbs.lock().unwrap().clear();
+        // After the new project is in place, so that the plug-ins read its states.
+        self.project_generation.fetch_add(1, Ordering::Release);
         self.start_all_inputs(false);
         self.state.lock().unwrap().version += 1;
     }

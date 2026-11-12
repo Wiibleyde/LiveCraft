@@ -760,8 +760,13 @@ clap.window_not_opened = le plug-in n'a pas ouvert sa fenêtre
 clap.window_not_shown = le plug-in n'a pas montré sa fenêtre
 clap.cannot_open_window = impossible d'ouvrir une fenêtre
 clap.cannot_embed = le plug-in n'a pas pu se placer dans sa fenêtre
+clap.cannot_load = impossible de charger {path} : {error}
+clap.not_clap = ce fichier n'est pas un plug-in CLAP
+clap.bad_version = version de CLAP non prise en charge
+clap.incomplete = plug-in incomplet
 
 # src/plugins.rs
 plugins.no_output = pas de sortie
 plugins.no_answer = le plug-in ne répond pas
 plugins.crashed_scan = le plug-in a planté pendant l'examen
+plugins.not_trusted = Ce fichier n'a pas été choisi sur cet ordinateur : choisissez-le à nouveau ou relancez la recherche pour l'autoriser

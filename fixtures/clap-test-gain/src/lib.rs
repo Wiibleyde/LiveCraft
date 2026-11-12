@@ -54,6 +54,8 @@ struct Gain {
     delay: [[f32; LATENCY]; 2],
     pos: usize,
     editor: isize,
+    /// Between start_processing and stop_processing.
+    processing: bool,
 }
 
 unsafe fn this<'a>(plugin: *const clap_plugin) -> &'a mut Gain {
@@ -77,8 +79,13 @@ unsafe extern "C" fn activate(plugin: *const clap_plugin, _: f64, _: u32, _: u32
 
 unsafe extern "C" fn nothing(_: *const clap_plugin) {}
 
-unsafe extern "C" fn start_processing(_: *const clap_plugin) -> bool {
+unsafe extern "C" fn start_processing(plugin: *const clap_plugin) -> bool {
+    unsafe { this(plugin) }.processing = true;
     true
+}
+
+unsafe extern "C" fn stop_processing(plugin: *const clap_plugin) {
+    unsafe { this(plugin) }.processing = false;
 }
 
 unsafe fn read_events(g: &mut Gain, events: *const clap_input_events) {
@@ -253,7 +260,13 @@ unsafe extern "C" fn flush(
     input: *const clap_input_events,
     _: *const clap_output_events,
 ) {
-    unsafe { read_events(this(plugin), input) };
+    let g = unsafe { this(plugin) };
+    // CLAP forbids this while processing; a host that does it gets silence.
+    if g.processing {
+        g.gain_db = MIN_DB;
+        return;
+    }
+    unsafe { read_events(g, input) };
 }
 
 static STATE: clap_plugin_state = clap_plugin_state { save: Some(save), load: Some(load) };
@@ -399,7 +412,7 @@ unsafe extern "C" fn create_plugin(
             activate: Some(activate),
             deactivate: Some(nothing),
             start_processing: Some(start_processing),
-            stop_processing: Some(nothing),
+            stop_processing: Some(stop_processing),
             reset: Some(nothing),
             process: Some(process),
             get_extension: Some(get_extension),
@@ -408,6 +421,7 @@ unsafe extern "C" fn create_plugin(
         gain_db: 0.0,
         delay: [[0.0; LATENCY]; 2],
         pos: 0,
+        processing: false,
         editor: 0,
     });
     let raw = Box::into_raw(gain);

@@ -760,8 +760,13 @@ clap.window_not_opened = the plug-in did not open its window
 clap.window_not_shown = the plug-in did not show its window
 clap.cannot_open_window = cannot open a window
 clap.cannot_embed = the plug-in could not fit into its window
+clap.cannot_load = cannot load {path}: {error}
+clap.not_clap = this file is not a CLAP plug-in
+clap.bad_version = this CLAP version is not supported
+clap.incomplete = incomplete plug-in
 
 # src/plugins.rs
 plugins.no_output = no output
 plugins.no_answer = the plug-in does not answer
 plugins.crashed_scan = the plug-in crashed while being examined
+plugins.not_trusted = This file was not chosen on this computer: pick it again or search again to allow it

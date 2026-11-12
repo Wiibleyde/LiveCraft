@@ -128,8 +128,8 @@ impl App {
             ui.label(RichText::new(text).color(ORANGE)).on_hover_text(catalog.problems.join("\n"));
         }
         if let Some(edit) = edit {
-            let key = self.engine.new_id();
             self.with(|s| {
+                let key = plugins::next_key(&s.project);
                 let Some(list) = plugins::chain_mut(&mut s.project, owner) else { return };
                 match edit {
                     Edit::Bypass(n) => list[n].bypass = !list[n].bypass,
