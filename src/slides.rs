@@ -119,18 +119,55 @@ fn cached(dir: &Path) -> Option<usize> {
     (n > 0 && (1..=n).all(|k| slide_file(dir, k).is_file())).then_some(n)
 }
 
-fn prune_cache(keep: &Path) {
-    let Ok(entries) = std::fs::read_dir(cache_root()) else { return };
+/// Slide folders a running input is showing: never pruned, however old.
+static IN_USE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+struct InUse(PathBuf);
+
+impl InUse {
+    fn new(dir: &Path) -> Self {
+        IN_USE.lock().unwrap_or_else(|e| e.into_inner()).push(dir.to_path_buf());
+        InUse(dir.to_path_buf())
+    }
+}
+
+impl Drop for InUse {
+    fn drop(&mut self) {
+        let mut all = IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = all.iter().position(|d| *d == self.0) {
+            all.swap_remove(i);
+        }
+    }
+}
+
+/// A folder's age is the time since it was last made or used, not made: a deck
+/// used every week must outlive the others.
+fn used_now(dir: &Path) {
     let now = SystemTime::now();
+    if let Ok(f) = std::fs::File::options().write(true).open(dir.join("count")) {
+        let _ = f.set_modified(now);
+    }
+}
+
+fn last_used(dir: &Path) -> Option<SystemTime> {
+    let of = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    of(dir.join("count")).or_else(|| of(dir.to_path_buf()))
+}
+
+fn prune_cache(keep: &Path) {
+    prune_in(&cache_root(), keep, KEEP_CACHE);
+}
+
+fn prune_in(root: &Path, keep: &Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let now = SystemTime::now();
+    let busy = IN_USE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for e in entries.flatten() {
         // Only the slide folders: the LibreOffice profile is kept, as building
         // it again makes the next conversion slow.
         let slides = e.file_name().len() == 16 && e.path().is_dir();
-        let old = e
-            .metadata()
-            .and_then(|m| m.modified())
-            .is_ok_and(|t| now.duration_since(t).is_ok_and(|age| age > KEEP_CACHE));
-        if slides && old && e.path() != keep {
+        let old = last_used(&e.path()).is_some_and(|t| now.duration_since(t).is_ok_and(|age| age > max_age));
+        if slides && old && e.path() != keep && !busy.contains(&e.path()) {
             let _ = std::fs::remove_dir_all(e.path());
         }
     }
@@ -222,10 +259,12 @@ pub fn convert(
         }
         if asked_to_stop.is_some_and(|t| t.elapsed() > STOP_GRACE) {
             end_process_tree(&mut child);
+            end_started_powerpoint(out);
             break;
         }
         if asked_to_stop.is_none() && heard.elapsed() > SILENCE {
             end_process_tree(&mut child);
+            end_started_powerpoint(out);
             failure = Some(format!("{} ne répond plus", conv.name()));
             break;
         }
@@ -244,6 +283,25 @@ pub fn convert(
         return Err(format!("{} s'est arrêté avant la fin", conv.name()));
     }
     Ok(done)
+}
+
+/// PowerPoint is a COM server, not a child of the script: ending the script
+/// leaves it open and hidden. The script writes the id of a PowerPoint it
+/// started itself (never one the user had open) to `powerpoint.pid`.
+fn end_started_powerpoint(out: &Path) {
+    let Some(pid) = std::fs::read_to_string(out.join("powerpoint.pid"))
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .filter(|p| *p > 4)
+    else {
+        return;
+    };
+    let mut kill = Command::new("taskkill");
+    kill.args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _ = no_window(&mut kill).status();
 }
 
 /// What `-EncodedCommand` takes: the script as UTF-16, in base64. It avoids
@@ -277,7 +335,10 @@ fn run_with(rt: &Arc<InputRt>, path: &str, w: usize, h: usize, find: impl FnOnce
         return;
     };
     let count = match cached(&dir) {
-        Some(n) => n,
+        Some(n) => {
+            used_now(&dir);
+            n
+        }
         None => match prepare(rt, Path::new(path), &dir, w, h, find) {
             Ok(n) => n,
             Err(e) => {
@@ -287,6 +348,7 @@ fn run_with(rt: &Arc<InputRt>, path: &str, w: usize, h: usize, find: impl FnOnce
         },
     };
     rt.clear_status();
+    let _in_use = InUse::new(&dir);
     show(rt, &dir, count, w, h);
 }
 
@@ -306,6 +368,7 @@ fn prepare(
     }
     // Another input may have just converted the same file.
     if let Some(n) = cached(dir) {
+        used_now(dir);
         return Ok(n);
     }
     prune_cache(dir);
@@ -550,6 +613,70 @@ mod tests {
     use super::*;
 
     const COLOURS: [[u8; 3]; 3] = [[230, 20, 20], [20, 200, 40], [30, 40, 220]];
+
+    fn aged_folder(root: &Path, name: &str, days: u64) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("count"), "1").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(days * 24 * 3600);
+        std::fs::File::options().write(true).open(dir.join("count")).unwrap().set_modified(old).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pruning_keeps_what_was_used_lately_or_is_showing() {
+        let root = std::env::temp_dir().join(format!("lc-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (stale, reused, showing, keep) = (
+            aged_folder(&root, "0000000000000001", 40),
+            aged_folder(&root, "0000000000000002", 40),
+            aged_folder(&root, "0000000000000003", 40),
+            aged_folder(&root, "0000000000000004", 40),
+        );
+        used_now(&reused);
+        let _busy = InUse::new(&showing);
+        prune_in(&root, &keep, KEEP_CACHE);
+        assert!(!stale.exists(), "a deck unused for 40 days goes");
+        assert!(reused.exists(), "a cache hit renews the folder");
+        assert!(showing.exists(), "a folder on air is never pruned");
+        assert!(keep.exists());
+        drop(_busy);
+        prune_in(&root, &keep, KEEP_CACHE);
+        assert!(!showing.exists(), "once released it ages like the others");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_given_up_conversion_ends_the_powerpoint_it_started_and_only_that() {
+        let out = std::env::temp_dir().join(format!("lc-pid-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let mut ours = Command::new("ping");
+        ours.args(["-n", "60", "127.0.0.1"]).stdout(Stdio::null());
+        let mut ours = no_window(&mut ours).spawn().unwrap();
+        let mut bystander = Command::new("ping");
+        bystander.args(["-n", "60", "127.0.0.1"]).stdout(Stdio::null());
+        let mut bystander = no_window(&mut bystander).spawn().unwrap();
+        std::fs::write(
+            out.join("powerpoint.pid"),
+            format!(
+                "{}
+",
+                ours.id()
+            ),
+        )
+        .unwrap();
+        end_started_powerpoint(&out);
+        let ended = (0..50).any(|_| {
+            thread::sleep(Duration::from_millis(100));
+            ours.try_wait().unwrap().is_some()
+        });
+        let spared = bystander.try_wait().unwrap().is_none();
+        let _ = bystander.kill();
+        let _ = ours.kill();
+        let _ = std::fs::remove_dir_all(&out);
+        assert!(ended, "the recorded process must end");
+        assert!(spared, "any other process must be left alone");
+    }
 
     fn centre(rt: &InputRt) -> Option<[u8; 3]> {
         let f = rt.latest()?;
