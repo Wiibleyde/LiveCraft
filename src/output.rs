@@ -50,6 +50,10 @@ pub struct Encoder {
     pub pick: AudioPick,
     pub dropped: AtomicU64,
     pub sent: AtomicU64,
+    /// Sound per channel, in samples, taken in and refused for lack of room:
+    /// set against `sent`, they show picture and sound drifting apart.
+    pub audio_sent: AtomicU64,
+    pub audio_dropped: AtomicU64,
     failed: Arc<AtomicBool>,
     log: Arc<Mutex<String>>,
     warning: Arc<Mutex<Option<String>>>,
@@ -257,6 +261,8 @@ impl Encoder {
             pick: s.audio,
             dropped: AtomicU64::new(0),
             sent: AtomicU64::new(0),
+            audio_sent: AtomicU64::new(0),
+            audio_dropped: AtomicU64::new(0),
             failed,
             log,
             warning,
@@ -292,7 +298,9 @@ impl Encoder {
 
     pub fn push_audio(&self, s: Vec<i16>) {
         if let Some(tx) = &self.audio {
-            let _ = tx.try_send(s);
+            let samples = (s.len() / (self.pick.count.max(1) as usize * 2)) as u64;
+            let counter = if tx.try_send(s).is_ok() { &self.audio_sent } else { &self.audio_dropped };
+            counter.fetch_add(samples, Ordering::Relaxed);
         }
     }
 

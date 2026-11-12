@@ -49,6 +49,15 @@ replays, so run it for anything touching sources, outputs or timing.
 The DVD checks author a small disc with `dvdauthor` (and image it with `mkisofs` when present); without
 them on your `PATH`, they say so and are skipped.
 
+`--soak <folder> <length>` (for example `45m`) runs a whole show for that long: looping videos, a list,
+music, a web page, titles, transitions, recording, a local stream, replays and remote control calls.
+Every five seconds it writes memory, handles, child processes, frame timing and what each encoder was
+fed to `soak.csv`, and it fails with a report in `soak.json` on a memory or handle climb, sustained late
+frames, dropped pictures or sound, or files that do not last as long as the show. It lasts at most
+two hours, and uses the same fixed control ports (8088 and 8099) as `--selftest`, so run one at a
+time. The [Long run](.github/workflows/soak.yml) workflow runs it weekly on Windows and can be
+started by hand; the report is kept as an artifact.
+
 If you change the interface, add a test in `src/ui/tests.rs`: they drive the real window and engine
 with real clicks. If you fix a bug, add the test that would have caught it.
 

@@ -124,6 +124,9 @@ pub struct InputRt {
     pub replay: Mutex<Option<ReplayPlay>>,
     pub strokes: Mutex<Vec<Stroke>>,
     pub strokes_gen: AtomicU64,
+    /// Processes started for this input. A source that keeps restarting
+    /// shows here long before anyone notices a blink on air.
+    pub launches: AtomicU64,
     /// The running decoder was asked to use the graphics card.
     pub hardware: AtomicBool,
     /// Only on a video call: what passes between the call and the desk.
@@ -161,6 +164,7 @@ impl InputRt {
             replay: Mutex::new(None),
             strokes: Mutex::new(Vec::new()),
             strokes_gen: AtomicU64::new(0),
+            launches: AtomicU64::new(0),
             hardware: AtomicBool::new(false),
             call,
             chapters: Mutex::new(Vec::new()),
@@ -230,6 +234,7 @@ impl InputRt {
     }
 
     pub(crate) fn adopt(&self, child: Child) {
+        self.launches.fetch_add(1, Ordering::Relaxed);
         self.children.lock().unwrap().push(child);
     }
 
