@@ -1,8 +1,9 @@
 <h1 align="center">LiveCraft</h1>
 
-<p align="center"><strong>A live video production desk, written from scratch in pure Rust.</strong></p>
+<p align="center"><strong>Free, open-source live video production for Windows: a video mixer and switcher for live streaming and recording, written from scratch in pure Rust.</strong></p>
 
 <p align="center">
+  <a href="https://github.com/Wiibleyde/LiveCraft/releases/latest"><img alt="Download" src="https://img.shields.io/badge/download-latest%20release-blue?logo=github"></a>
   <img alt="100% Rust" src="https://img.shields.io/badge/100%25-Rust-orange">
   <img alt="Platforms: Windows, Linux, macOS" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-blue">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green">
@@ -16,6 +17,7 @@
 > [how to help](#come-build-it-with-us).
 
 <p align="center">
+  <a href="#download">Download</a> ·
   <a href="#features">Features</a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#come-build-it-with-us">Contribute</a> ·
@@ -23,7 +25,26 @@
   <a href="SECURITY.md">Security</a>
 </p>
 
-![LiveCraft with its worked example open](docs/screenshot.png)
+![LiveCraft, an open-source live video production desk: preview, program, input cards and audio mixer](docs/images/desk.png)
+
+LiveCraft is a live video mixer and switcher in the family of software such as vMix and OBS-based
+setups: cut and fade between cameras, files, screens, web pages and network streams, add titles and
+overlays, mix sound, then record and stream the result. It is free, has no account and no
+subscription, and its source is open under MIT or Apache-2.0.
+
+## Download
+
+Get the installer or the portable zip from the
+**[latest release](https://github.com/Wiibleyde/LiveCraft/releases/latest)**. The installer needs no
+administrator rights.
+
+1. Install [FFmpeg](https://ffmpeg.org), which is not included: `winget install Gyan.FFmpeg`.
+2. Run the `…-setup.exe` installer, or unzip the `…-portable.zip` and start `livecraft.exe`.
+3. Alpha builds are not signed yet, so Windows SmartScreen may warn: click **More info**, then
+   **Run anyway**. Checksums are in `SHA256SUMS.txt` next to the files.
+
+Released builds are for Windows. Linux and macOS run from source for now (experimental, see
+[Platforms](#platforms)); packaged builds for them will follow.
 
 ### 🎛️ Familiar by design
 
@@ -38,8 +59,9 @@ audio routing and the state you left them in. Your file is never changed; you sa
 ### ⚡ Light on purpose
 
 What nobody is watching costs next to nothing. Cards are drawn at card size, pages off air slow down
-on their own, and all web inputs share a single browser. Files heavier than 1080p60 and network
-streams are decoded by the graphics card, with software taking over by itself if the card fails.
+on their own, and all web inputs share a single browser. The picture is composed on the graphics card
+(DirectX 12 or Vulkan) with the CPU as a fallback, and files heavier than 1080p60 and network streams
+are decoded by the graphics card, with software taking over by itself if the card fails.
 
 ### 🔌 Scriptable from the start
 
@@ -72,16 +94,26 @@ headphones, with several output devices. [CLAP](https://cleveraudio.org) plug-in
 or Master, with their own windows and their settings saved in the project. LiveCraft looks for them
 in the standard CLAP folders and in `CLAP_PATH`.
 
-**Outputs.** Two recorders, up to five stream destinations sharing one encode, separate recordings per
+**Outputs.** Two recorders, up to five stream destinations sharing one encode, with sound and picture
+kept on one shared clock over long recordings, separate recordings per
 input, SRT output, the program with sound as an NDI or OMT source, fullscreen and external windows,
 multiview. NVENC, Quick Sync and AMF are used when your FFmpeg offers them.
 
-**Show tools.** Instant replay with events and tags, playlists, triggers, data sources from CSV,
+**Show tools.** Instant replay with events and tags and marks that stay exact when frames are dropped, playlists, triggers, data sources from CSV,
 scripts, VISCA PTZ control, a telestrator, and a web controller for phones and tablets.
+
+## Why LiveCraft
+
+- **Free and open source**, MIT or Apache-2.0, with no account, no licence key and no tier.
+- **One native program in Rust**, not a plug-in framework or a web wrapper: one window with the desk,
+  the mixer, the recorders and the streams.
+- **A familiar layout** for anyone who has run a show on a software mixer, and it opens `.vmix`
+  projects, so it can serve as an open-source alternative to vMix or to an OBS-based setup.
+- **Scriptable and remote-controllable** over HTTP and TCP, in French or English.
 
 ## Get started
 
-On Windows, take the installer or the portable zip from the [releases](../../releases). It installs for
+On Windows, take the installer or the portable zip from the [releases](../../releases/latest). It installs for
 your account without administrator rights. FFmpeg is not included: install it with
 `winget install Gyan.FFmpeg`, or see the `FFmpeg.txt` next to the program. Web inputs also need Chrome,
 Chromium or Edge, and presentations need Microsoft PowerPoint or
