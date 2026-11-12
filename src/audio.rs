@@ -509,21 +509,27 @@ mod tests {
         });
         // The sound thread first lists the devices, which takes its time on
         // a busy machine: wait for sound to flow, then take a fresh stretch.
+        // Master is read during that stretch, while the guest talks: read
+        // after they stop, it only holds the rest of the show.
         let until = |enough: usize| {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while link.sound.len() < enough && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
+            let mut master = 0f32;
+            loop {
+                master = master.max(f32::from_bits(engine.bus_peaks[0].load(Ordering::Relaxed)));
+                if link.sound.len() >= enough || Instant::now() > deadline {
+                    return master;
+                }
+                thread::sleep(Duration::from_millis(5));
             }
         };
         until(1);
         thread::sleep(Duration::from_millis(100));
         link.sound.clear();
-        until(9600);
+        let master_peak = until(9600);
         let mut back = vec![0f32; link.sound.len()];
         link.sound.pull(&mut back);
         stop.store(true, Ordering::Relaxed);
         let _ = talker.join();
-        let master_peak = f32::from_bits(engine.bus_peaks[0].load(Ordering::Relaxed));
         engine.shutdown();
         assert!(back.len() > 4800, "sound goes back: {}", back.len());
         let mean = back.iter().sum::<f32>() / back.len() as f32;
