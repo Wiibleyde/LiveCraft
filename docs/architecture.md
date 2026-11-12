@@ -25,6 +25,7 @@ so a slow window cannot hold up the show.
 | `frame.rs`, `fx.rs`, `transitions.rs` | Pixels: blending, scaling, colour, keys, effects |
 | `sets.rs` | Virtual sets: built-in decors and camera moves; the mixer composes them |
 | `sources.rs`, `playback.rs`, `browser.rs` | Where pictures and sound come from |
+| `slides.rs` | Presentations, turned into one picture per slide by PowerPoint or LibreOffice |
 | `audio.rs`, `dsp.rs` | The sound loop, buses and per-input processing |
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
@@ -49,4 +50,6 @@ so a slow window cannot hold up the show.
 
 - Pixels are RGBA with premultiplied alpha.
 - Sizes in saved data are fractions of the frame, so projects survive a change of format.
+- Replay marks are moments of the show, not positions in a file. Every encoder logs when each picture it
+  wrote was taken, so a file that lost pictures still finds the right one.
 - The desk can be tested without a window, and the window with real clicks in `ui/tests.rs`.

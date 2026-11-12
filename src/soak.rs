@@ -291,6 +291,11 @@ struct Sample {
     step: String,
 }
 
+/// The moment of the show an encoder's file begins with.
+fn file_start(e: &crate::output::Encoder) -> Option<Instant> {
+    e.pictures().lock().unwrap().first()
+}
+
 /// What the engine handed to one kind of encoder, against the clock.
 #[derive(Clone, Copy, Default)]
 struct Feed {
@@ -313,7 +318,7 @@ impl Feed {
             video_s: frames as f64 / fps / list.len().max(1) as f64,
             audio_s: total(|e| e.audio_sent.load(Ordering::Relaxed)) as f64 / rate,
             audio_lost_s: total(|e| e.audio_dropped.load(Ordering::Relaxed)) as f64 / rate,
-            wall_s: list.first().and_then(|e| e.began()).map_or(0.0, |b| b.elapsed().as_secs_f64()),
+            wall_s: list.first().and_then(file_start).map_or(0.0, |b| b.elapsed().as_secs_f64()),
         }
     }
 
@@ -919,8 +924,8 @@ fn show(engine: &Arc<Engine>, dir: &str, ids: Ids, length: Duration, csv: &mut F
         sleep(Duration::from_millis(100));
     }
     let end_counts = engine.stats.tick_times.counts();
-    let record_began = engine.recorders.lock().unwrap().first().and_then(|r| r.began());
-    let stream_began = engine.streamers.lock().unwrap().first().and_then(|r| r.began());
+    let record_began = engine.recorders.lock().unwrap().first().and_then(file_start);
+    let stream_began = engine.streamers.lock().unwrap().first().and_then(file_start);
     show.replay_close();
     let inputs: Vec<(u64, String)> =
         engine.state.lock().unwrap().project.inputs.iter().map(|i| (i.id, i.name.clone())).collect();

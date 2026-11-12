@@ -320,6 +320,30 @@ impl App {
                 rt.seek_ms.store(0, Ordering::Relaxed);
             }
         }
+        if let (Kind::PowerPoint { .. }, Some(rt)) = (&input.kind, &rt) {
+            // Through the named functions, so the card does what a remote does.
+            let number = self.input_number(project, id);
+            let back = named(
+                icon_button(&mut top, Icon::Step(false), None),
+                t!("slides.previous_named", name = input.name),
+            );
+            if back.on_hover_text(t!("slides.previous")).clicked() {
+                self.call("PreviousPicture", &Args::new().input(&number));
+            }
+            let count = rt.items.load(Ordering::Relaxed);
+            let at = match count {
+                0 => "…".to_string(),
+                n => format!("{}/{n}", rt.item.load(Ordering::Relaxed) + 1),
+            };
+            top.label(RichText::new(at).size(10.5).color(TEXT));
+            let on = named(
+                icon_button(&mut top, Icon::Step(true), None),
+                t!("slides.next_named", name = input.name),
+            );
+            if on.on_hover_text(t!("slides.next")).clicked() {
+                self.call("NextPicture", &Args::new().input(&number));
+            }
+        }
         let mut bottom =
             ui.new_child(egui::UiBuilder::new().id_salt((id, "bas")).max_rect(row2).layout(layout));
         bottom.spacing_mut().item_spacing.x = 0.0;
@@ -357,7 +381,7 @@ impl App {
         });
     }
 
-    fn input_number(&self, project: &Project, id: u64) -> String {
+    pub(super) fn input_number(&self, project: &Project, id: u64) -> String {
         let at = project.inputs.iter().position(|i| i.id == id);
         at.map_or(String::new(), |n| (n + 1).to_string())
     }
@@ -473,10 +497,16 @@ impl App {
                     }
                 }
             }
-            Kind::Photos { .. } | Kind::List { .. } => {
+            Kind::Photos { .. } | Kind::List { .. } | Kind::PowerPoint { .. } => {
+                let slides = matches!(input.kind, Kind::PowerPoint { .. });
                 let count = self.engine.rt(id).map_or(0, |r| r.items.load(Ordering::Relaxed));
                 for n in 0..count.min(30) {
-                    if ui.button(t!("inputs.menu_item", n = n + 1)).clicked() {
+                    let label = if slides {
+                        t!("inputs.menu_slide", n = n + 1)
+                    } else {
+                        t!("inputs.menu_item", n = n + 1)
+                    };
+                    if ui.button(label).clicked() {
                         if let Some(rt) = self.engine.rt(id) {
                             rt.select.store(n as i64, Ordering::Relaxed);
                         }
@@ -517,6 +547,9 @@ impl App {
                 } else {
                     self.confirm_open = Some(path);
                 }
+            }
+            _ if crate::slides::is_presentation(&path) => {
+                self.add_input(&name, Kind::PowerPoint { path });
             }
             _ if p.is_dir() => {
                 self.add_input(&name, Kind::Photos { folder: path, seconds: 0.0 });
@@ -604,6 +637,15 @@ impl App {
             }
             if ui.button(t!("inputs.add_photos")).clicked() {
                 if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                    self.add_file(&p);
+                }
+                ui.close();
+            }
+            if ui.button(t!("inputs.add_powerpoint")).clicked() {
+                let picked = rfd::FileDialog::new()
+                    .add_filter(t!("inputs.presentation_filter"), &crate::slides::EXTENSIONS)
+                    .pick_files();
+                for p in picked.unwrap_or_default() {
                     self.add_file(&p);
                 }
                 ui.close();

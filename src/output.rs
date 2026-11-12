@@ -5,6 +5,7 @@
 
 use crate::frame::Frame;
 use crate::model::AudioPick;
+use crate::replay::FrameLog;
 use crate::sources::{end_process_tree, ffmpeg};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -40,7 +41,7 @@ pub struct Spec {
 }
 
 pub struct Encoder {
-    video: Option<SyncSender<Arc<Frame>>>,
+    video: Option<SyncSender<(Arc<Frame>, Instant)>>,
     audio: Option<SyncSender<Vec<i16>>>,
     size: (usize, usize),
     pub label: String,
@@ -56,7 +57,7 @@ pub struct Encoder {
     log: Arc<Mutex<String>>,
     warning: Arc<Mutex<Option<String>>>,
     child: Arc<Mutex<Option<Child>>>,
-    began: Arc<Mutex<Option<Instant>>>,
+    pictures: Arc<Mutex<FrameLog>>,
 }
 
 fn add_quality(cmd: &mut Command, s: &Spec, low_latency: bool) {
@@ -204,10 +205,12 @@ impl Encoder {
         // Whatever piled up during its start-up would otherwise offset them.
         let ready = Arc::new(AtomicBool::new(false));
         let mut stdin = child.stdin.take().unwrap();
-        let (vtx, vrx) = sync_channel::<Arc<Frame>>(6);
+        let (vtx, vrx) = sync_channel::<(Arc<Frame>, Instant)>(6);
         let (fail, go) = (failed.clone(), ready.clone());
+        let pictures = Arc::new(Mutex::new(FrameLog::new(s.fps)));
+        let written = pictures.clone();
         thread::spawn(move || {
-            while let Ok(f) = vrx.recv() {
+            while let Ok((f, taken)) = vrx.recv() {
                 if !go.load(Ordering::Acquire) {
                     continue;
                 }
@@ -215,13 +218,12 @@ impl Encoder {
                     fail.store(true, Ordering::Relaxed);
                     break;
                 }
+                written.lock().unwrap().push(taken);
             }
         });
 
         let (atx, arx) = sync_channel::<Vec<i16>>(100);
         let fail = failed.clone();
-        let began = Arc::new(Mutex::new(None));
-        let first_frame = began.clone();
         thread::spawn(move || {
             let _ = listener.set_nonblocking(true);
             let deadline = Instant::now() + Duration::from_secs(15);
@@ -237,7 +239,6 @@ impl Encoder {
             };
             let _ = sock.set_nonblocking(false);
             while arx.try_recv().is_ok() {}
-            *first_frame.lock().unwrap() = Some(Instant::now());
             ready.store(true, Ordering::Release);
             let mut bytes = Vec::new();
             while let Ok(s) = arx.recv() {
@@ -265,22 +266,24 @@ impl Encoder {
             log,
             warning,
             child: Arc::new(Mutex::new(Some(child))),
-            began,
+            pictures,
         })
     }
 
-    /// When the first picture went in, which is time zero of the file.
-    pub fn began(&self) -> Option<Instant> {
-        *self.began.lock().unwrap()
+    /// When each picture in the file was taken, which places a moment of the
+    /// show in the file even after pictures were lost on the way.
+    pub fn pictures(&self) -> Arc<Mutex<FrameLog>> {
+        self.pictures.clone()
     }
 
-    pub fn push_video(&self, f: Arc<Frame>) {
+    /// `taken` is the moment of the show the picture belongs to.
+    pub fn push_video(&self, f: Arc<Frame>, taken: Instant) {
         // A frame of another size would scramble the raw stream.
         if (f.w, f.h) != self.size {
             return;
         }
         if let Some(tx) = &self.video {
-            match tx.try_send(f) {
+            match tx.try_send((f, taken)) {
                 Ok(()) => {
                     self.sent.fetch_add(1, Ordering::Relaxed);
                 }
