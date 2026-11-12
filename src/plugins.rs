@@ -213,7 +213,7 @@ fn describe_apart(file: &Path) -> Result<Vec<PluginInfo>, String> {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    let mut stdout = child.stdout.take().ok_or("pas de sortie")?;
+    let mut stdout = child.stdout.take().ok_or(t!("plugins.no_output"))?;
     let reader = thread::spawn(move || {
         let mut text = String::new();
         let _ = std::io::Read::read_to_string(&mut stdout, &mut text);
@@ -227,13 +227,13 @@ fn describe_apart(file: &Path) -> Result<Vec<PluginInfo>, String> {
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("le plug-in ne répond pas".into());
+            return Err(t!("plugins.no_answer").into());
         }
         thread::sleep(Duration::from_millis(30));
     };
     let text = reader.join().unwrap_or_default();
     if !status.success() {
-        return Err("le plug-in a planté pendant l'examen".into());
+        return Err(t!("plugins.crashed_scan").into());
     }
     serde_json::from_str::<Result<Vec<PluginInfo>, String>>(&text).map_err(|e| e.to_string())?
 }

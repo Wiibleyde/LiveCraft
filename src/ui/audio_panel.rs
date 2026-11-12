@@ -21,7 +21,7 @@ fn head(ui: &mut egui::Ui, name: &str, color: Color32) {
 
 /// Lit when the chain holds something, so a treated bus shows it.
 fn fx_button(ui: &mut egui::Ui, used: bool, label: &str) -> bool {
-    named(tiny(ui, "FX", used.then_some(ORANGE)), label).on_hover_text("Plug-ins").clicked()
+    named(tiny(ui, "FX", used.then_some(ORANGE)), label).on_hover_text(t!("plugin_chain.title")).clicked()
 }
 
 impl App {
@@ -29,7 +29,7 @@ impl App {
         let height = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
-            vertical_tag(ui, height, "SORTIES");
+            vertical_tag(ui, height, t!("audio_panel.outputs"));
             self.master_strip(ui, project, height);
             for b in 0..7 {
                 let used = project.inputs.iter().any(|i| i.audio.buses & (1 << (b + 1)) != 0);
@@ -37,7 +37,7 @@ impl App {
                     self.bus_strip(ui, project, b, height);
                 }
             }
-            vertical_tag(ui, height, "ENTRÉES");
+            vertical_tag(ui, height, t!("audio_panel.inputs"));
             egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
@@ -59,14 +59,18 @@ impl App {
         let mut open_fx = false;
         ui.allocate_ui_with_layout(vec2(STRIP, height), egui::Layout::top_down(egui::Align::Center), |ui| {
             ui.set_width(STRIP);
-            head(ui, "Général", GREEN);
+            head(ui, t!("audio_panel.master"), GREEN);
             let fader_h = (height - 72.0).max(40.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
-                    open_settings |= gear(ui, BTN).on_hover_text("Réglages audio").clicked();
-                    open_fx |= fx_button(ui, !project.master_plugins.is_empty(), "Plug-ins Général");
+                    open_settings |= gear(ui, BTN).on_hover_text(t!("audio_panel.settings")).clicked();
+                    open_fx |= fx_button(
+                        ui,
+                        !project.master_plugins.is_empty(),
+                        &t!("plugin_chain.button_named", name = t!("audio_panel.master")),
+                    );
                 });
                 ui.spacing_mut().slider_width = fader_h;
                 ui.add(egui::Slider::new(&mut level, 0.0..=1.2).vertical().show_value(false));
@@ -75,12 +79,12 @@ impl App {
             });
             ui.spacing_mut().slider_width = STRIP - 18.0;
             let knob = ui.add(egui::Slider::new(&mut phones, 0.0..=1.2).show_value(false));
-            knob.on_hover_text("Volume du casque");
+            knob.on_hover_text(t!("audio_panel.headphones"));
             let fill = if muted { RED } else { GREEN };
             let m = egui::Button::new(RichText::new("M").size(11.0).color(Color32::WHITE))
                 .fill(fill)
                 .min_size(vec2(40.0, 17.0));
-            if ui.add(m).on_hover_text("Couper ou rétablir la sortie générale").clicked() {
+            if ui.add(m).on_hover_text(t!("audio_panel.mute_master")).clicked() {
                 muted = !muted;
             }
         });
@@ -129,14 +133,17 @@ impl App {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 ui.add_space(4.0);
-                if tiny(ui, "M", to_master.then_some(GREEN)).on_hover_text("Envoyer vers Général").clicked()
+                if tiny(ui, "M", to_master.then_some(GREEN))
+                    .on_hover_text(t!("audio_panel.send_master"))
+                    .clicked()
                 {
                     to_master = !to_master;
                 }
                 if icon_button(ui, Icon::Speaker(!muted), muted.then_some(RED)).clicked() {
                     muted = !muted;
                 }
-                open_fx = fx_button(ui, !cfg.plugins.is_empty(), &format!("Plug-ins {name}"));
+                open_fx =
+                    fx_button(ui, !cfg.plugins.is_empty(), &t!("plugin_chain.button_named", name = name));
             });
         });
         if open_fx {
@@ -174,19 +181,22 @@ impl App {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    open |= gear(ui, BTN).on_hover_text("Réglages audio de l'entrée").clicked();
-                    let s = named(tiny(ui, "S", solo.then_some(ORANGE)), format!("Solo {}", input.name));
-                    if s.on_hover_text("Écouter au casque").clicked() {
+                    open |= gear(ui, BTN).on_hover_text(t!("audio_panel.input_settings")).clicked();
+                    let s = named(
+                        tiny(ui, "S", solo.then_some(ORANGE)),
+                        t!("audio_panel.solo_named", name = &input.name),
+                    );
+                    if s.on_hover_text(t!("audio_panel.solo_tip")).clicked() {
                         solo = !solo;
                     }
                     let follow = icon_button(ui, Icon::Follow, a.follow.then_some(BTN));
-                    let follow = named(follow, format!("Suivi {}", input.name));
-                    if follow.on_hover_text("Mixage automatique : suit le direct").clicked() {
+                    let follow = named(follow, t!("audio_panel.follow_named", name = &input.name));
+                    if follow.on_hover_text(t!("audio_panel.follow_tip")).clicked() {
                         a.follow = !a.follow;
                     }
                     let sp = icon_button(ui, Icon::Speaker(!a.muted), a.muted.then_some(RED));
-                    let sp = named(sp, format!("Muet {}", input.name));
-                    if sp.on_hover_text("Couper ou rétablir").clicked() {
+                    let sp = named(sp, t!("audio_panel.mute_named", name = &input.name));
+                    if sp.on_hover_text(t!("audio_panel.mute_tip")).clicked() {
                         a.muted = !a.muted;
                     }
                 });

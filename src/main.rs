@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// First and apart, so that every module below can use `t!`.
+#[macro_use]
+mod i18n;
+
 mod api;
 mod audio;
 mod browser;
@@ -39,6 +43,10 @@ fn main() -> eframe::Result {
     if let Some(dir) = value_of("--selftest") {
         std::process::exit(selftest::run(&dir));
     }
+    // The command line speaks the system's language unless told otherwise; the window
+    // then follows its saved choice, which `--lang` also changes.
+    let lang = value_of("--lang").as_deref().and_then(i18n::Lang::from_code);
+    i18n::set_language(lang.unwrap_or_else(i18n::Lang::system));
     if let Some(file) = value_of("--import-report") {
         std::process::exit(import_report(&file));
     }
@@ -64,7 +72,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "LiveCraft",
         options,
-        Box::new(move |cc| Ok(Box::new(ui::App::new(cc, screenshot, open, project)))),
+        Box::new(move |cc| Ok(Box::new(ui::App::new(cc, screenshot, open, project, lang)))),
     )
 }
 
@@ -74,18 +82,28 @@ fn import_report(file: &str) -> i32 {
         Ok((p, r)) => {
             let shown = p.inputs.iter().filter(|i| i.kind.has_picture()).count();
             println!(
-                "{} : {} entrées ({shown} avec image), {} couches, {} incrustations, {}x{} à {} i/s",
-                r.name, r.inputs, r.layers, r.overlays, p.out_w, p.out_h, p.fps
+                "{}",
+                t!(
+                    "main.report_summary",
+                    name = r.name,
+                    inputs = r.inputs,
+                    shown = shown,
+                    layers = r.layers,
+                    overlays = r.overlays,
+                    w = p.out_w,
+                    h = p.out_h,
+                    fps = p.fps
+                )
             );
-            println!("  inconnus : {:?}", r.placeholders);
-            println!("  fichiers absents : {}", r.missing_files.len());
+            println!("  {}", t!("main.report_unknown", list = format!("{:?}", r.placeholders)));
+            println!("  {}", t!("main.report_missing", count = r.missing_files.len()));
             for n in &r.notes {
-                println!("  note : {n}");
+                println!("  {}", t!("main.report_note", note = n));
             }
             0
         }
         Err(e) => {
-            println!("ECHEC : {e}");
+            println!("{}", t!("main.report_failed", error = e));
             1
         }
     }

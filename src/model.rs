@@ -132,29 +132,29 @@ pub enum Kind {
 impl Kind {
     pub fn label(&self) -> &'static str {
         match self {
-            Kind::Bars => "Mire",
-            Kind::Motion => "Mire animée",
-            Kind::Clock => "Horloge",
-            Kind::Tone => "Son de test",
-            Kind::Solid { .. } => "Couleur",
-            Kind::Image { .. } => "Image",
-            Kind::Video { .. } => "Vidéo",
-            Kind::AudioFile { .. } => "Fichier audio",
-            Kind::List { .. } => "Liste",
-            Kind::Photos { .. } => "Photos",
-            Kind::ImageSequence { .. } => "Séquence d'images",
-            Kind::Camera { .. } => "Caméra",
-            Kind::Network { .. } => "Flux réseau",
-            Kind::Browser { .. } => "Page web",
-            Kind::Screen => "Écran",
-            Kind::Microphone { .. } => "Entrée audio",
-            Kind::SystemAudio => "Audio système",
-            Kind::Title { .. } => "Titre",
-            Kind::Designed { .. } => "Titre personnalisé",
-            Kind::Scene => "Scène",
-            Kind::Mix { .. } => "Mix",
-            Kind::Replay => "Ralenti",
-            Kind::Telestrator { .. } => "Télestrateur",
+            Kind::Bars => t!("model.kind.bars"),
+            Kind::Motion => t!("model.kind.motion"),
+            Kind::Clock => t!("model.kind.clock"),
+            Kind::Tone => t!("model.kind.tone"),
+            Kind::Solid { .. } => t!("model.kind.solid"),
+            Kind::Image { .. } => t!("model.kind.image"),
+            Kind::Video { .. } => t!("model.kind.video"),
+            Kind::AudioFile { .. } => t!("model.kind.audio_file"),
+            Kind::List { .. } => t!("model.kind.list"),
+            Kind::Photos { .. } => t!("model.kind.photos"),
+            Kind::ImageSequence { .. } => t!("model.kind.image_sequence"),
+            Kind::Camera { .. } => t!("model.kind.camera"),
+            Kind::Network { .. } => t!("model.kind.network"),
+            Kind::Browser { .. } => t!("model.kind.browser"),
+            Kind::Screen => t!("model.kind.screen"),
+            Kind::Microphone { .. } => t!("model.kind.microphone"),
+            Kind::SystemAudio => t!("model.kind.system_audio"),
+            Kind::Title { .. } => t!("model.kind.title"),
+            Kind::Designed { .. } => t!("model.kind.designed"),
+            Kind::Scene => t!("model.kind.scene"),
+            Kind::Mix { .. } => t!("model.kind.mix"),
+            Kind::Replay => t!("model.kind.replay"),
+            Kind::Telestrator { .. } => t!("model.kind.telestrator"),
         }
     }
 
@@ -388,10 +388,10 @@ impl EffectKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            EffectKind::Blur => "Flou gaussien",
-            EffectKind::Sharpen => "Netteté",
-            EffectKind::Lut => "LUT",
-            EffectKind::AlphaMask => "Masque alpha",
+            EffectKind::Blur => t!("model.effect.blur"),
+            EffectKind::Sharpen => t!("model.effect.sharpen"),
+            EffectKind::Lut => t!("model.effect.lut"),
+            EffectKind::AlphaMask => t!("model.effect.alpha_mask"),
         }
     }
 }
@@ -533,16 +533,16 @@ impl TriggerEvent {
 
     pub fn label(self) -> &'static str {
         match self {
-            TriggerEvent::OnTransitionIn => "Passe au direct",
-            TriggerEvent::OnTransitionOut => "Quitte le direct",
-            TriggerEvent::OnOverlayIn => "Incrustation activée",
-            TriggerEvent::OnOverlayOut => "Incrustation retirée",
-            TriggerEvent::OnCompletion => "Lecture terminée",
-            TriggerEvent::OnCountdownCompleted => "Compte à rebours fini",
-            TriggerEvent::OnCountdownTime => "Compte à rebours : temps écoulé",
-            TriggerEvent::OnCountdownRemaining => "Compte à rebours : temps restant",
-            TriggerEvent::OnPlaybackTime => "Lecture : temps écoulé",
-            TriggerEvent::OnPlaybackRemaining => "Lecture : temps restant",
+            TriggerEvent::OnTransitionIn => t!("model.trigger.transition_in"),
+            TriggerEvent::OnTransitionOut => t!("model.trigger.transition_out"),
+            TriggerEvent::OnOverlayIn => t!("model.trigger.overlay_in"),
+            TriggerEvent::OnOverlayOut => t!("model.trigger.overlay_out"),
+            TriggerEvent::OnCompletion => t!("model.trigger.completion"),
+            TriggerEvent::OnCountdownCompleted => t!("model.trigger.countdown_completed"),
+            TriggerEvent::OnCountdownTime => t!("model.trigger.countdown_time"),
+            TriggerEvent::OnCountdownRemaining => t!("model.trigger.countdown_remaining"),
+            TriggerEvent::OnPlaybackTime => t!("model.trigger.playback_time"),
+            TriggerEvent::OnPlaybackRemaining => t!("model.trigger.playback_remaining"),
         }
     }
 
@@ -741,27 +741,27 @@ impl TransKind {
 
     pub fn label(self) -> String {
         let s = match self {
-            TransKind::Cut => "Coupe",
-            TransKind::Fade => "Fondu",
-            TransKind::AlphaFade => "Fondu alpha",
-            TransKind::Merge => "Fusion",
-            TransKind::Zoom => "Zoom",
-            TransKind::Wipe => "Volet",
-            TransKind::WipeReverse => "Volet inversé",
-            TransKind::VerticalWipe => "Volet vertical",
-            TransKind::VerticalWipeReverse => "Volet vertical inversé",
-            TransKind::Slide => "Glissé",
-            TransKind::SlideReverse => "Glissé inversé",
-            TransKind::VerticalSlide => "Glissé vertical",
-            TransKind::VerticalSlideReverse => "Glissé vertical inversé",
-            TransKind::Fly => "Vol",
-            TransKind::FlyRotate => "Vol rotatif",
-            TransKind::CrossZoom => "Zoom croisé",
-            TransKind::Cube => "Cube",
-            TransKind::CubeZoom => "Cube zoom",
-            TransKind::BarnDoor => "Portes",
-            TransKind::RollerDoor => "Rideau",
-            TransKind::Stinger(n) => return format!("Stinger {}", n + 1),
+            TransKind::Cut => t!("model.trans.cut"),
+            TransKind::Fade => t!("model.trans.fade"),
+            TransKind::AlphaFade => t!("model.trans.alpha_fade"),
+            TransKind::Merge => t!("model.trans.merge"),
+            TransKind::Zoom => t!("model.trans.zoom"),
+            TransKind::Wipe => t!("model.trans.wipe"),
+            TransKind::WipeReverse => t!("model.trans.wipe_reverse"),
+            TransKind::VerticalWipe => t!("model.trans.vertical_wipe"),
+            TransKind::VerticalWipeReverse => t!("model.trans.vertical_wipe_reverse"),
+            TransKind::Slide => t!("model.trans.slide"),
+            TransKind::SlideReverse => t!("model.trans.slide_reverse"),
+            TransKind::VerticalSlide => t!("model.trans.vertical_slide"),
+            TransKind::VerticalSlideReverse => t!("model.trans.vertical_slide_reverse"),
+            TransKind::Fly => t!("model.trans.fly"),
+            TransKind::FlyRotate => t!("model.trans.fly_rotate"),
+            TransKind::CrossZoom => t!("model.trans.cross_zoom"),
+            TransKind::Cube => t!("model.trans.cube"),
+            TransKind::CubeZoom => t!("model.trans.cube_zoom"),
+            TransKind::BarnDoor => t!("model.trans.barn_door"),
+            TransKind::RollerDoor => t!("model.trans.roller_door"),
+            TransKind::Stinger(n) => return t!("model.trans.stinger", n = n + 1),
         };
         s.to_string()
     }
@@ -907,7 +907,7 @@ impl AudioPick {
 
     /// The audio selections offered: single buses and the paired ones.
     pub fn all() -> Vec<(String, AudioPick)> {
-        let mut v = vec![("Général".to_string(), Self::MASTER)];
+        let mut v = vec![(t!("model.audio_pick.master").to_string(), Self::MASTER)];
         for (n, c) in "ABCDEFG".chars().enumerate() {
             v.push((c.to_string(), AudioPick { buses: [n as u8 + 1, 0, 0, 0], count: 1 }));
         }
@@ -926,7 +926,10 @@ impl AudioPick {
     }
 
     pub fn label(&self) -> String {
-        Self::all().into_iter().find(|(_, p)| p == self).map_or("Général".into(), |(n, _)| n)
+        Self::all()
+            .into_iter()
+            .find(|(_, p)| p == self)
+            .map_or(t!("model.audio_pick.master").into(), |(n, _)| n)
     }
 }
 
@@ -1213,15 +1216,34 @@ impl Project {
         let white = [255, 255, 255];
         let orange = [240, 120, 40];
         let dark = [24, 28, 38];
-        let lower = title("Titre de l'émission", "Sous-titre", TitleStyle::LowerThird, white, orange);
-        let ticker = title("Bandeau d'information défilant", "", TitleStyle::Ticker, white, dark);
-        let welcome =
-            title("Bienvenue", "Le direct commence bientôt", TitleStyle::Centered, [244, 130, 44], dark);
+        let lower = title(
+            t!("model.sample.lower_title"),
+            t!("model.sample.lower_subtitle"),
+            TitleStyle::LowerThird,
+            white,
+            orange,
+        );
+        let ticker = title(t!("model.sample.ticker_text"), "", TitleStyle::Ticker, white, dark);
+        let welcome = title(
+            t!("model.sample.welcome_title"),
+            t!("model.sample.welcome_subtitle"),
+            TitleStyle::Centered,
+            [244, 130, 44],
+            dark,
+        );
         let timer = title("", "", TitleStyle::Countdown, white, dark);
-        let mut tone = Input::new(16, "Son de test", Kind::Tone).in_category(4);
+        let mut tone = Input::new(16, t!("model.kind.tone"), Kind::Tone).in_category(4);
         tone.audio.muted = true;
         let mut p = Self::blank();
-        for (n, name) in ["CAMÉRAS", "MÉDIAS", "SCÈNES", "AUTRES", "TEXTES", "OUTILS"].iter().enumerate() {
+        let categories = [
+            t!("model.sample.cat_cameras"),
+            t!("model.sample.cat_media"),
+            t!("model.sample.cat_scenes"),
+            t!("model.sample.cat_other"),
+            t!("model.sample.cat_texts"),
+            t!("model.sample.cat_tools"),
+        ];
+        for (n, name) in categories.iter().enumerate() {
             p.categories[n].name = (*name).to_string();
         }
         p.inputs = vec![
@@ -1229,19 +1251,22 @@ impl Project {
             Input::new(2, "CAM 2", Kind::Motion).in_category(0),
             Input::new(3, "CAM 3", Kind::Bars).in_category(0),
             Input::new(4, "CAM 4", Kind::Motion).in_category(0),
-            Input::new(5, "Fond", Kind::Motion).in_category(1).folded(),
-            Input::new(6, "Accueil", welcome).in_category(4).folded(),
-            Input::new(7, "Écran d'attente", Kind::Scene).in_category(2).with_layers(vec![full(5), full(6)]),
+            Input::new(5, t!("model.sample.background"), Kind::Motion).in_category(1).folded(),
+            Input::new(6, t!("model.sample.welcome"), welcome).in_category(4).folded(),
+            Input::new(7, t!("model.sample.holding_screen"), Kind::Scene)
+                .in_category(2)
+                .with_layers(vec![full(5), full(6)]),
             Input::new(8, "1 CAM", Kind::Scene).in_category(2).with_layers(vec![full(1)]),
             Input::new(9, "2 CAM", Kind::Scene).in_category(2).with_layers(vec![left(1), right(2)]),
-            Input::new(10, "Image dans l'image", Kind::Scene)
+            Input::new(10, t!("model.sample.picture_in_picture"), Kind::Scene)
                 .in_category(2)
                 .with_layers(vec![full(2), corner(1)]),
-            Input::new(11, "Bandeau titre", lower).in_category(4),
-            Input::new(12, "Bandeau défilant", ticker).in_category(4),
-            Input::new(13, "Compte à rebours", timer).in_category(4),
-            Input::new(14, "Horloge", Kind::Clock).in_category(5),
-            Input::new(15, "Fond bleu", Kind::Solid { color: [24, 62, 120] }).in_category(1),
+            Input::new(11, t!("model.sample.lower_third"), lower).in_category(4),
+            Input::new(12, t!("model.sample.ticker"), ticker).in_category(4),
+            Input::new(13, t!("model.sample.countdown"), timer).in_category(4),
+            Input::new(14, t!("model.kind.clock"), Kind::Clock).in_category(5),
+            Input::new(15, t!("model.sample.blue_background"), Kind::Solid { color: [24, 62, 120] })
+                .in_category(1),
             tone,
         ];
         p.preview = Some(8);

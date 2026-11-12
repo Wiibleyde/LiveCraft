@@ -113,7 +113,7 @@ impl Library {
         let c_path = CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
         let init = unsafe { (*entry).init }.ok_or("plug-in incomplet")?;
         if !unsafe { init(c_path.as_ptr()) } {
-            return Err("le plug-in a refusé de démarrer".into());
+            return Err(t!("clap.refused_start").into());
         }
         Ok(Arc::new(Library { entry, _lib: lib }))
     }
@@ -350,7 +350,7 @@ unsafe impl Sync for Plugin {}
 
 impl Plugin {
     pub fn create(lib: Arc<Library>, id: &str, requests: Arc<Requests>) -> Result<Plugin, String> {
-        let factory = lib.factory().ok_or("le plug-in ne propose rien")?;
+        let factory = lib.factory().ok_or(t!("clap.offers_nothing"))?;
         let create = factory.create_plugin.ok_or("plug-in incomplet")?;
         let mut shell = Box::new(Shell {
             host: clap_host {
@@ -371,14 +371,14 @@ impl Plugin {
         let c_id = CString::new(id).map_err(|e| e.to_string())?;
         let raw = unsafe { create(factory, &shell.host, c_id.as_ptr()) };
         if raw.is_null() {
-            return Err(format!("le plug-in {id} est introuvable dans ce fichier"));
+            return Err(t!("clap.not_in_file", id = id));
         }
         let init = unsafe { (*raw).init };
         if !init.is_some_and(|f| unsafe { f(raw) }) {
             if let Some(destroy) = unsafe { (*raw).destroy } {
                 unsafe { destroy(raw) };
             }
-            return Err("le plug-in n'a pas pu s'initialiser".into());
+            return Err(t!("clap.init_failed").into());
         }
         let ext = |name: &CStr| match unsafe { (*raw).get_extension } {
             Some(get) => unsafe { get(raw, name.as_ptr()) },
@@ -432,7 +432,7 @@ impl Plugin {
     pub fn activate(&mut self, rate: f64, max_frames: u32) -> Result<(), String> {
         let activate = unsafe { (*self.raw).activate }.ok_or("plug-in incomplet")?;
         if !unsafe { activate(self.raw, rate, 1, max_frames) } {
-            return Err("le plug-in a refusé de s'activer".into());
+            return Err(t!("clap.refused_activate").into());
         }
         self.active = true;
         Ok(())
@@ -793,11 +793,11 @@ pub mod editor {
     }
 
     pub fn open(plugin: &Plugin, title: &str) -> Result<Editor, String> {
-        let floating = supported(plugin).ok_or("ce plug-in n'a pas de fenêtre")?;
+        let floating = supported(plugin).ok_or(t!("clap.no_window"))?;
         let gui = unsafe { &*plugin.gui };
         let create = gui.create.ok_or("plug-in incomplet")?;
         if !unsafe { create(plugin.raw, CLAP_WINDOW_API_WIN32.as_ptr(), floating) } {
-            return Err("le plug-in n'a pas ouvert sa fenêtre".into());
+            return Err(t!("clap.window_not_opened").into());
         }
         let destroy = || {
             if let Some(f) = gui.destroy {
@@ -810,7 +810,7 @@ pub mod editor {
             }
             if !gui.show.is_some_and(|f| unsafe { f(plugin.raw) }) {
                 destroy();
-                return Err("le plug-in n'a pas montré sa fenêtre".into());
+                return Err(t!("clap.window_not_shown").into());
             }
             return Ok(Editor { window: None });
         }
@@ -820,7 +820,7 @@ pub mod editor {
         }
         let Some(hwnd) = win::create_window(title, w, h) else {
             destroy();
-            return Err("impossible d'ouvrir une fenêtre".into());
+            return Err(t!("clap.cannot_open_window").into());
         };
         let parent = clap_window {
             api: CLAP_WINDOW_API_WIN32.as_ptr(),
@@ -829,7 +829,7 @@ pub mod editor {
         if !gui.set_parent.is_some_and(|f| unsafe { f(plugin.raw, &parent) }) {
             destroy();
             win::destroy_window(hwnd);
-            return Err("le plug-in n'a pas pu se placer dans sa fenêtre".into());
+            return Err(t!("clap.cannot_embed").into());
         }
         if let Some(f) = gui.show {
             unsafe { f(plugin.raw) };

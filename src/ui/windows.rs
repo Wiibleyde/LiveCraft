@@ -11,7 +11,9 @@ impl App {
         let mut open = true;
         let mut cfgs = project.overlay_cfg;
         let mut stingers = project.stingers;
-        egui::Window::new("Incrustations et stingers").open(&mut open).default_width(420.0).show(ctx, |ui| {
+        let window =
+            egui::Window::new(t!("windows.overlays_title")).id(egui::Id::unique("Incrustations et stingers"));
+        window.open(&mut open).default_width(420.0).show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for n in 0..16 {
                     let label = if n < 8 { format!("{}", n + 1) } else { format!("S{}", n - 7) };
@@ -24,18 +26,18 @@ impl App {
                 let c = &mut cfgs[n];
                 let mut current = project.overlays[n];
                 ui.horizontal(|ui| {
-                    ui.label(format!("Incrustation {}", n + 1));
+                    ui.label(t!("windows.overlay_n", n = n + 1));
                     input_combo(ui, "canal", &mut current, project, 0);
                 });
                 if current != project.overlays[n] {
                     self.with(|s| s.set_overlay(n, current));
                 }
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut c.pip, false, "Plein cadre");
-                    ui.selectable_value(&mut c.pip, true, "Image dans l'image");
+                    ui.selectable_value(&mut c.pip, false, t!("windows.full_frame"));
+                    ui.selectable_value(&mut c.pip, true, t!("windows.pip"));
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Effet");
+                    ui.label(t!("windows.effect"));
                     egui::ComboBox::from_id_salt("effet").selected_text(c.effect.label()).show_ui(ui, |ui| {
                         for k in [
                             TransKind::Cut,
@@ -52,11 +54,11 @@ impl App {
                     ui.add(egui::DragValue::new(&mut c.effect_ms).range(0..=5000).suffix(" ms"));
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Se ferme après");
+                    ui.label(t!("windows.closes_after"));
                     ui.add(
                         egui::DragValue::new(&mut c.duration_ms).range(0..=600_000).speed(100).suffix(" ms"),
                     );
-                    ui.label(RichText::new("0 : reste").small().color(DIM));
+                    ui.label(RichText::new(t!("windows.zero_stays")).small().color(DIM));
                 });
                 if c.pip {
                     placement_editor(ui, &mut c.placement);
@@ -66,13 +68,13 @@ impl App {
                 let n = self.overlay_pick - 8;
                 let st = &mut stingers[n];
                 ui.horizontal(|ui| {
-                    ui.label(format!("Stinger {}", n + 1));
+                    ui.label(t!("windows.stinger_n", n = n + 1));
                     input_combo(ui, "stinger", &mut st.input, project, 0);
                 });
-                ui.add(egui::Slider::new(&mut st.duration_ms, 100..=10000).text("Durée (ms)"));
+                ui.add(egui::Slider::new(&mut st.duration_ms, 100..=10000).text(t!("windows.duration_ms")));
                 let max = st.duration_ms;
-                ui.add(egui::Slider::new(&mut st.cut_ms, 0..=max).text("Point de coupe (ms)"));
-                ui.checkbox(&mut st.under_overlays, "Sous les incrustations");
+                ui.add(egui::Slider::new(&mut st.cut_ms, 0..=max).text(t!("windows.cut_point_ms")));
+                ui.checkbox(&mut st.under_overlays, t!("windows.under_overlays"));
             }
         });
         self.overlays_open = open;
@@ -96,11 +98,12 @@ impl App {
         }
         let mut open = true;
         let mut list = project.playlist.clone();
-        egui::Window::new("Playlist").open(&mut open).default_width(480.0).show(ctx, |ui| {
+        let window = egui::Window::new(t!("windows.playlist_title")).id(egui::Id::unique("Playlist"));
+        window.open(&mut open).default_width(480.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut list.looped, "Boucle");
-                ui.checkbox(&mut list.manual, "Manuel");
-                ui.checkbox(&mut list.clear_overlays, "Retirer les incrustations");
+                ui.checkbox(&mut list.looped, t!("windows.loop"));
+                ui.checkbox(&mut list.manual, t!("windows.manual"));
+                ui.checkbox(&mut list.clear_overlays, t!("windows.clear_overlays"));
             });
             let mut remove = None;
             let mut up = None;
@@ -127,11 +130,11 @@ impl App {
                             },
                         );
                         ui.add(egui::DragValue::new(&mut it.trans_ms).range(0..=5000).suffix(" ms"));
-                        ui.checkbox(&mut it.overlay, "Incrustation");
-                        if ui.small_button("Monter").clicked() && n > 0 {
+                        ui.checkbox(&mut it.overlay, t!("windows.overlay"));
+                        if ui.small_button(t!("windows.move_up")).clicked() && n > 0 {
                             up = Some(n);
                         }
-                        if ui.small_button("Retirer").clicked() {
+                        if ui.small_button(t!("windows.remove")).clicked() {
                             remove = Some(n);
                         }
                     });
@@ -143,7 +146,7 @@ impl App {
             if let Some(n) = remove {
                 list.items.remove(n);
             }
-            ui.menu_button("Ajouter une entrée", |ui| {
+            ui.menu_button(t!("windows.add_entry"), |ui| {
                 for i in project.inputs.iter().filter(|i| i.kind.has_picture()) {
                     if ui.button(&i.name).clicked() {
                         list.items.push(PlaylistItem {
@@ -160,11 +163,12 @@ impl App {
             });
             let running = self.with(|s| s.playlist_on);
             ui.horizontal(|ui| {
-                if ui.button(if running { "Arrêter" } else { "Démarrer" }).clicked() {
+                let label = if running { t!("windows.stop") } else { t!("windows.start") };
+                if ui.button(label).clicked() {
                     let f = if running { "StopPlayList" } else { "StartPlayList" };
                     self.call(f, &Args::new());
                 }
-                if ui.button("Suivant").clicked() {
+                if ui.button(t!("windows.next")).clicked() {
                     self.call("NextPlayListEntry", &Args::new());
                 }
             });
@@ -181,7 +185,9 @@ impl App {
         }
         let mut open = true;
         let mut cats = project.categories.clone();
-        egui::Window::new("Catégories d'entrées").open(&mut open).show(ctx, |ui| {
+        let window =
+            egui::Window::new(t!("windows.categories_title")).id(egui::Id::unique("Categories d'entrees"));
+        window.open(&mut open).show(ctx, |ui| {
             for (n, c) in cats.iter_mut().enumerate() {
                 ui.push_id(n, |ui| {
                     ui.horizontal(|ui| {
@@ -191,7 +197,7 @@ impl App {
                     });
                 });
             }
-            if cats.len() < 22 && ui.button("Ajouter une catégorie").clicked() {
+            if cats.len() < 22 && ui.button(t!("windows.add_category")).clicked() {
                 cats.push(Category { name: String::new(), color: [120, 120, 130], enabled: true });
             }
         });
@@ -208,25 +214,27 @@ impl App {
             return;
         }
         let mut open = true;
-        egui::Window::new("Projet vMix ouvert").open(&mut open).default_width(460.0).show(ctx, |ui| {
+        let window = egui::Window::new(t!("windows.import_title")).id(egui::Id::unique("Projet vMix ouvert"));
+        window.open(&mut open).default_width(460.0).show(ctx, |ui| {
             ui.label(RichText::new(&r.name).strong());
-            ui.label(format!("{} entrées, {} couches, {} incrustations", r.inputs, r.layers, r.overlays));
-            ui.label(
-                RichText::new("Votre fichier .vmix reste intact : enregistrez sous un nouveau nom.")
-                    .small()
-                    .color(DIM),
-            );
+            ui.label(t!(
+                "windows.import_counts",
+                inputs = r.inputs,
+                layers = r.layers,
+                overlays = r.overlays
+            ));
+            ui.label(RichText::new(t!("windows.import_untouched")).small().color(DIM));
             egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                 if !r.placeholders.is_empty() {
-                    ui.label(RichText::new("Entrées inconnues, gardées vides").strong());
+                    ui.label(RichText::new(t!("windows.import_placeholders")).strong());
                     r.placeholders.iter().for_each(|p| drop(ui.label(p)));
                 }
                 if !r.missing_files.is_empty() {
-                    ui.label(RichText::new("Fichiers introuvables").strong());
+                    ui.label(RichText::new(t!("windows.import_missing")).strong());
                     r.missing_files.iter().for_each(|p| drop(ui.label(p)));
                 }
                 if !r.notes.is_empty() {
-                    ui.label(RichText::new("À savoir").strong());
+                    ui.label(RichText::new(t!("windows.import_notes")).strong());
                     r.notes.iter().for_each(|p| drop(ui.label(p)));
                 }
             });
@@ -238,17 +246,18 @@ impl App {
 
     pub(super) fn help_window(&mut self, ctx: &egui::Context) {
         let mut open = self.help_open;
-        egui::Window::new("Raccourcis").open(&mut open).resizable(false).show(ctx, |ui| {
+        let window = egui::Window::new(t!("windows.help_title")).id(egui::Id::unique("Raccourcis"));
+        window.open(&mut open).resizable(false).show(ctx, |ui| {
             for (key, what) in [
-                ("1 à 9", "mettre l'entrée en aperçu"),
-                ("Maj + 1 à 9", "passer l'entrée au direct"),
-                ("Espace", "coupe"),
-                ("Entrée", "passer au direct"),
-                ("Échap", "fermer un écran de sortie"),
-                ("F11", "plein écran de la sortie"),
-                ("Clic droit sur un titre", "replier l'entrée"),
-                ("Clic droit sur un onglet", "gérer les catégories"),
-                ("Glisser une vignette", "réordonner, ou classer sur un onglet"),
+                (t!("windows.help.key_digits"), t!("windows.help.preview_input")),
+                (t!("windows.help.key_shift_digits"), t!("windows.help.input_on_air")),
+                (t!("windows.help.key_space"), t!("windows.help.cut")),
+                (t!("windows.help.key_enter"), t!("windows.help.take_on_air")),
+                (t!("windows.help.key_escape"), t!("windows.help.close_output_screen")),
+                ("F11", t!("windows.help.output_fullscreen")),
+                (t!("windows.help.key_right_click_title"), t!("windows.help.collapse_input")),
+                (t!("windows.help.key_right_click_tab"), t!("windows.help.manage_categories")),
+                (t!("windows.help.key_drag_thumbnail"), t!("windows.help.reorder")),
             ] {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(key).strong());
@@ -262,18 +271,20 @@ impl App {
     /// A project dropped on the window replaces the desk, so it asks first.
     fn confirm_open_window(&mut self, ctx: &egui::Context) {
         let Some(path) = self.confirm_open.clone() else { return };
-        egui::Window::new("Ouvrir ce projet")
+        egui::Window::new(t!("windows.confirm_open_title"))
+            .id(egui::Id::unique("Ouvrir ce projet"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label(format!("Remplacer le bureau par « {} » ?", file_name(std::path::Path::new(&path))));
+                let name = file_name(std::path::Path::new(&path));
+                ui.label(t!("windows.confirm_open_question", name = name));
                 ui.horizontal(|ui| {
-                    if ui.button("Ouvrir").clicked() {
+                    if ui.button(t!("windows.open")).clicked() {
                         self.confirm_open = None;
                         self.open_path(path.clone());
                     }
-                    if ui.button("Annuler").clicked() {
+                    if ui.button(t!("windows.cancel")).clicked() {
                         self.confirm_open = None;
                     }
                 });
@@ -285,19 +296,20 @@ impl App {
         if !self.confirm_new {
             return;
         }
-        egui::Window::new("Nouveau projet")
+        egui::Window::new(t!("windows.new_project_title"))
+            .id(egui::Id::unique("Nouveau projet"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label("Vider le bureau et commencer un projet vide ?");
+                ui.label(t!("windows.new_project_question"));
                 ui.horizontal(|ui| {
-                    if ui.button("Tout vider").clicked() {
+                    if ui.button(t!("windows.clear_all")).clicked() {
                         self.engine.load_project(Project::blank());
                         self.after_load(None, None);
                         self.confirm_new = false;
                     }
-                    if ui.button("Annuler").clicked() {
+                    if ui.button(t!("windows.cancel")).clicked() {
                         self.confirm_new = false;
                     }
                 });
@@ -337,9 +349,14 @@ impl App {
         aspect: f32,
         project: &Project,
     ) -> bool {
-        let titles = ["Plein écran 1", "Plein écran 2", "Sortie externe"];
+        let titles = [
+            t!("windows.screen.fullscreen_1"),
+            t!("windows.screen.fullscreen_2"),
+            t!("windows.screen.external"),
+        ];
+        let ids = ["Plein ecran 1", "Plein ecran 2", "Sortie externe"];
         let mut builder = egui::ViewportBuilder::default()
-            .with_title(format!("{} — F11 : plein écran, Échap : fermer", titles[n]))
+            .with_title(t!("windows.screen_title", screen = titles[n]))
             .with_inner_size([960.0, 540.0]);
         // Fullscreen goes to the chosen display, by default the second one.
         if n < 2 && self.want_fullscreen[n] {
@@ -354,7 +371,7 @@ impl App {
             }
         }
         let mut close = false;
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(titles[n]), builder, |ui, _class| {
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(ids[n]), builder, |ui, _class| {
             let vctx = ui.ctx().clone();
             let (esc, f11, closing, full) = vctx.input(|i| {
                 (

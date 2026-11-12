@@ -18,7 +18,13 @@ pub(crate) const FRAMES: usize = AUDIO_RATE / 50; // 20 ms per block
 const BLOCK: usize = FRAMES * 2;
 
 /// Name meaning the system's default output.
+/// Saved in projects and compared at runtime: keep this exact value; show it with `device_label`.
 pub const DEFAULT_DEVICE: &str = "Sortie par défaut";
+
+/// What to show for an output device name: the default one in the interface language.
+pub fn device_label(name: &str) -> &str {
+    if name == DEFAULT_DEVICE { t!("audio.default_output") } else { name }
+}
 
 /// How long a device that failed is left alone before trying it again.
 const RETRY: Duration = Duration::from_secs(2);

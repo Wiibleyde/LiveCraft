@@ -14,18 +14,18 @@ enum Edit {
 
 pub(super) fn owner_name(owner: Owner) -> String {
     match owner {
-        Owner::Bus(0) => "Général".into(),
+        Owner::Bus(0) => t!("audio_panel.master").into(),
         Owner::Bus(b) => format!("Bus {}", (b'A' + b - 1) as char),
-        Owner::Input(id) => format!("entrée {id}"),
+        Owner::Input(id) => t!("plugin_chain.owner_input", id = id),
     }
 }
 
 impl App {
     pub(super) fn plugin_chain(&mut self, ui: &mut egui::Ui, owner: Owner, slots: &[PluginSlot]) {
-        ui.label(RichText::new("Plug-ins (CLAP)").strong());
+        ui.label(RichText::new(t!("plugin_chain.heading")).strong());
         let mut edit = None;
         if slots.is_empty() {
-            ui.label(RichText::new("Aucun plug-in dans cette chaîne").color(DIM));
+            ui.label(RichText::new(t!("plugin_chain.empty")).color(DIM));
         }
         for (n, slot) in slots.iter().enumerate() {
             let view = self.engine.plugins.view(owner, slot.key);
@@ -33,35 +33,45 @@ impl App {
                 ui.horizontal(|ui| {
                     let mut on = !slot.bypass;
                     let check = ui.checkbox(&mut on, RichText::new(&slot.name).strong());
-                    if named(check, format!("Actif {}", slot.name))
-                        .on_hover_text("Décocher pour contourner")
+                    if named(check, t!("plugin_chain.active_named", name = slot.name))
+                        .on_hover_text(t!("plugin_chain.bypass_tip"))
                         .changed()
                     {
                         edit = Some(Edit::Bypass(n));
                     }
-                    if n > 0 && named(ui.small_button("▲"), format!("Monter {}", slot.name)).clicked() {
+                    if n > 0
+                        && named(ui.small_button("▲"), t!("plugin_chain.up_named", name = slot.name))
+                            .clicked()
+                    {
                         edit = Some(Edit::Up(n));
                     }
                     if n + 1 < slots.len()
-                        && named(ui.small_button("▼"), format!("Descendre {}", slot.name)).clicked()
+                        && named(ui.small_button("▼"), t!("plugin_chain.down_named", name = slot.name))
+                            .clicked()
                     {
                         edit = Some(Edit::Up(n + 1));
                     }
                     let has_editor = view.as_ref().is_some_and(|v| v.has_editor);
                     let open = view.as_ref().is_some_and(|v| v.editor_open);
-                    let label = if open { "Fermer la fenêtre" } else { "Fenêtre" };
+                    let label =
+                        if open { t!("plugin_chain.close_window") } else { t!("plugin_chain.window") };
                     let b = ui.add_enabled(has_editor, egui::Button::new(label).small());
-                    let b = named(b, format!("Fenêtre {}", slot.name));
-                    if b.on_disabled_hover_text("Ce plug-in n'a pas de fenêtre").clicked() {
+                    let b = named(b, t!("plugin_chain.window_named", name = slot.name));
+                    if b.on_disabled_hover_text(t!("plugin_chain.no_window_tip")).clicked() {
                         self.engine.plugins.send(Command::ToggleEditor { owner, key: slot.key });
                     }
-                    if named(ui.small_button("Retirer"), format!("Retirer {}", slot.name)).clicked() {
+                    if named(
+                        ui.small_button(t!("plugin_chain.remove")),
+                        t!("plugin_chain.remove_named", name = slot.name),
+                    )
+                    .clicked()
+                    {
                         edit = Some(Edit::Remove(n));
                     }
                 });
                 match &view {
                     None => {
-                        ui.label(RichText::new("Démarrage…").color(DIM));
+                        ui.label(RichText::new(t!("plugin_chain.starting")).color(DIM));
                     }
                     Some(v) => {
                         if let Some(e) = &v.error {
@@ -70,9 +80,9 @@ impl App {
                         if v.running {
                             let ms = v.latency as f32 * 1000.0 / sources::AUDIO_RATE as f32;
                             let text = if v.latency == 0 {
-                                "Sans latence".to_string()
+                                t!("plugin_chain.no_latency").to_string()
                             } else {
-                                format!("Latence : {} échantillons ({ms:.1} ms)", v.latency)
+                                t!("plugin_chain.latency", samples = v.latency, ms = format!("{ms:.1}"))
                             };
                             ui.label(RichText::new(text).color(DIM));
                             self.plugin_params(ui, owner, slot, v);
@@ -83,16 +93,16 @@ impl App {
             ui.add_space(4.0);
         }
         let catalog = self.engine.plugins.catalog();
-        let add = egui::Button::new("Ajouter un plug-in");
+        let add = egui::Button::new(t!("plugin_chain.add"));
         egui::containers::menu::MenuButton::from_button(add).ui(ui, |ui| {
             ui.set_min_width(220.0);
             if !catalog.scanned && !catalog.scanning {
                 self.engine.plugins.scan();
             }
             if catalog.scanning || !catalog.scanned {
-                ui.label(RichText::new("Recherche des plug-ins…").color(DIM));
+                ui.label(RichText::new(t!("plugin_chain.searching")).color(DIM));
             } else if catalog.found.is_empty() {
-                ui.label(RichText::new("Aucun plug-in CLAP trouvé").color(DIM));
+                ui.label(RichText::new(t!("plugin_chain.none_found")).color(DIM));
             }
             for info in &catalog.found {
                 let hover = format!("{} {}\n{}", info.vendor, info.version, info.path);
@@ -102,18 +112,19 @@ impl App {
                 }
             }
             ui.separator();
-            if ui.button("Rechercher à nouveau").clicked() {
+            if ui.button(t!("plugin_chain.rescan")).clicked() {
                 self.engine.plugins.scan();
             }
-            if ui.button("Choisir un fichier…").clicked() {
-                let picked = rfd::FileDialog::new().add_filter("Plug-in CLAP", &["clap"]).pick_file();
+            if ui.button(t!("plugin_chain.pick_file")).clicked() {
+                let picked =
+                    rfd::FileDialog::new().add_filter(t!("plugin_chain.file_filter"), &["clap"]).pick_file();
                 if let Some(path) = picked {
                     self.engine.plugins.scan_file(path);
                 }
             }
         });
         if !catalog.problems.is_empty() {
-            let text = format!("{} fichier(s) de plug-in illisible(s)", catalog.problems.len());
+            let text = t!("plugin_chain.unreadable", count = catalog.problems.len());
             ui.label(RichText::new(text).color(ORANGE)).on_hover_text(catalog.problems.join("\n"));
         }
         if let Some(edit) = edit {
@@ -148,7 +159,7 @@ impl App {
         if view.params.is_empty() {
             return;
         }
-        egui::CollapsingHeader::new(format!("Paramètres de {}", slot.name))
+        egui::CollapsingHeader::new(t!("plugin_chain.params_of", name = slot.name))
             .id_salt(("plugin-params", slot.key))
             .default_open(view.params.len() <= 8)
             .show(ui, |ui| {
@@ -181,7 +192,7 @@ impl App {
             return;
         };
         let mut open = true;
-        egui::Window::new(format!("Plug-ins — {}", owner_name(owner)))
+        egui::Window::new(t!("plugin_chain.window_title", name = owner_name(owner)))
             .open(&mut open)
             .default_size([440.0, 260.0])
             .show(ctx, |ui| {
