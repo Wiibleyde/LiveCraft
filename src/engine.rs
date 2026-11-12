@@ -315,11 +315,14 @@ impl Engine {
             let mut s = self.state.lock().unwrap();
             let (version, padlock) = (s.version, s.padlock);
             let (ftb, ftb_level) = (s.ftb, s.ftb_level);
+            // Opening a project mid-show must not reset the show clock.
+            let clock = s.clock;
             *s = State::new(project);
             s.version = version + 1;
             s.padlock = padlock;
             s.ftb = ftb;
             s.ftb_level = ftb_level;
+            s.clock = clock;
             s.note_project_on_air();
         }
         *self.program.lock().unwrap() = Arc::new(Frame::solid(w, h, [0, 0, 0]));

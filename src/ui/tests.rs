@@ -37,6 +37,10 @@ fn click(h: &mut Harness<'static, App>, label: &str) {
     h.run_steps(3);
 }
 
+fn wait_ms(ms: u64) {
+    sleep(Duration::from_millis(ms));
+}
+
 fn wait(h: &mut Harness<'static, App>, ms: u64) {
     sleep(Duration::from_millis(ms));
     h.run_steps(3);
@@ -175,24 +179,41 @@ fn fade_to_black_turns_on_and_off() {
 #[test]
 fn a_production_clock_can_show_the_show_and_its_buttons_start_pause_and_reset_it() {
     let mut h = desk(small_project());
+    h.state_mut().with(|s| s.project.clocks[0].precision = 0);
     h.state_mut().clocks_open = true;
     h.run_steps(3);
     h.get_all_by_label("Émission").next().unwrap().click();
     h.run_steps(3);
     assert_eq!(project(&h).clocks[0].kind, ClockType::Show);
+    assert_eq!(project(&h).clocks[0].precision, 1, "minutes would look frozen, so it moves to seconds");
     assert!(!h.state().with(|s| s.clock.running()));
-    click(&mut h, "Démarrer");
+    click(&mut h, "Émission Démarrer");
     assert!(h.state().with(|s| s.clock.running()), "start runs it");
     wait(&mut h, 1100);
     let seen = h.state().with(|s| s.clock.elapsed(Instant::now()));
     assert!(seen >= Duration::from_secs(1), "it counts: {seen:?}");
-    click(&mut h, "Pause");
+    click(&mut h, "Émission Pause");
     assert!(!h.state().with(|s| s.clock.running()), "pause stops it");
-    click(&mut h, "Démarrer");
+    click(&mut h, "Émission Démarrer");
     assert!(h.state().with(|s| s.clock.running()), "and it resumes");
-    click(&mut h, "Remettre à zéro");
+    click(&mut h, "Émission Remettre à zéro");
     let (running, spent) = h.state().with(|s| (s.clock.running(), s.clock.elapsed(Instant::now())));
     assert!(!running && spent == Duration::ZERO, "reset stops it at zero");
+    end(h);
+}
+
+#[test]
+fn loading_a_project_does_not_reset_a_running_show_clock() {
+    let h = desk(small_project());
+    let engine = h.state().engine.clone();
+    engine.call("StartShowClock", &Args::new()).unwrap();
+    wait_ms(1100);
+    let before = engine.state.lock().unwrap().clock.elapsed(Instant::now());
+    engine.load_project(Project::blank());
+    let s = engine.state.lock().unwrap();
+    assert!(s.clock.running(), "still running");
+    assert!(s.clock.elapsed(Instant::now()) >= before, "and not back at zero");
+    drop(s);
     end(h);
 }
 
