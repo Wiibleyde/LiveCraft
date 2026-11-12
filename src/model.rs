@@ -1298,6 +1298,8 @@ pub struct Project {
     pub scripts: Vec<Script>,
     pub data_sources: Vec<DataSource>,
     pub layer_templates: Vec<LayerTemplate>,
+    /// Lets heavy files and network streams be decoded by the graphics card.
+    pub hardware_decoding: bool,
 }
 
 impl Default for Project {
@@ -1383,6 +1385,7 @@ impl Project {
             scripts: Vec::new(),
             data_sources: Vec::new(),
             layer_templates: Vec::new(),
+            hardware_decoding: true,
         }
     }
 
