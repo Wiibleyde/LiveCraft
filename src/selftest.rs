@@ -1,6 +1,6 @@
 //! `--selftest <folder>`: drives the real engine without a window. Plays a
-//! generated video, runs transitions, records, streams, replays and answers
-//! remote control, then checks the files it made. Last, it sends its program
+//! generated video, delays it, runs transitions, records, streams, replays and
+//! answers remote control, then checks the files it made. Last, it sends its program
 //! out over NDI and OMT and takes it back in, where those runtimes are installed.
 
 use crate::api::ApiConfig;
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 pub fn run(dir: &str) -> i32 {
     let all = crate::playtest::check(dir)
+        .and_then(|media| Ok(format!("{media}\nOK: {}", crate::delaytest::check(dir)?)))
         .and_then(|media| Ok(format!("{media}\nOK: {}", check(dir)?)))
         .and_then(|done| Ok(format!("{done}\nOK: {}", net_loopback()?)));
     match all {
