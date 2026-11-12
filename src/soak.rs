@@ -960,6 +960,17 @@ fn show(engine: &Arc<Engine>, dir: &str, ids: Ids, length: Duration, csv: &mut F
     })
 }
 
+/// Samples at each end of the run over which the lowest number of child
+/// processes is read. That number swings by a dozen within each cycle of
+/// the show as sources restart and replay sessions come and go, so each end
+/// spans several whole cycles: a tenth of a twenty-minute run missed the low
+/// point and read 29 then 35 with no leak at all. A leaked process raises
+/// every low point after it, so it still shows.
+fn floor_span(samples: usize) -> usize {
+    let cycles = (STEP_EVERY * (4 * STEPS as u32)).as_secs_f64() / SAMPLE_EVERY.as_secs_f64();
+    (samples / 10).max(cycles as usize).min(samples / 2).max(1)
+}
+
 /// Measured against a limit: a row of the report.
 fn trend(points: &[(f64, f64)], slope_max: f64, rise_max: f64) -> (f64, f64, bool) {
     let slope = slope_per_hour(points);
@@ -1008,12 +1019,12 @@ fn finish(
     if enough && h_bad {
         failures.add("handles", t_end, format!("les poignées montent de {h_slope:.0}/h ({h_rise:+.0})"));
     }
-    let tenth = (steady.len() / 10).max(1);
+    let span = floor_span(steady.len());
     let floor = |list: &[&Sample]| list.iter().map(|s| s.usage.children as i64).min().unwrap_or(0);
     let (children_start, children_end) = if steady.is_empty() {
         (0, 0)
     } else {
-        (floor(&steady[..tenth]), floor(&steady[steady.len() - tenth..]))
+        (floor(&steady[..span]), floor(&steady[steady.len() - span..]))
     };
     if enough && children_end > children_start + CHILDREN_RISE {
         let msg = format!("processus enfants : {children_start} puis {children_end} au plus bas");
@@ -1261,6 +1272,29 @@ mod tests {
         // than that ffmpeg, so it is not taken for its child either.
         let rows = [(20, Some(7), 300), (10, Some(20), 301), (7, Some(10), 900)];
         assert_eq!(descendants(10, &rows), [7]);
+    }
+
+    #[test]
+    fn the_process_floor_is_read_over_whole_cycles() {
+        // Twenty minutes after two of warm-up: 216 samples, of which a tenth
+        // is a cycle and a half. Four cycles of 72 s are 57 samples.
+        assert_eq!(floor_span(216), 57);
+        assert_eq!(floor_span(1000), 100);
+        assert_eq!(floor_span(30), 15);
+        assert_eq!(floor_span(1), 1);
+        // The 20-minute run of 12 Nov, lowest count per minute after warm-up:
+        // no leak, but the last 21 samples never reached a low point.
+        let lows = [30, 29, 35, 32, 32, 35, 32, 29, 32, 35, 29, 32, 30, 29, 32, 31, 32, 35];
+        let samples: Vec<i64> =
+            lows.iter().flat_map(|&low| [low, low + 6, low + 9, low + 6].repeat(3)).collect();
+        let rise = |list: &[i64], span: usize| {
+            list[list.len() - span..].iter().min().unwrap() - list[..span].iter().min().unwrap()
+        };
+        assert!(rise(&samples, samples.len() / 10) > CHILDREN_RISE, "a tenth of the run reads a leak");
+        assert!(rise(&samples, floor_span(samples.len())) <= CHILDREN_RISE);
+        // One process leaked every few minutes does show.
+        let leaking: Vec<i64> = samples.iter().enumerate().map(|(i, n)| n + (i / 40) as i64).collect();
+        assert!(rise(&leaking, floor_span(leaking.len())) > CHILDREN_RISE);
     }
 
     #[test]
