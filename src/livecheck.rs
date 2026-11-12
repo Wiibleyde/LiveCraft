@@ -386,7 +386,8 @@ fn judge_tone(samples: &[f32], rate: usize) -> Result<String, String> {
 }
 
 /// Softcam registered for this user only, so no administrator is needed;
-/// removed afterwards unless it was there before.
+/// removed afterwards. It refuses to run over keys that already exist, so that
+/// nothing of the user's is overwritten and nothing needs restoring.
 struct Registration {
     added: Vec<String>,
 }
@@ -398,13 +399,14 @@ impl Registration {
         }
         let server = format!("Software\\Classes\\CLSID\\{CAM_CLSID}");
         let instance = format!("Software\\Classes\\CLSID\\{VIDEO_INPUTS}\\Instance\\{CAM_CLSID}");
-        let mut added = Vec::new();
         for key in [&server, &instance] {
-            if !registry::exists(key) {
-                added.push(key.clone());
+            if registry::exists(key) {
+                return Err(format!(
+                    "HKCU\\{key} existe déjà (une caméra Softcam est déjà inscrite) : retirez-la ou fermez ce qui l'utilise avant de lancer le test"
+                ));
             }
         }
-        let me = Self { added };
+        let me = Self { added: vec![server.clone(), instance.clone()] };
         let server_dll = format!("{server}\\InprocServer32");
         registry::set(&server_dll, None, dll)?;
         registry::set(&server_dll, Some("ThreadingModel"), "Both")?;
@@ -650,7 +652,7 @@ impl Server {
         while TcpStream::connect(("127.0.0.1", rtmp)).is_err() {
             let gone = child.try_wait().ok().flatten().is_some();
             if gone || Instant::now() > end {
-                let _ = child.kill();
+                sources::end_process_tree(&mut child);
                 let log = std::fs::read_to_string(format!("{dir}/mediamtx.log")).unwrap_or_default();
                 let last = log.lines().last().unwrap_or("sans message").to_string();
                 return Err(format!("MediaMTX ne démarre pas : {last}"));
@@ -663,7 +665,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        sources::end_process_tree(&mut self.child);
         let _ = self.child.wait();
     }
 }
