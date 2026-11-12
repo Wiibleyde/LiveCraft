@@ -471,6 +471,8 @@ impl App {
                             ui.add(egui::TextEdit::singleline(turn_password).password(true));
                             ui.end_row();
                         });
+                        // Hidden here, but not from the guest: say so where it is typed.
+                        ui.label(RichText::new(t!("input_settings.call.turn_exposed")).small().color(ORANGE));
                     },
                 );
             }

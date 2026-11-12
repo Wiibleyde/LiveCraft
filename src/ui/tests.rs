@@ -350,6 +350,26 @@ fn a_video_call_shows_the_link_that_lets_its_guest_in() {
     end(h);
 }
 
+/// A copy of a call is a call of its own: one link for both would let the
+/// copy's holder into the original's call.
+#[test]
+fn a_duplicated_call_gets_a_link_of_its_own() {
+    let mut h = desk(small_project());
+    click(&mut h, "Ajouter une entrée");
+    click(&mut h, "Appel vidéo");
+    // What the card's "Dupliquer" does; the card itself may be scrolled away.
+    let call = project(&h).inputs.iter().find(|i| matches!(i.kind, Kind::VideoCall { .. })).cloned().unwrap();
+    h.state_mut().duplicate_input(&call);
+    h.run_steps(3);
+    let found = calls(&h);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_ne!(found[0].1, found[1].1, "the copy has a link of its own");
+    for (_, token) in &found {
+        assert!(h.state().engine.guest_page(token).is_some(), "each link opens its own call");
+    }
+    end(h);
+}
+
 /// In English, a video call's settings say nothing in French, and the way to
 /// the network setting is named as that window names it.
 #[test]

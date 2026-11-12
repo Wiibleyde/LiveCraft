@@ -12,7 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const HTTP_PORT: u16 = 8088;
 pub const TCP_PORT: u16 = 8099;
@@ -21,6 +21,9 @@ pub const TCP_PORT: u16 = 8099;
 const MAX_LINE: usize = 16 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_CONNECTIONS: usize = 64;
+/// For a whole request, headers and body: a client sending a byte now and
+/// then must not keep a place for ever.
+const REQUEST_TIME: Duration = Duration::from_secs(10);
 
 static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -40,6 +43,57 @@ impl Place {
 impl Drop for Place {
     fn drop(&mut self) {
         CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A connection whose reads share one deadline, rather than each having its
+/// own: every read gets only the time left.
+struct Timed {
+    stream: TcpStream,
+    until: Instant,
+}
+
+impl Timed {
+    fn new(stream: TcpStream, time: Duration) -> Self {
+        Self { stream, until: Instant::now() + time }
+    }
+
+    /// Time left to read, or an error once it has run out.
+    fn left(&self) -> std::io::Result<Duration> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "request too slow"));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        Ok(left)
+    }
+
+    fn peek(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.left()?;
+        self.stream.peek(buf)
+    }
+
+    /// The answer is sent: a moment more to read the client's goodbye.
+    fn end(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Write);
+        self.until = Instant::now() + Duration::from_secs(1);
+    }
+}
+
+impl Read for Timed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.left()?;
+        self.stream.read(buf)
+    }
+}
+
+impl Write for Timed {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
     }
 }
 
@@ -82,7 +136,7 @@ pub struct ApiConfig {
 }
 
 /// What a guest link may ask: its page and its call, nothing else.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum GuestAsk<'a> {
     Page(&'a str),
     Offer(&'a str),
@@ -378,24 +432,21 @@ impl Engine {
 
     fn serve_http(self: Arc<Self>, stream: TcpStream, cfg: &Mutex<ApiConfig>) {
         let local = stream.peer_addr().is_ok_and(|a| a.ip().is_loopback());
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(REQUEST_TIME));
+        let stream = Timed::new(stream, REQUEST_TIME);
         // A guest's browser only opens the camera on https. The same port
         // answers both, told apart by the first byte a TLS client sends.
         let mut first = [0u8; 1];
         if matches!(stream.peek(&mut first), Ok(1)) && first[0] == 0x16 {
             let Some(conn) = tls_config().and_then(|c| rustls::ServerConnection::new(c).ok()) else { return };
             let reader = BufReader::new(rustls::StreamOwned::new(conn, stream));
-            self.answer(reader, local, cfg, |s| {
+            self.answer(reader, local, true, cfg, |s| {
                 s.conn.send_close_notify();
                 let _ = s.flush();
-                let _ = s.sock.shutdown(std::net::Shutdown::Write);
-                let _ = s.sock.set_read_timeout(Some(Duration::from_secs(1)));
+                s.sock.end();
             });
         } else {
-            self.answer(BufReader::new(stream), local, cfg, |s| {
-                let _ = s.shutdown(std::net::Shutdown::Write);
-                let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
-            });
+            self.answer(BufReader::new(stream), local, false, cfg, Timed::end);
         }
     }
 
@@ -404,6 +455,7 @@ impl Engine {
         self: &Arc<Self>,
         mut reader: BufReader<S>,
         local: bool,
+        tls: bool,
         cfg: &Mutex<ApiConfig>,
         finish: impl FnOnce(&mut S),
     ) {
@@ -461,7 +513,9 @@ impl Engine {
         }
         let (status, kind, body, extra) = match guest {
             Some(ask) => {
-                let (status, kind, body) = self.guest_answer(ask, &verb, &mut reader, length);
+                let plain_from_afar = !tls && !local;
+                let (status, kind, body) =
+                    self.guest_answer(ask, &verb, &mut reader, length, plain_from_afar);
                 // The token is in the address: it must not leak to another
                 // site, sit in a cache or be framed by a page that is not ours.
                 (
@@ -510,20 +564,33 @@ impl Engine {
         }
     }
 
+    /// `plain_from_afar`: plain http from another computer, which carries the
+    /// link and the call's addresses in clear.
     fn guest_answer(
         &self,
         ask: GuestAsk,
         verb: &str,
         reader: &mut impl Read,
         length: usize,
+        plain_from_afar: bool,
     ) -> (&'static str, &'static str, String) {
-        let missing = ("404 Not Found", "text/plain", t!("api.not_found").to_string());
+        let token = match ask {
+            GuestAsk::Page(token) | GuestAsk::Offer(token) => token,
+        };
+        // The link first: nothing is read for a request that opens nothing.
+        let Some(route) = self.guest_route(token) else {
+            return ("404 Not Found", "text/plain", t!("api.not_found").to_string());
+        };
+        // Only an https relay named in the link's address may pass it on in
+        // plain http, as it took the guest's https itself.
+        if plain_from_afar && !route.relayed {
+            return ("403 Forbidden", "text/plain; charset=utf-8", t!("api.guest_needs_https").to_string());
+        }
         match ask {
-            GuestAsk::Page(token) if verb == "GET" => match self.guest_page(token) {
-                Some(page) => ("200 OK", "text/html; charset=utf-8", page),
-                None => missing,
-            },
-            GuestAsk::Offer(token) if verb == "POST" => {
+            GuestAsk::Page(_) if verb == "GET" => {
+                ("200 OK", "text/html; charset=utf-8", crate::call::guest_html(&route.ice))
+            }
+            GuestAsk::Offer(_) if verb == "POST" => {
                 if length > crate::call::MAX_OFFER {
                     return ("413 Content Too Large", "text/plain", String::new());
                 }
@@ -531,10 +598,9 @@ impl Engine {
                 if reader.take(length as u64).read_to_end(&mut offer).is_err() || offer.len() < length {
                     return ("400 Bad Request", "text/plain", String::new());
                 }
-                match self.call_answer(token, String::from_utf8_lossy(&offer).into_owned()) {
-                    None => missing,
-                    Some(Ok(sdp)) => ("200 OK", "application/sdp", sdp),
-                    Some(Err(e)) => ("503 Service Unavailable", "text/plain; charset=utf-8", e),
+                match route.link.answer(String::from_utf8_lossy(&offer).into_owned()) {
+                    Ok(sdp) => ("200 OK", "application/sdp", sdp),
+                    Err(e) => ("503 Service Unavailable", "text/plain; charset=utf-8", e),
                 }
             }
             _ => ("405 Method Not Allowed", "text/plain", String::new()),
@@ -768,13 +834,91 @@ mod tests {
         }
     }
 
-    /// Asks as another computer would, the desk having a password.
+    /// Asks as another computer would, the desk having a password; a guest's
+    /// browser asks over https.
     fn ask_from_afar(engine: &Arc<Engine>, request: &str) -> String {
+        ask_from_afar_over(engine, request, true)
+    }
+
+    fn ask_from_afar_over(engine: &Arc<Engine>, request: &str, tls: bool) -> String {
         let cfg = Mutex::new(ApiConfig { lan: true, password: "secret".into() });
         let mut reply = Vec::new();
         let exchange = Exchange { request: std::io::Cursor::new(request.as_bytes()), reply: &mut reply };
-        engine.answer(BufReader::new(exchange), false, &cfg, |_| {});
+        engine.answer(BufReader::new(exchange), false, tls, &cfg, |_| {});
         String::from_utf8_lossy(&reply).into_owned()
+    }
+
+    fn desk_with_calls(calls: &[(&str, &str)]) -> Arc<Engine> {
+        let mut p = Project::blank();
+        for (n, (token, address)) in calls.iter().enumerate() {
+            let mut call = crate::call::new_call();
+            if let Kind::VideoCall { token: t, address: a, .. } = &mut call {
+                (*t, *a) = (token.to_string(), address.to_string());
+            }
+            p.inputs.push(Input::new(n as u64 + 1, "Invité", call));
+        }
+        Engine::start(p)
+    }
+
+    /// The link and the call's addresses never cross the network in clear:
+    /// plain http from afar is turned away, unless the link names an https
+    /// relay, which passes requests on.
+    #[test]
+    fn a_guest_link_needs_https_from_afar() {
+        let (direct, relayed) = (crate::call::new_token(), crate::call::new_token());
+        let engine = desk_with_calls(&[(&direct, ""), (&relayed, "https://relay.example")]);
+        let get = |token: &str| format!("GET /call/{token} HTTP/1.1\r\nHost: 192.168.1.20:8088\r\n\r\n");
+        let plain = ask_from_afar_over(&engine, &get(&direct), false);
+        assert!(plain.starts_with("HTTP/1.1 403"), "{plain}");
+        assert!(!plain.contains("RTCPeerConnection"), "no page in clear");
+        assert!(ask_from_afar_over(&engine, &get(&direct), true).starts_with("HTTP/1.1 200"));
+        assert!(ask_from_afar_over(&engine, &get(&relayed), false).starts_with("HTTP/1.1 200"));
+        engine.shutdown();
+    }
+
+    /// A request for an unknown link is answered before its body is read,
+    /// so a stranger cannot hold a connection by sending it slowly.
+    #[test]
+    fn an_unknown_link_is_refused_before_its_body() {
+        let token = crate::call::new_token();
+        let engine = desk_with_calls(&[(&token, "")]);
+        // Announces a body and sends none: reading it would fail.
+        let post = |token: &str| {
+            format!(
+                "POST /call/{token}/offer HTTP/1.1\r\nHost: 192.168.1.20:8088\r\nContent-Length: 1000\r\n\r\n"
+            )
+        };
+        let unknown = ask_from_afar(&engine, &post(&crate::call::new_token()));
+        assert!(unknown.starts_with("HTTP/1.1 404"), "{unknown}");
+        let known = ask_from_afar(&engine, &post(&token));
+        assert!(known.starts_with("HTTP/1.1 400"), "the real link reads its body: {known}");
+        engine.shutdown();
+    }
+
+    /// A client sending a byte now and then, each in time on its own, is
+    /// cut off when the whole request has taken too long.
+    #[test]
+    fn a_slow_request_is_cut_off_as_a_whole() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let writer = thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            for byte in b"POST /call/x/offer HTTP/1.1\r\n".iter().cycle().take(100) {
+                if s.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(40));
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let start = Instant::now();
+        let mut reader = BufReader::new(Timed::new(stream, Duration::from_millis(400)));
+        let mut got = Vec::new();
+        assert!(reader.read_to_end(&mut got).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2), "cut off after {:?}", start.elapsed());
+        assert!(got.len() < 40, "{} bytes", got.len());
+        drop(reader);
+        let _ = writer.join();
     }
 
     #[test]

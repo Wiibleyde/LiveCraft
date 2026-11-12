@@ -10,7 +10,7 @@ use crate::api::HTTP_PORT;
 use crate::browser::{self, PageHook, Socket};
 use crate::engine::Engine;
 use crate::frame::Frame;
-use crate::model::{Kind, ReturnSound};
+use crate::model::{Kind, Project, ReturnSound};
 use crate::secret::base64;
 use crate::sources::{InputRt, Ring};
 use serde_json::{Value, json};
@@ -25,11 +25,30 @@ const RETURN_W: usize = 640;
 const RETURN_FPS: f32 = 15.0;
 /// A guest's offer is a few kilobytes; far more is not a browser talking.
 pub const MAX_OFFER: usize = 64 * 1024;
+/// How long a guest's request waits for the desk's answer.
+const ANSWER_WAIT: Duration = Duration::from_secs(20);
+/// What the page may need to answer: it gathers its addresses for up to 3 s.
+/// An offer with less time left is not started, as its guest would be gone
+/// by the time the answer is ready, and the page would have dropped for it
+/// the guest it had.
+const ANSWER_TIME: Duration = Duration::from_secs(5);
+/// Offers waiting for the page. A newer one pushes the oldest out, whose
+/// guest is told at once.
+const MAX_WAITING: usize = 4;
 type Answer = mpsc::Sender<Result<String, String>>;
+
+/// A guest's offer and the request waiting for its answer.
+struct Waiting {
+    id: u64,
+    offer: String,
+    answer: Answer,
+    until: Instant,
+}
 
 /// What passes between a running call and the rest of the desk.
 pub struct CallLink {
-    offers: Mutex<Vec<(String, Answer)>>,
+    offers: Mutex<Vec<Waiting>>,
+    next_offer: AtomicU64,
     program: Mutex<Option<Arc<Frame>>>,
     program_seq: AtomicU64,
     /// Sound going back to the guest, filled by the sound thread.
@@ -41,6 +60,7 @@ impl Default for CallLink {
     fn default() -> Self {
         Self {
             offers: Mutex::new(Vec::new()),
+            next_offer: AtomicU64::new(0),
             program: Mutex::new(None),
             program_seq: AtomicU64::new(0),
             sound: Ring::new(0.5),
@@ -61,9 +81,40 @@ impl CallLink {
     /// Hands a guest's offer to the page receiving the call and waits for its
     /// answer, which holds everything the guest's browser needs to connect.
     pub fn answer(&self, offer: String) -> Result<String, String> {
-        let (tx, rx) = mpsc::channel();
-        self.offers.lock().unwrap().push((offer, tx));
-        rx.recv_timeout(Duration::from_secs(20)).map_err(|_| t!("call.no_answer").to_string())?
+        self.answer_within(offer, ANSWER_WAIT)
+    }
+
+    fn answer_within(&self, offer: String, wait: Duration) -> Result<String, String> {
+        let (id, rx) = self.queue(offer, wait);
+        let got = rx.recv_timeout(wait);
+        // Answered, pushed out or given up: in no case may the page take it
+        // up later, for a guest who is no longer waiting.
+        self.offers.lock().unwrap().retain(|w| w.id != id);
+        got.map_err(|_| t!("call.no_answer").to_string())?
+    }
+
+    fn queue(&self, offer: String, wait: Duration) -> (u64, mpsc::Receiver<Result<String, String>>) {
+        let (answer, rx) = mpsc::channel();
+        let id = self.next_offer.fetch_add(1, Ordering::Relaxed);
+        let mut offers = self.offers.lock().unwrap();
+        while offers.len() >= MAX_WAITING {
+            // Its sender goes with it, which ends its guest's wait.
+            offers.remove(0);
+        }
+        offers.push(Waiting { id, offer, answer, until: Instant::now() + wait });
+        (id, rx)
+    }
+
+    /// The offers the page can still answer in time. The others are let go,
+    /// and their guests told so at once.
+    fn take_answerable(&self) -> Vec<(String, Answer)> {
+        let now = Instant::now();
+        let waiting = std::mem::take(&mut *self.offers.lock().unwrap());
+        waiting
+            .into_iter()
+            .filter(|w| w.until.saturating_duration_since(now) >= ANSWER_TIME)
+            .map(|w| (w.offer, w.answer))
+            .collect()
     }
 
     fn offer_program(&self, seq: u64, frame: impl FnOnce() -> Arc<Frame>) {
@@ -84,6 +135,16 @@ pub fn new_call() -> Kind {
         turn_password: String::new(),
         return_sound: ReturnSound::default(),
     }
+}
+
+/// What a copy of an input starts as. A copied call gets a link of its own:
+/// one link for two inputs would let its holder into either.
+pub fn copy_kind(kind: &Kind) -> Kind {
+    let mut kind = kind.clone();
+    if let Kind::VideoCall { token, .. } = &mut kind {
+        *token = new_token();
+    }
+    kind
 }
 
 /// 128 random bits from the system: the link is the guest's only key.
@@ -206,7 +267,7 @@ impl CallPage {
         if !self.ready {
             return Vec::new();
         }
-        std::mem::take(&mut *self.link.offers.lock().unwrap())
+        self.link.take_answerable()
     }
 
     fn evaluate(ws: &mut Socket, id: &mut u64, expression: String, wait: bool) -> Option<u64> {
@@ -315,32 +376,44 @@ impl PageHook for CallPage {
     }
 }
 
+/// Where a guest link leads.
+pub struct GuestRoute {
+    pub link: Arc<CallLink>,
+    /// The STUN and TURN servers, as the pages expect them.
+    pub ice: String,
+    /// The link's address is an https relay, which may pass requests on in
+    /// plain http.
+    pub relayed: bool,
+}
+
+/// The input a guest link opens, its servers, and whether it goes through a
+/// relay. A link found on more than one input opens none: it would be the
+/// key to someone else's call.
+fn call_input(project: &Project, token: &str) -> Option<(u64, String, bool)> {
+    let mut found = project.inputs.iter().filter_map(|i| match &i.kind {
+        Kind::VideoCall { token: real, address, stun, turn, turn_user, turn_password, .. }
+            if same_token(token, real) =>
+        {
+            let relayed = address.trim().get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+            Some((i.id, ice_servers(stun, turn, turn_user, turn_password), relayed))
+        }
+        _ => None,
+    });
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
+}
+
 impl Engine {
-    /// The running call a guest link opens, with its STUN and TURN servers.
-    fn call_for(&self, token: &str) -> Option<(Arc<CallLink>, String)> {
-        let (id, ice) = {
-            let s = self.state.lock().unwrap();
-            s.project.inputs.iter().find_map(|i| match &i.kind {
-                Kind::VideoCall { token: real, stun, turn, turn_user, turn_password, .. }
-                    if same_token(token, real) =>
-                {
-                    Some((i.id, ice_servers(stun, turn, turn_user, turn_password)))
-                }
-                _ => None,
-            })?
-        };
-        Some((self.rt(id)?.call.clone()?, ice))
+    /// The running call a guest link opens.
+    pub(crate) fn guest_route(&self, token: &str) -> Option<GuestRoute> {
+        let (id, ice, relayed) = call_input(&self.state.lock().unwrap().project, token)?;
+        Some(GuestRoute { link: self.rt(id)?.call.clone()?, ice, relayed })
     }
 
+    /// The page a link opens, as the remote control serves it to a guest.
+    #[cfg(test)]
     pub fn guest_page(&self, token: &str) -> Option<String> {
-        let (_, ice) = self.call_for(token)?;
-        Some(guest_html(&ice))
-    }
-
-    /// None when no input has this link.
-    pub fn call_answer(&self, token: &str, offer: String) -> Option<Result<String, String>> {
-        let (link, _) = self.call_for(token)?;
-        Some(link.answer(offer))
+        Some(guest_html(&self.guest_route(token)?.ice))
     }
 
     /// Hands the program to the calls with a guest, who see it as it changes.
@@ -377,7 +450,7 @@ fn receiver_html(ice: &str, rw: usize, rh: usize) -> String {
 }
 
 /// The guest's page, in the desk's language.
-fn guest_html(ice: &str) -> String {
+pub(crate) fn guest_html(ice: &str) -> String {
     let page = crate::api::localize(
         GUEST_PAGE,
         &[
@@ -565,8 +638,7 @@ mod tests {
     fn an_offer_waits_until_the_receiving_page_has_loaded() {
         let link = Arc::new(CallLink::default());
         let mut page = CallPage::new(InputRt::new(true, true), link.clone(), (640, 360));
-        let (tx, _rx) = mpsc::channel();
-        link.offers.lock().unwrap().push(("v=0".into(), tx));
+        let _waiting = link.queue("v=0".into(), ANSWER_WAIT);
         assert!(page.take_offers().is_empty(), "nothing is asked of a page still loading");
         assert_eq!(link.offers.lock().unwrap().len(), 1, "the offer stays queued");
         let called = |name: &str, payload: &str| json!({ "method": "Runtime.bindingCalled", "params": { "name": name, "payload": payload } });
@@ -574,6 +646,73 @@ mod tests {
         assert!(!link.is_connected() && page.rt.status().is_none(), "loaded is not a guest yet");
         assert_eq!(page.take_offers().len(), 1);
         assert!(link.offers.lock().unwrap().is_empty());
+    }
+
+    /// Offers nobody can answer must not pile up, nor be answered later:
+    /// the page would drop the guest it has for one who has left.
+    #[test]
+    fn waiting_offers_stay_few_and_never_outlive_their_guest() {
+        let link = CallLink::default();
+        let waits: Vec<_> = (0..6).map(|n| link.queue(n.to_string(), ANSWER_WAIT).1).collect();
+        assert_eq!(link.offers.lock().unwrap().len(), MAX_WAITING);
+        for (n, rx) in waits.iter().enumerate() {
+            let told = matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+            assert_eq!(told, n < 2, "offer {n}: the oldest are let go, and their guests told at once");
+        }
+        let taken: Vec<String> = link.take_answerable().into_iter().map(|(o, _)| o).collect();
+        assert_eq!(taken, ["2", "3", "4", "5"], "the newest win");
+
+        // A guest who gave up leaves nothing behind.
+        assert!(link.answer_within("gone".into(), Duration::from_millis(30)).is_err());
+        assert!(link.offers.lock().unwrap().is_empty());
+
+        // One with too little time left is not started, and is told so.
+        let (_, rx) = link.queue("late".into(), ANSWER_TIME / 2);
+        assert!(link.take_answerable().is_empty());
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)));
+    }
+
+    /// A copied call is a call of its own: same servers, its own link.
+    #[test]
+    fn a_copied_call_has_a_link_of_its_own() {
+        let mut call = new_call();
+        if let Kind::VideoCall { stun, turn, .. } = &mut call {
+            *stun = "stun:s:3478".into();
+            *turn = "turn:t:3478".into();
+        }
+        let copy = copy_kind(&call);
+        let (
+            Kind::VideoCall { token: a, stun, turn, .. },
+            Kind::VideoCall { token: b, stun: s, turn: t, .. },
+        ) = (&call, &copy)
+        else {
+            panic!()
+        };
+        assert_ne!(a, b);
+        assert_eq!(b.len(), 32);
+        assert_eq!((stun, turn), (s, t));
+        assert_eq!(copy_kind(&Kind::Bars), Kind::Bars);
+    }
+
+    /// One link, one input: a token found twice opens nothing.
+    #[test]
+    fn a_link_on_two_inputs_opens_neither() {
+        use crate::model::Input;
+        let with = |token: &str, address: &str| {
+            let mut call = new_call();
+            if let Kind::VideoCall { token: t, address: a, .. } = &mut call {
+                (*t, *a) = (token.into(), address.into());
+            }
+            call
+        };
+        let mut p = Project::blank();
+        p.inputs.push(Input::new(1, "A", with("aaaa", "")));
+        p.inputs.push(Input::new(2, "B", with("bbbb", "https://relay.example")));
+        assert_eq!(call_input(&p, "aaaa").map(|(id, _, relayed)| (id, relayed)), Some((1, false)));
+        assert_eq!(call_input(&p, "bbbb").map(|(id, _, relayed)| (id, relayed)), Some((2, true)));
+        p.inputs.push(Input::new(3, "C", with("aaaa", "")));
+        assert!(call_input(&p, "aaaa").is_none());
+        assert!(call_input(&p, "").is_none());
     }
 
     #[test]

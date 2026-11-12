@@ -407,6 +407,16 @@ impl App {
         }
     }
 
+    /// A copy beside the original that works on its own: a call's copy gets a
+    /// link of its own.
+    pub(super) fn duplicate_input(&mut self, input: &Input) {
+        let mut copy = input.clone();
+        copy.id = self.engine.new_id();
+        copy.kind = crate::call::copy_kind(&input.kind);
+        copy.name = t!("inputs.virtual_copy", name = input.name);
+        self.engine.add_input(copy);
+    }
+
     fn input_menu(&mut self, ui: &mut egui::Ui, input: &Input) {
         let id = input.id;
         ui.set_min_width(180.0);
@@ -419,10 +429,7 @@ impl App {
             ui.close();
         }
         if ui.button(t!("inputs.menu_duplicate")).clicked() {
-            let mut copy = input.clone();
-            copy.id = self.engine.new_id();
-            copy.name = t!("inputs.virtual_copy", name = input.name);
-            self.engine.add_input(copy);
+            self.duplicate_input(input);
             ui.close();
         }
         match &input.kind {
