@@ -1,10 +1,12 @@
 //! The sound thread: treats each input, sums the Master and A to G buses,
 //! feeds headphones and output devices, and hands sound to recordings.
 
+use crate::clap;
 use crate::clock::{self, Drift, Pace, Take};
 use crate::dsp::Chain;
 use crate::engine::Engine;
 use crate::model::{AudioCfg, AudioPick, Kind};
+use crate::plugins::{Owner, Rack};
 use crate::sources::{AUDIO_RATE, Ring};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::{HashMap, HashSet};
@@ -13,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const FRAMES: usize = AUDIO_RATE / 50; // 20 ms per block
+pub(crate) const FRAMES: usize = AUDIO_RATE / 50; // 20 ms per block
 const BLOCK: usize = FRAMES * 2;
 
 /// Name meaning the system's default output.
@@ -154,7 +156,7 @@ impl Engine {
             .filter(|i| i.kind.has_audio())
             .map(|i| Strip {
                 id: i.id,
-                cfg: i.audio.clone(),
+                cfg: i.audio.without_plugins(),
                 audible: !i.audio.muted && (!i.audio.follow || air.contains(&i.id)),
                 solo: s.solo.contains(&i.id),
                 always_on: is_always_on(&i.kind),
@@ -193,6 +195,7 @@ impl Engine {
     }
 
     pub(crate) fn audio_loop(self: Arc<Self>) {
+        clap::this_thread_is_audio();
         // Asking the system about devices can be slow, so it happens beside
         // the sound, which must not miss a block.
         self.list_audio_devices();
@@ -213,10 +216,12 @@ impl Engine {
         let mut tmp = vec![0f32; BLOCK];
         let mut buses = vec![vec![0f32; BLOCK]; 8];
         let mut solo = vec![0f32; BLOCK];
+        let mut rack = Rack::new(&self.plugins);
         let mut pace = Pace::new(clock::now(), (AUDIO_RATE / FRAMES) as u32);
         let mut skipped = 0;
         while !self.quit.load(Ordering::Relaxed) {
             let mix = self.read_mix();
+            rack.refresh();
             buses.iter_mut().for_each(|b| b.fill(0.0));
             solo.fill(0.0);
             chains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
@@ -246,6 +251,7 @@ impl Engine {
                 fill(ring, &take, &mut raw, &mut tmp);
                 let chain = chains.entry(strip.id).or_default();
                 chain.process(&mut tmp, &strip.cfg);
+                rack.run(Owner::Input(strip.id), &mut tmp);
                 let fader = strip.cfg.volume * strip.cfg.volume;
                 let target = if strip.audible { fader } else { 0.0 };
                 let from = *gains.get(&strip.id).unwrap_or(&target);
@@ -281,6 +287,7 @@ impl Engine {
             for b in 1..8 {
                 let (level, to_master) = mix.buses[b - 1];
                 let (head, tail) = buses.split_at_mut(b);
+                rack.run(Owner::Bus(b as u8), &mut tail[0]);
                 tail[0].iter_mut().for_each(|v| *v = (*v * level).clamp(-1.0, 1.0));
                 if to_master {
                     for (m, v) in head[0].iter_mut().zip(tail[0].iter()) {
@@ -290,6 +297,7 @@ impl Engine {
                 let peak = tail[0].iter().fold(0f32, |m, v| m.max(v.abs()));
                 self.bus_peaks[b].store(peak.to_bits(), Ordering::Relaxed);
             }
+            rack.run(Owner::Bus(0), &mut buses[0]);
             buses[0].iter_mut().for_each(|v| *v = (*v * mix.master).clamp(-1.0, 1.0));
             let peak = buses[0].iter().fold(0f32, |m, v| m.max(v.abs()));
             self.bus_peaks[0].store(peak.to_bits(), Ordering::Relaxed);
@@ -297,11 +305,13 @@ impl Engine {
             let default = default_name.lock().unwrap().clone();
             play_routes(&mix, &buses, &solo, &mut devices, &default);
             self.feed_encoders(&buses, pace.stamp());
+            rack.idle();
 
             let step = pace.advance(clock::now(), CATCH_UP);
             skipped = step.skipped;
             thread::sleep(step.wait);
         }
+        rack.stop();
     }
 
     fn list_audio_devices(&self) {

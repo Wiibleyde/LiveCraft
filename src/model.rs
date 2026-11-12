@@ -73,6 +73,14 @@ pub enum Kind {
         fps: f32,
         looped: bool,
     },
+    /// A DVD-Video title: a disc drive, a folder holding VIDEO_TS, or an .iso.
+    Dvd {
+        #[serde(default)]
+        path: String,
+        /// Counted from 1, as on the disc.
+        #[serde(default)]
+        title: u32,
+    },
     /// A presentation; its slides are turned into pictures by PowerPoint or
     /// LibreOffice, whichever the machine has.
     PowerPoint {
@@ -175,6 +183,7 @@ impl Kind {
             Kind::List { .. } => t!("model.kind.list"),
             Kind::Photos { .. } => t!("model.kind.photos"),
             Kind::ImageSequence { .. } => t!("model.kind.image_sequence"),
+            Kind::Dvd { .. } => t!("model.kind.dvd"),
             Kind::PowerPoint { .. } => t!("model.kind.powerpoint"),
             Kind::Camera { .. } => t!("model.kind.camera"),
             Kind::Network { .. } => t!("model.kind.network"),
@@ -206,6 +215,7 @@ impl Kind {
             Kind::List { .. } => "VideoList",
             Kind::Photos { .. } => "Photos",
             Kind::ImageSequence { .. } => "ImageSequence",
+            Kind::Dvd { .. } => "DVD",
             Kind::PowerPoint { .. } => "PowerPoint",
             Kind::Camera { .. } => "Capture",
             Kind::Network { .. } => "Stream",
@@ -227,6 +237,7 @@ impl Kind {
             Kind::Video { .. }
                 | Kind::AudioFile { .. }
                 | Kind::List { .. }
+                | Kind::Dvd { .. }
                 | Kind::Network { .. }
                 | Kind::Ndi { .. }
                 | Kind::Omt { .. }
@@ -244,7 +255,11 @@ impl Kind {
     pub fn has_timeline(&self) -> bool {
         matches!(
             self,
-            Kind::Video { .. } | Kind::AudioFile { .. } | Kind::List { .. } | Kind::ImageSequence { .. }
+            Kind::Video { .. }
+                | Kind::AudioFile { .. }
+                | Kind::List { .. }
+                | Kind::ImageSequence { .. }
+                | Kind::Dvd { .. }
         )
     }
 
@@ -257,6 +272,8 @@ impl Kind {
             | (Kind::ImageSequence { first: a, .. }, Kind::ImageSequence { first: b, .. })
             | (Kind::PowerPoint { path: a }, Kind::PowerPoint { path: b }) => a == b,
             (Kind::List { items: a, .. }, Kind::List { items: b, .. }) => a == b,
+            // A position only means something within the same title.
+            (Kind::Dvd { path: a, title: x }, Kind::Dvd { path: b, title: y }) => a == b && x == y,
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -492,6 +509,22 @@ pub struct Effect {
     pub crop: [f32; 4],
 }
 
+/// A third-party sound plug-in in a chain, with its own saved settings.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct PluginSlot {
+    /// Follows the slot when the chain is reordered, so the running plug-in
+    /// stays the same one.
+    pub key: u64,
+    /// The CLAP file, and the plug-in's identifier inside it.
+    pub path: String,
+    pub id: String,
+    pub name: String,
+    pub bypass: bool,
+    /// The plug-in's own state, in base64. Only the plug-in reads it.
+    pub state: String,
+}
+
 /// Per-input sound settings.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
@@ -515,6 +548,16 @@ pub struct AudioCfg {
     pub gate_threshold: f32,
     pub visible: bool,
     pub pfl: bool,
+    /// Run after the built-in treatment, before the fader.
+    pub plugins: Vec<PluginSlot>,
+}
+
+impl AudioCfg {
+    /// Everything but the plug-ins: the sound thread copies these settings on
+    /// every block, and plug-in states can be large.
+    pub fn without_plugins(&self) -> AudioCfg {
+        AudioCfg { plugins: Vec::new(), ..*self }
+    }
 }
 
 impl Default for AudioCfg {
@@ -536,6 +579,7 @@ impl Default for AudioCfg {
             gate_threshold: -90.0,
             visible: true,
             pfl: false,
+            plugins: Vec::new(),
         }
     }
 }
@@ -1103,11 +1147,13 @@ pub struct BusCfg {
     pub muted: bool,
     pub send_to_master: bool,
     pub device: String,
+    /// Run on the summed bus, before its level.
+    pub plugins: Vec<PluginSlot>,
 }
 
 impl Default for BusCfg {
     fn default() -> Self {
-        Self { level: 1.0, muted: false, send_to_master: false, device: String::new() }
+        Self { level: 1.0, muted: false, send_to_master: false, device: String::new(), plugins: Vec::new() }
     }
 }
 
@@ -1174,6 +1220,8 @@ pub struct Project {
     pub master_muted: bool,
     pub buses: [BusCfg; 7],
     pub master_device: String,
+    /// Run on the Master sum, before its level.
+    pub master_plugins: Vec<PluginSlot>,
     pub headphones_device: String,
     pub headphones_level: f32,
     pub ftb_audio: bool,
@@ -1253,6 +1301,7 @@ impl Project {
             master_muted: false,
             buses: Default::default(),
             master_device: String::new(),
+            master_plugins: Vec::new(),
             headphones_device: String::new(),
             headphones_level: 1.0,
             ftb_audio: true,
