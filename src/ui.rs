@@ -137,8 +137,7 @@ impl Saved {
         }
     }
 
-    fn store(&self) {
-        let path = saved_path();
+    fn store(&self, path: &std::path::Path) {
         let mut sealed = self.clone();
         sealed.each_secret(secret::seal);
         if let (Some(dir), Ok(json)) = (path.parent(), serde_json::to_vec_pretty(&sealed)) {
@@ -231,6 +230,10 @@ pub struct App {
     /// Whether the running remote control reaches the network, which can
     /// differ from the setting until the next start.
     api_lan: bool,
+    /// Where the desk is kept between runs. None for interface tests and
+    /// screenshots: they run the real window and must never write over the
+    /// person's own session.
+    session_file: Option<PathBuf>,
 }
 
 impl App {
@@ -432,6 +435,7 @@ impl App {
             shot_not_before: Instant::now() + Duration::from_secs(shot_delay),
             shot_done: Arc::new(AtomicBool::new(false)),
             api_lan,
+            session_file: remote.then(saved_path),
         }
     }
 
@@ -631,13 +635,14 @@ impl App {
 
     /// Keeps the session safe from a crash without touching the live threads.
     fn autosave(&mut self, project: &Project) {
-        if self.shot_path.is_some() || self.last_autosave.elapsed() < Duration::from_secs(30) {
+        let Some(path) = self.session_file.clone() else { return };
+        if self.last_autosave.elapsed() < Duration::from_secs(30) {
             return;
         }
         self.last_autosave = Instant::now();
         self.saved.project = project.clone();
         let snapshot = self.saved.clone();
-        std::thread::spawn(move || snapshot.store());
+        std::thread::spawn(move || snapshot.store(&path));
     }
 
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
@@ -752,9 +757,9 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if self.shot_path.is_none() {
+        if let Some(path) = self.session_file.clone() {
             self.saved.project = self.with(|s| s.project.clone());
-            self.saved.store();
+            self.saved.store(&path);
         }
         self.engine.shutdown();
     }
