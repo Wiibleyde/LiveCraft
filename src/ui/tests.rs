@@ -924,11 +924,28 @@ fn a_video_delay_is_added_from_the_menu_and_shows_its_source() {
     let kind = project(&h).inputs.iter().find(|i| i.id == delay).unwrap().kind.clone();
     assert_eq!(kind, Kind::VideoDelay { source: Some(2), ms: 250 });
     let (engine, camera) = (h.state().engine.clone(), h.state().engine.rt(2).unwrap());
-    settle(&mut h, "the delay shows the moving camera", |_| {
-        let shown = engine.rt(delay).and_then(|r| r.latest());
-        shown.is_some_and(|f| !Arc::ptr_eq(&f, &camera.latest().unwrap()))
-            && engine.rt(delay).is_some_and(|r| r.seq() > 10)
-    });
+    // As generous as the other media tests (see `until`): the mixer shares
+    // the machine with every other test, and with builds.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let rt = engine.rt(delay).expect("the delay keeps its place on the desk");
+        // Some(true): a picture the camera showed earlier, not its live one.
+        let late = rt.latest().map(|f| camera.latest().is_none_or(|live| !Arc::ptr_eq(&f, &live)));
+        if late == Some(true) && rt.seq() > 10 {
+            break;
+        }
+        let shown = match late {
+            None => "nothing",
+            Some(false) => "the camera's live picture",
+            Some(true) => "a late picture",
+        };
+        assert!(
+            Instant::now() < deadline,
+            "after 30 s the delay of camera 2 shows {shown}, having changed {} times (11 wanted)",
+            rt.seq()
+        );
+        wait(&mut h, 30);
+    }
     end(h);
 }
 
