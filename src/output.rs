@@ -143,7 +143,7 @@ fn even_ends(mut p: PictureTail, mut s: SoundTail, pad: Padding, channels: usize
 /// to YUV is BT.601, so the conversion and the tags both say 709.
 const BT709: [&str; 8] = [
     "-vf",
-    "scale=out_color_matrix=bt709:out_range=tv",
+    "scale=out_color_matrix=bt709:out_range=tv,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv",
     "-colorspace",
     "bt709",
     "-color_primaries",
@@ -597,8 +597,13 @@ mod tests {
             assert!(has(&a, pair), "{pair:?} in {a:?}");
         }
         assert!(
-            has(&a, ["-vf", "scale=out_color_matrix=bt709:out_range=tv"])
-                && has(&a, ["-colorspace", "bt709"])
+            has(
+                &a,
+                [
+                    "-vf",
+                    "scale=out_color_matrix=bt709:out_range=tv,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+                ]
+            ) && has(&a, ["-colorspace", "bt709"])
         );
         assert!(
             has(&a, ["-frag_duration", "1000000"]) && !a.iter().any(|x| x.contains("frag_keyframe")),
