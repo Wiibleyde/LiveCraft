@@ -1,5 +1,5 @@
-//! What Linux and macOS share: process groups, and secrets sealed with a key
-//! kept in the system keyring.
+//! What Linux and macOS share: process groups, a socket for later starts, and
+//! secrets sealed with a key kept in the system keyring.
 
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -97,6 +97,83 @@ impl Drop for ProcessTree {
         drop(self.line.take());
         let _ = self.guard.wait();
     }
+}
+
+/// A folder only this account can enter, for the socket later starts call.
+fn private_dir() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    // XDG_RUNTIME_DIR is this account's own; without it, the settings folder is.
+    let runtime =
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_absolute() && d.is_dir());
+    let dir = match runtime {
+        Some(run) => run.join("livecraft"),
+        None => crate::platform::config_dir().join("LiveCraft").join("instance"),
+    };
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(dir)
+}
+
+/// The socket later starts call under this name; its lock sits beside it.
+pub fn socket_path(name: &str) -> std::io::Result<PathBuf> {
+    Ok(private_dir()?.join(format!("{name}.sock")))
+}
+
+/// Where the LiveCraft already running for this account listens for later
+/// starts: a socket in a private folder, beside a lock its holder keeps, so a
+/// socket left behind by a crash is told apart from a live one.
+pub struct LocalListener {
+    socket: std::os::unix::net::UnixListener,
+    path: PathBuf,
+    _lock: std::fs::File,
+}
+
+pub type LocalStream = std::os::unix::net::UnixStream;
+
+impl LocalListener {
+    /// Fails with `AddrInUse` while another LiveCraft of this account holds the name.
+    pub fn bind(name: &str) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let path = socket_path(name)?;
+        // Only its lock matters, never what it holds.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(path.with_extension("lock"))?;
+        // SAFETY: flock only reads the descriptor, which `lock` keeps open.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                std::io::Error::new(std::io::ErrorKind::AddrInUse, e)
+            } else {
+                e
+            });
+        }
+        // Only a run that ended without cleaning up leaves one: the lock is ours.
+        let _ = std::fs::remove_file(&path);
+        let socket = std::os::unix::net::UnixListener::bind(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(Self { socket, path, _lock: lock })
+    }
+
+    pub fn accept(&mut self) -> std::io::Result<LocalStream> {
+        self.socket.accept().map(|(stream, _)| stream)
+    }
+}
+
+impl Drop for LocalListener {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Opens the socket of the LiveCraft already running for this account:
+/// `NotFound`, or `ConnectionRefused` after a crash, when there is none.
+pub fn connect_local(name: &str) -> std::io::Result<LocalStream> {
+    LocalStream::connect(socket_path(name)?)
 }
 
 pub fn home() -> PathBuf {
