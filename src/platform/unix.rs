@@ -99,19 +99,40 @@ impl Drop for ProcessTree {
     }
 }
 
-/// A folder only this account can enter, for the socket later starts call.
+/// A folder only this account can enter, for the socket later starts call:
+/// in XDG_RUNTIME_DIR, which is this account's own, else in the settings folder.
 fn private_dir() -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    // XDG_RUNTIME_DIR is this account's own; without it, the settings folder is.
     let runtime =
         std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_absolute() && d.is_dir());
-    let dir = match runtime {
-        Some(run) => run.join("livecraft"),
-        None => crate::platform::config_dir().join("LiveCraft").join("instance"),
-    };
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    Ok(dir)
+    if let Some(dir) = runtime.and_then(|run| own_private_dir(&run.join("livecraft")).ok()) {
+        return Ok(dir);
+    }
+    let settings = crate::platform::config_dir().join("LiveCraft");
+    std::fs::create_dir_all(&settings)?;
+    own_private_dir(&settings.join("instance"))
+}
+
+/// Makes the folder, or takes the one there only if it is a real folder (not
+/// a link someone left) of this account; then closes it to everyone else.
+fn own_private_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    // SAFETY: geteuid takes nothing and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    if !meta.file_type().is_dir() || meta.uid() != me {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "not this account's own folder",
+        ));
+    }
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir.to_path_buf())
 }
 
 /// The socket later starts call under this name; its lock sits beside it.
@@ -174,6 +195,27 @@ impl Drop for LocalListener {
 /// `NotFound`, or `ConnectionRefused` after a crash, when there is none.
 pub fn connect_local(name: &str) -> std::io::Result<LocalStream> {
     LocalStream::connect(socket_path(name)?)
+}
+
+/// Reads what has come, waiting until `until` at most: `TimedOut` then, and
+/// 0 once the other side hung up.
+pub fn read_some(
+    stream: &mut LocalStream,
+    buf: &mut [u8],
+    until: std::time::Instant,
+) -> std::io::Result<usize> {
+    use std::io::Read;
+    let left = until.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() {
+        return Err(std::io::ErrorKind::TimedOut.into());
+    }
+    stream.set_read_timeout(Some(left))?;
+    match stream.read(buf) {
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+            Err(std::io::ErrorKind::TimedOut.into())
+        }
+        read => read,
+    }
 }
 
 /// Opens a web page in the person's own browser.
@@ -491,5 +533,25 @@ mod tests {
         drop(tree);
         let _ = child.wait();
         assert!(gone(grandchild), "the grandchild kept running");
+    }
+
+    #[test]
+    fn the_folder_for_later_starts_is_never_a_link_nor_open_to_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let base = std::env::temp_dir().join(format!("livecraft-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let made = own_private_dir(&base.join("fresh")).unwrap();
+        assert_eq!(mode(&made), 0o700);
+        let open = base.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        own_private_dir(&open).unwrap();
+        assert_eq!(mode(&open), 0o700, "closed to others");
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&made, &link).unwrap();
+        assert!(own_private_dir(&link).is_err(), "a link is never followed");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

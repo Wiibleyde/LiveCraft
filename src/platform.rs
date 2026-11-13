@@ -30,10 +30,12 @@ pub use os::{
     pictures_dir, screen_input, system_audio_input, videos_dir,
 };
 
+#[cfg(all(windows, test))]
+pub use windows::bind_as_lesser;
 #[cfg(windows)]
 pub use windows::{
     LocalListener, LocalStream, ProcessTree, connect_local, end_process_tree, has_exited, open_in_browser,
-    open_sealed, prepare_child, seal, tie_children_to_this_process,
+    open_sealed, pass_on_foreground_leave, prepare_child, read_some, seal, tie_children_to_this_process,
 };
 
 #[cfg(all(unix, test))]
@@ -41,7 +43,7 @@ pub use unix::socket_path;
 #[cfg(unix)]
 pub use unix::{
     LocalListener, LocalStream, ProcessTree, connect_local, end_process_tree, has_exited, open_in_browser,
-    open_sealed, prepare_child, seal, tie_children_to_this_process,
+    open_sealed, prepare_child, read_some, seal, tie_children_to_this_process,
 };
 
 /// The file name of a program: `ffmpeg` is `ffmpeg.exe` on Windows.

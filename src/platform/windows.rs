@@ -6,13 +6,13 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
-    LocalFree,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
+    ERROR_PIPE_NOT_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
-use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::System::JobObjects::*;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -252,35 +252,16 @@ pub fn open_sealed(sealed: &[u8]) -> Option<Vec<u8>> {
     (done != 0).then(|| take(out))
 }
 
-/// The account this process runs as, as a SID string such as `S-1-5-21-…`.
-fn process_user(process: HANDLE) -> Option<String> {
+/// The text of a SID, such as `S-1-5-21-…`.
+///
+/// # Safety
+/// `sid` must point at a valid SID.
+unsafe fn sid_text(sid: PSID) -> Option<String> {
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
-    use windows_sys::Win32::System::Threading::OpenProcessToken;
-    // Room for the user and its SID, aligned for TOKEN_USER.
-    let mut info = [0u64; 64];
-    let mut size = 0;
-    // SAFETY: every out pointer is valid for the call, the token is closed once,
-    // and the SID read lives inside `info`, which outlives its use.
+    let mut text = std::ptr::null_mut();
+    // SAFETY: the caller vouches for the SID; Windows allocates the text, read once and freed once.
     unsafe {
-        let mut token = std::ptr::null_mut();
-        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
-            return None;
-        }
-        let read = GetTokenInformation(
-            token,
-            TokenUser,
-            info.as_mut_ptr().cast(),
-            size_of_val(&info) as u32,
-            &mut size,
-        );
-        CloseHandle(token);
-        if read == 0 {
-            return None;
-        }
-        let user = &*(info.as_ptr() as *const TOKEN_USER);
-        let mut text = std::ptr::null_mut();
-        if ConvertSidToStringSidW(user.User.Sid, &mut text) == 0 {
+        if ConvertSidToStringSidW(sid, &mut text) == 0 {
             return None;
         }
         let len = (0..).take_while(|&i| *text.add(i) != 0).count();
@@ -290,11 +271,65 @@ fn process_user(process: HANDLE) -> Option<String> {
     }
 }
 
-fn this_user() -> Option<&'static str> {
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-    static USER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    // SAFETY: the pseudo handle of this process needs no closing.
-    USER.get_or_init(|| process_user(unsafe { GetCurrentProcess() })).as_deref()
+/// The last part of a SID: for an integrity label, its level (0x2000 for an
+/// ordinary program, 0x3000 for one run as administrator).
+///
+/// # Safety
+/// `sid` must point at a valid SID.
+unsafe fn sid_level(sid: PSID) -> u32 {
+    use windows_sys::Win32::Security::{GetSidSubAuthority, GetSidSubAuthorityCount};
+    // SAFETY: the caller vouches for the SID; a label SID has one sub-authority.
+    unsafe { *GetSidSubAuthority(sid, u32::from(*GetSidSubAuthorityCount(sid)).saturating_sub(1)) }
+}
+
+/// Who this program runs as: its account, and its integrity level.
+struct Me {
+    user: String,
+    level: u32,
+}
+
+const MEDIUM_LEVEL: u32 = 0x2000;
+
+fn me() -> Option<&'static Me> {
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, SID_AND_ATTRIBUTES, TOKEN_QUERY, TokenIntegrityLevel, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    static ME: std::sync::OnceLock<Option<Me>> = std::sync::OnceLock::new();
+    ME.get_or_init(|| {
+        // SAFETY: every out pointer is valid for its call, the token is closed
+        // once, and each SID read lives inside `info`, which outlives its use.
+        unsafe {
+            let mut token = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return None;
+            }
+            // TOKEN_USER and TOKEN_MANDATORY_LABEL both start with the SID asked for.
+            let sid_of = |class| {
+                let mut info = [0u64; 64];
+                let mut size = 0;
+                let read = GetTokenInformation(
+                    token,
+                    class,
+                    info.as_mut_ptr().cast(),
+                    size_of_val(&info) as u32,
+                    &mut size,
+                );
+                (read != 0).then_some(info)
+            };
+            let user =
+                sid_of(TokenUser).and_then(|i| sid_text((*(i.as_ptr() as *const SID_AND_ATTRIBUTES)).Sid));
+            let level = sid_of(TokenIntegrityLevel)
+                .map(|i| sid_level((*(i.as_ptr() as *const SID_AND_ATTRIBUTES)).Sid));
+            CloseHandle(token);
+            Some(Me { user: user?, level: level.unwrap_or(MEDIUM_LEVEL) })
+        }
+    })
+    .as_ref()
+}
+
+fn no_account() -> io::Error {
+    io::Error::other("this account could not be read")
 }
 
 /// Every account on the computer sees the same pipe names: the name carries
@@ -302,26 +337,33 @@ fn this_user() -> Option<&'static str> {
 /// sessions, has its own.
 fn pipe_path(name: &str) -> io::Result<Vec<u16>> {
     use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-    let user = this_user().ok_or_else(|| io::Error::other("no account"))?;
+    let me = me().ok_or_else(no_account)?;
     let mut session = 0;
     // SAFETY: `session` is valid for the call.
-    unsafe {
-        ProcessIdToSessionId(std::process::id(), &mut session);
+    if unsafe { ProcessIdToSessionId(std::process::id(), &mut session) } == 0 {
+        return Err(io::Error::last_os_error());
     }
-    Ok(format!(r"\\.\pipe\{name}-{user}-{session}").encode_utf16().chain([0]).collect())
+    Ok(format!(r"\\.\pipe\{name}-{}-{session}", me.user).encode_utf16().chain([0]).collect())
 }
 
-/// Only this account may open the pipe: not other people, not services.
-struct OnlyThisUser(PSECURITY_DESCRIPTOR);
+/// Who may open a pipe, as a security descriptor Windows allocated.
+struct Access(PSECURITY_DESCRIPTOR);
 
-impl OnlyThisUser {
-    fn new() -> io::Result<Self> {
+impl Access {
+    /// Owned by this account, open to it alone, and labelled with this
+    /// program's integrity level: a program of the same account running with
+    /// fewer rights, a sandboxed one say, can neither read nor write it, and
+    /// a later start can tell a pipe made by such a program from ours.
+    fn only_me() -> io::Result<Self> {
+        let me = me().ok_or_else(no_account)?;
+        Self::from_sddl(&format!("O:{0}D:P(A;;GA;;;{0})S:(ML;;NWNR;;;S-1-16-{1})", me.user, me.level))
+    }
+
+    fn from_sddl(sddl: &str) -> io::Result<Self> {
         use windows_sys::Win32::Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         };
-        let user = this_user().ok_or_else(|| io::Error::other("no account"))?;
-        // A protected list with one entry: full access for this account.
-        let sddl: Vec<u16> = format!("D:P(A;;GA;;;{user})").encode_utf16().chain([0]).collect();
+        let sddl: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
         let mut sd = std::ptr::null_mut();
         // SAFETY: the text is NUL-terminated; Windows allocates the descriptor, freed on drop.
         let made = unsafe {
@@ -336,7 +378,7 @@ impl OnlyThisUser {
     }
 }
 
-impl Drop for OnlyThisUser {
+impl Drop for Access {
     fn drop(&mut self) {
         // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW, freed once.
         unsafe {
@@ -346,9 +388,13 @@ impl Drop for OnlyThisUser {
 }
 
 // SAFETY: the descriptor is only read, and freed once, on drop.
-unsafe impl Send for OnlyThisUser {}
+unsafe impl Send for Access {}
 
-fn new_pipe(path: &[u16], access: &OnlyThisUser, first: bool) -> io::Result<File> {
+/// Pipe instances at once: the one waiting for a caller, and those being
+/// answered. More callers wait their turn.
+const PIPE_INSTANCES: u32 = 10;
+
+fn new_pipe(path: &[u16], access: &Access, first: bool) -> io::Result<File> {
     use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
     use windows_sys::Win32::System::Pipes::*;
     let attributes = SECURITY_ATTRIBUTES {
@@ -360,12 +406,11 @@ fn new_pipe(path: &[u16], access: &OnlyThisUser, first: bool) -> io::Result<File
     // Never reachable from another computer.
     let mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
     // SAFETY: the name is NUL-terminated; the attributes and descriptor outlive the call.
-    let pipe = unsafe {
-        CreateNamedPipeW(path.as_ptr(), open, mode, PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, &attributes)
-    };
+    let pipe =
+        unsafe { CreateNamedPipeW(path.as_ptr(), open, mode, PIPE_INSTANCES, 4096, 4096, 0, &attributes) };
     if pipe == INVALID_HANDLE_VALUE {
         let e = io::Error::last_os_error();
-        // The first instance exists already: another LiveCraft holds the name.
+        // The first instance exists already: something holds the name.
         return Err(if first && e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
             io::Error::new(io::ErrorKind::AddrInUse, e)
         } else {
@@ -380,46 +425,44 @@ fn new_pipe(path: &[u16], access: &OnlyThisUser, first: bool) -> io::Result<File
 /// starts: a named pipe.
 pub struct LocalListener {
     path: Vec<u16>,
-    access: OnlyThisUser,
+    access: Access,
     waiting: File,
 }
 
 pub type LocalStream = File;
 
 impl LocalListener {
-    /// Fails with `AddrInUse` while another LiveCraft of this account holds the name.
+    /// Fails with `AddrInUse` while something holds the name.
     pub fn bind(name: &str) -> io::Result<Self> {
         let path = pipe_path(name)?;
-        let access = OnlyThisUser::new()?;
+        let access = Access::only_me()?;
         let waiting = new_pipe(&path, &access, true)?;
         Ok(Self { path, access, waiting })
     }
 
+    /// The next caller. An error when one left before being answered, or no
+    /// instance is free: the caller tries again.
     pub fn accept(&mut self) -> io::Result<LocalStream> {
         use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
-        loop {
-            // SAFETY: a pipe this listener created and still owns; no overlapped I/O.
-            let joined = unsafe { ConnectNamedPipe(self.waiting.as_raw_handle(), std::ptr::null_mut()) } != 0;
-            let caller =
-                joined || io::Error::last_os_error().raw_os_error() == Some(ERROR_PIPE_CONNECTED as i32);
-            // The next one waits before this one is handed out, so the name is
-            // never free while this program runs.
-            let next = new_pipe(&self.path, &self.access, false)?;
-            let current = std::mem::replace(&mut self.waiting, next);
-            if caller {
-                return Ok(current);
-            }
-            // That caller left before being answered.
-        }
+        // SAFETY: a pipe this listener created and still owns; no overlapped I/O.
+        let joined = unsafe { ConnectNamedPipe(self.waiting.as_raw_handle(), std::ptr::null_mut()) } != 0;
+        let caller = joined || io::Error::last_os_error().raw_os_error() == Some(ERROR_PIPE_CONNECTED as i32);
+        // The next one waits before this one is handed out, so the name is
+        // never free while this program runs.
+        let next = new_pipe(&self.path, &self.access, false)?;
+        let current = std::mem::replace(&mut self.waiting, next);
+        if caller { Ok(current) } else { Err(io::ErrorKind::ConnectionAborted.into()) }
     }
 }
 
 /// Opens the pipe of the LiveCraft already running for this account:
-/// `NotFound` when there is none.
+/// `NotFound` when there is none, `PermissionDenied` when what holds the name
+/// is not ours or cannot be checked.
 pub fn connect_local(name: &str) -> io::Result<LocalStream> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
     use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
     let path = pipe_path(name)?;
     let text = String::from_utf16_lossy(&path[..path.len() - 1]);
     let mut tries = 0;
@@ -438,40 +481,127 @@ pub fn connect_local(name: &str) -> io::Result<LocalStream> {
                     WaitNamedPipeW(path.as_ptr(), 100);
                 }
             }
+            // Every instance stays taken: whoever holds them cannot be checked.
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, e));
+            }
             other => break other?,
         }
     };
+    if !made_by_me(&pipe) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "not this account's LiveCraft"));
+    }
     let mut server = 0;
-    // SAFETY: an open pipe handle and a valid out pointer.
-    unsafe {
-        GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut server);
-    }
-    if !runs_as_this_user(server) {
-        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
-    }
     // Windows lets a program come to the front only with leave from the one
-    // the person just started, which is this one.
-    // SAFETY: a plain call with a process number.
+    // the person just started: this one, or the wrapper that started it.
+    // SAFETY: an open pipe handle and a valid out pointer; then a plain call.
     unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(server);
+        if GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut server) != 0 {
+            AllowSetForegroundWindow(server);
+        }
     }
     Ok(pipe)
 }
 
-/// Whether that process belongs to this account, so that a pipe set up under
-/// our name by someone else never receives a project.
-fn runs_as_this_user(pid: u32) -> bool {
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-    // SAFETY: the handle is checked, and closed once.
+/// Whether the pipe is owned by this account and labelled at this program's
+/// integrity level or above. The pipe itself says so, which no process
+/// number can fake: another account cannot make this account the owner, and
+/// a program cannot label anything above its own level.
+fn made_by_me(pipe: &File) -> bool {
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACE_HEADER, ACL, GetAce, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    };
+    const MANDATORY_LABEL: u8 = 0x11;
+    let Some(me) = me() else { return false };
+    let (mut owner, mut sacl, mut sd) =
+        (std::ptr::null_mut(), std::ptr::null_mut::<ACL>(), std::ptr::null_mut());
+    // SAFETY: an open pipe handle and valid out pointers; Windows allocates the
+    // descriptor that owner and label point into, freed once below.
     unsafe {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if process.is_null() {
+        let asked = GetSecurityInfo(
+            pipe.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sacl,
+            &mut sd,
+        );
+        if asked != 0 {
             return false;
         }
-        let user = process_user(process);
-        CloseHandle(process);
-        user.is_some() && user.as_deref() == this_user()
+        let ours = !owner.is_null() && sid_text(owner).as_deref() == Some(me.user.as_str());
+        // Without a label, Windows counts an object as medium.
+        let mut level = MEDIUM_LEVEL;
+        if !sacl.is_null() {
+            for i in 0..u32::from((*sacl).AceCount) {
+                let mut ace = std::ptr::null_mut();
+                if GetAce(sacl, i, &mut ace) != 0 && (*(ace as *const ACE_HEADER)).AceType == MANDATORY_LABEL
+                {
+                    let label = ace as *const windows_sys::Win32::Security::SYSTEM_MANDATORY_LABEL_ACE;
+                    level = sid_level(std::ptr::addr_of!((*label).SidStart) as PSID);
+                }
+            }
+        }
+        LocalFree(sd);
+        ours && level >= me.level
     }
+}
+
+/// Reads what has come, waiting until `until` at most: `TimedOut` then, and
+/// 0 once the other side hung up. A plain read on a pipe cannot time out.
+pub fn read_some(stream: &mut LocalStream, buf: &mut [u8], until: std::time::Instant) -> io::Result<usize> {
+    use std::io::Read;
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+    loop {
+        let mut ready = 0;
+        // SAFETY: an open pipe handle; only the count of waiting bytes is asked for.
+        let peeked = unsafe {
+            PeekNamedPipe(
+                stream.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ready,
+                std::ptr::null_mut(),
+            )
+        };
+        if peeked == 0 {
+            let e = io::Error::last_os_error();
+            let gone = [ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED]
+                .map(|c| Some(c as i32))
+                .contains(&e.raw_os_error());
+            return if gone { Ok(0) } else { Err(e) };
+        }
+        if ready > 0 {
+            let n = (ready as usize).min(buf.len());
+            return stream.read(&mut buf[..n]);
+        }
+        if std::time::Instant::now() >= until {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Explorer lets the program it started come to the front: the portable
+/// build passes that leave on before starting the faster one, so that a later
+/// start can bring the window already open forward. False when it had none.
+pub fn pass_on_foreground_leave() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+    // SAFETY: a plain call.
+    unsafe { AllowSetForegroundWindow(ASFW_ANY) != 0 }
+}
+
+/// Sets up a pipe under that name as a program of this account with fewer
+/// rights could: tests check that it is not taken for a LiveCraft.
+#[cfg(test)]
+pub fn bind_as_lesser(name: &str) -> io::Result<File> {
+    let me = me().ok_or_else(no_account)?;
+    let access = Access::from_sddl(&format!("O:{0}D:P(A;;GA;;;{0})S:(ML;;NWNR;;;LW)", me.user))?;
+    new_pipe(&pipe_path(name)?, &access, true)
 }
 
 /// Opens a web page in the person's own browser.
