@@ -1,6 +1,6 @@
 //! Whether a newer LiveCraft is out. A few seconds after a real start, and at
 //! most once a day, one request asks GitHub's public list of releases; nothing
-//! else leaves the computer. It runs away from the window and fails in silence:
+//! of ours but the program's name and version goes with it. It runs away from the window and fails in silence:
 //! an operator in the middle of a show has better things to read.
 
 use semver::Version;
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 /// The running version.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
-const RELEASES: &str = "https://api.github.com/repos/Wiibleyde/LiveCraft/releases?per_page=10";
+const RELEASES: &str = "https://api.github.com/repos/Wiibleyde/LiveCraft/releases?per_page=100";
 /// Release pages are built from the version, never taken from the answer, so
 /// that nothing but this page can ever be opened from it.
 const RELEASE_PAGE: &str = "https://github.com/Wiibleyde/LiveCraft/releases/tag/v";
@@ -31,6 +31,9 @@ pub struct Updates {
     pub checked_at: Option<i64>,
     /// The newest version that check found, when newer than the one running then.
     pub found: Option<String>,
+    /// The version that ran that check. Another build, such as a stable one
+    /// installed over an alpha, does not trust what it found.
+    pub checked_by: String,
     /// The version whose notice was put away: it and older ones stay quiet.
     pub dismissed: String,
 }
@@ -41,27 +44,45 @@ fn on() -> bool {
 
 impl Default for Updates {
     fn default() -> Self {
-        Self { check: on(), checked_at: None, found: None, dismissed: String::new() }
+        Self {
+            check: on(),
+            checked_at: None,
+            found: None,
+            checked_by: String::new(),
+            dismissed: String::new(),
+        }
     }
 }
 
 impl Updates {
     /// Whether the check at start should ask now. A clock put back counts as a
     /// new day, or a wrong date could silence the check for months.
-    pub fn due(&self, now: i64) -> bool {
-        self.check && self.checked_at.is_none_or(|at| now < at || now - at >= EVERY)
+    pub fn due(&self, now: i64, current: &str) -> bool {
+        self.check
+            && (self.checked_by != current
+                || self
+                    .checked_at
+                    .is_none_or(|at| now.checked_sub(at).is_none_or(|d| !(0..EVERY).contains(&d))))
+    }
+
+    /// What a check by this very build found; another build's find is ignored.
+    fn found_for(&self, current: &str) -> Option<Version> {
+        if self.checked_by != current {
+            return None;
+        }
+        parse(self.found.as_deref()?)
     }
 
     /// The version found, if it is newer than `current`, put away or not.
     pub fn newer(&self, current: &str) -> Option<Release> {
-        let found = parse(self.found.as_deref()?)?;
+        let found = self.found_for(current)?;
         is_newer(&found, current).then(|| Release::of(&found))
     }
 
     /// The release the desk tells about, if any. Turning the check off also
     /// silences what an earlier check found.
     pub fn notice(&self, current: &str) -> Option<Release> {
-        let found = parse(self.found.as_deref()?)?;
+        let found = self.found_for(current)?;
         let news = is_newer(&found, current) && is_newer(&found, &self.dismissed);
         (self.check && news).then(|| Release::of(&found))
     }
@@ -127,8 +148,8 @@ pub fn newest(answer: &str, current: &str) -> Result<Option<Release>, String> {
 }
 
 /// Asks GitHub; blocks for up to ten seconds, so never on the window's thread.
-/// The request carries the program's name and version and nothing else: no
-/// cookie, no query about the person.
+/// The request carries the program's name and version and nothing else of
+/// ours: no cookie, no query about the person. Only https, and few redirects.
 pub fn fetch(current: &str) -> Result<Option<Release>, String> {
     use ureq::tls::{RootCerts, TlsConfig};
     // The system's own certificates, so that a company proxy that inspects
@@ -139,6 +160,8 @@ pub fn fetch(current: &str) -> Result<Option<Release>, String> {
         .build();
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .tls_config(tls)
+        .https_only(true)
+        .max_redirects(2)
         .timeout_global(Some(TIMEOUT))
         .user_agent(format!("LiveCraft/{current}"))
         .build()
@@ -251,19 +274,25 @@ mod tests {
     fn the_check_at_start_asks_at_most_once_a_day() {
         let now = 1_800_000_000;
         let mut u = Updates::default();
-        assert!(u.due(now), "never asked");
+        let v = "0.1.0";
+        assert!(u.due(now, v), "never asked");
         u.checked_at = Some(now);
-        assert!(!u.due(now));
-        assert!(!u.due(now + EVERY - 1));
-        assert!(u.due(now + EVERY));
-        assert!(u.due(now - 60), "the clock went back");
+        u.checked_by = v.into();
+        assert!(!u.due(now, v));
+        assert!(!u.due(now + EVERY - 1, v));
+        assert!(u.due(now + EVERY, v));
+        assert!(u.due(now - 60, v), "the clock went back");
+        assert!(u.due(now, "0.2.0"), "another build asks at once");
+        u.checked_at = Some(i64::MIN);
+        assert!(u.due(now, v), "a corrupt date overflows nothing");
+        u.checked_at = Some(now);
         u.check = false;
-        assert!(!u.due(now + 10 * EVERY), "turned off");
+        assert!(!u.due(now + 10 * EVERY, v), "turned off");
     }
 
     #[test]
     fn a_put_away_notice_stays_away_until_a_newer_version() {
-        let mut u = Updates { found: Some("0.2.0".into()), ..Updates::default() };
+        let mut u = Updates { found: Some("0.2.0".into()), checked_by: "0.1.0".into(), ..Updates::default() };
         assert_eq!(u.notice("0.1.0").map(|r| r.version).as_deref(), Some("0.2.0"));
         u.dismissed = "0.2.0".into();
         assert_eq!(u.notice("0.1.0"), None);
@@ -280,12 +309,25 @@ mod tests {
 
     #[test]
     fn once_installed_the_found_version_is_no_longer_news() {
-        let u = Updates { found: Some("0.2.0".into()), ..Updates::default() };
+        let u = Updates { found: Some("0.2.0".into()), checked_by: "0.2.0".into(), ..Updates::default() };
         assert_eq!(u.notice("0.2.0"), None);
-        assert_eq!(u.newer("0.3.0"), None);
+        assert_eq!(u.newer("0.2.0"), None);
         let mut u = u;
         u.answered(None);
         assert_eq!(u.found, None, "an answer with nothing newer clears it");
+    }
+
+    #[test]
+    fn what_another_build_found_is_not_trusted() {
+        let u = Updates {
+            found: Some("0.2.0-alpha.2".into()),
+            checked_by: "0.2.0-alpha.1".into(),
+            ..Updates::default()
+        };
+        assert!(u.notice("0.2.0-alpha.1").is_some());
+        assert_eq!(u.notice("0.1.0"), None, "a stable build installed since");
+        assert_eq!(u.newer("0.1.0"), None);
+        assert!(u.due(1_800_000_000, "0.1.0"), "and it asks again at once");
     }
 
     #[test]

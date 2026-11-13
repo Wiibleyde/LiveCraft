@@ -244,6 +244,8 @@ pub struct App {
     update_checking: updates::Checking,
     /// The person's browser; the tests look at what it was asked instead.
     open_in_browser: fn(&str),
+    /// Asks for the newest release; the tests never reach the network.
+    update_fetch: fn(&str) -> Result<Option<crate::update::Release>, String>,
     /// Whether ffmpeg is asked what it can do: a real run, or a look at the About tab.
     asks_ffmpeg: bool,
 }
@@ -464,7 +466,8 @@ impl App {
             update_at: remote.then(|| Instant::now() + updates::CHECK_AFTER),
             update_answer: Arc::new(Mutex::new(None)),
             update_checking: updates::Checking::Idle,
-            open_in_browser: crate::platform::open_in_browser,
+            open_in_browser: if remote { crate::platform::open_in_browser } else { |_| {} },
+            update_fetch: if remote { crate::update::fetch } else { |_| Ok(None) },
             asks_ffmpeg,
         }
     }

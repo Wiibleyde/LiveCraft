@@ -1015,4 +1015,4 @@ update.never = Not checked yet.
 update.up_to_date = Checked on {when}: LiveCraft is up to date.
 update.found = Checked on {when}: LiveCraft {version} is available.
 update.check_now = Check now
-update.what_is_sent = One request to GitHub's public API, a few seconds after start and at most once a day. It carries only the program's name and version, nothing about you or your projects.
+update.what_is_sent = One request to GitHub's public API, a few seconds after start and at most once a day. It carries only the program's name and version, nothing about your projects. GitHub sees your IP address, as with any web page; Windows may also check GitHub's certificate with its issuer.

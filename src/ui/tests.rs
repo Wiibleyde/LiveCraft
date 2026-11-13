@@ -1164,6 +1164,7 @@ fn a_newer_release_is_announced_until_put_away() {
     assert!(h.state().update_at.is_none(), "tests never ask GitHub");
     h.state_mut().open_in_browser = |url| OPENED.lock().unwrap().push(url.into());
     let notice = "LiveCraft 99.0.0 est disponible";
+    h.state_mut().saved.updates.checked_by = crate::update::CURRENT.into();
     assert!(h.query_by_label(notice).is_none());
 
     // As the check's thread hands its answer over.
@@ -1188,12 +1189,24 @@ fn about_tells_the_version_and_turns_the_check_off() {
     let u = &mut h.state_mut().saved.updates;
     u.found = Some("99.0.0".into());
     u.checked_at = Some(1_800_000_000);
+    u.checked_by = crate::update::CURRENT.into();
     u.dismissed = "99.0.0".into();
     click(&mut h, "Réglages");
     click(&mut h, "À propos");
     h.get_by_label(&format!("Version {}", crate::update::CURRENT));
     assert!(h.query_by_label_contains(" : LiveCraft 99.0.0 est disponible.").is_some(), "even put away");
-    h.get_by_label("Ouvrir la page de cette version");
+    // The test app's browser does nothing and its check never reaches the network.
+    click(&mut h, "Ouvrir la page de cette version");
+    click(&mut h, "Vérifier maintenant");
+    for _ in 0..100 {
+        h.run_steps(2);
+        if h.state().update_checking == updates::Checking::Idle {
+            break;
+        }
+        sleep(Duration::from_millis(20));
+    }
+    assert_eq!(h.state().update_checking, updates::Checking::Idle);
+    assert_eq!(h.state().saved.updates.found, None, "the stand-in found nothing");
     assert!(h.state().saved.updates.check);
     click(&mut h, "Rechercher les mises à jour au démarrage");
     assert!(!h.state().saved.updates.check);

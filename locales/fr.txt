@@ -1015,4 +1015,4 @@ update.never = Pas encore vérifié.
 update.up_to_date = Vérifié le {when} : LiveCraft est à jour.
 update.found = Vérifié le {when} : LiveCraft {version} est disponible.
 update.check_now = Vérifier maintenant
-update.what_is_sent = Une seule demande à l'API publique de GitHub, quelques secondes après le démarrage et au plus une fois par jour. Elle ne porte que le nom et la version du programme, rien sur vous ni sur vos projets.
+update.what_is_sent = Une seule demande à l'API publique de GitHub, quelques secondes après le démarrage et au plus une fois par jour. Elle ne porte que le nom et la version du programme, rien sur vos projets. GitHub voit votre adresse IP, comme pour toute page web ; Windows peut aussi vérifier le certificat de GitHub auprès de son émetteur.

@@ -31,9 +31,13 @@ impl App {
         }
         self.update_checking = Checking::Running;
         self.saved.updates.checked_at = Some(now());
+        self.saved.updates.checked_by = CURRENT.into();
         let answer = self.update_answer.clone();
+        let fetch = self.update_fetch;
         std::thread::spawn(move || {
-            let got = crate::update::fetch(CURRENT);
+            // A panic must still answer, or About would say "Checking" forever.
+            let got = std::panic::catch_unwind(|| fetch(CURRENT))
+                .unwrap_or_else(|_| Err("the check stopped unexpectedly".into()));
             *answer.lock().unwrap() = Some(got);
         });
     }
@@ -43,7 +47,7 @@ impl App {
     pub(super) fn follow_update_check(&mut self) {
         if self.update_at.is_some_and(|at| Instant::now() >= at) {
             self.update_at = None;
-            if self.saved.updates.due(now()) {
+            if self.saved.updates.due(now(), CURRENT) {
                 self.check_for_update();
             }
         }
@@ -121,4 +125,5 @@ pub(super) fn as_if_found(u: &mut Updates) {
     next.pre = semver::Prerelease::EMPTY;
     u.found = Some(next.to_string());
     u.checked_at = Some(now());
+    u.checked_by = CURRENT.into();
 }
