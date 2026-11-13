@@ -24,6 +24,26 @@ pub fn instant(t: u64) -> Instant {
     *ORIGIN + Duration::from_nanos(t)
 }
 
+// TEMPORARY (#40): a trace of the sound path, written where
+// LIVECRAFT_SOUND_TRACE says, to find what spoils the live check's tone.
+static TRACE: LazyLock<Option<std::sync::Mutex<std::fs::File>>> = LazyLock::new(|| {
+    let path = std::env::var("LIVECRAFT_SOUND_TRACE").ok()?;
+    std::fs::File::create(path).ok().map(std::sync::Mutex::new)
+});
+
+pub fn trace(what: impl FnOnce() -> String) {
+    if let Some(file) = TRACE.as_ref() {
+        use std::io::Write;
+        let line = format!(
+            "{:.4} {}
+",
+            now() as f64 / 1e9,
+            what()
+        );
+        let _ = file.lock().unwrap().write_all(line.as_bytes());
+    }
+}
+
 /// Where `at` falls in a stream of `rate` units a second that began at
 /// `origin`, to the nearest unit: a stamp a nanosecond off its tick, as
 /// integer division leaves them, still lands on that tick.
@@ -315,6 +335,10 @@ impl Drift {
             take.frames = (block as i64 + step as i64) as usize;
         }
         take
+    }
+
+    pub fn speed(&self) -> (f64, f64) {
+        (self.rate, self.adjust)
     }
 
     fn restart_window(&mut self, margin: i64) {

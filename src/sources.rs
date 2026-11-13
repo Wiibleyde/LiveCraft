@@ -752,6 +752,7 @@ pub(crate) fn watch_log(rt: &Arc<InputRt>, child: &mut Child) -> Arc<Mutex<Strin
                         chapters.push(ms);
                     }
                 }
+                crate::clock::trace(|| format!("source-ffmpeg {line}"));
                 *sink.lock().unwrap() = line;
             }
         });
@@ -1016,6 +1017,7 @@ pub(crate) fn pump_audio(rt: &InputRt, mut out: impl Read, session_stop: Option<
         );
         bytes.copy_within(whole..filled, 0);
         filled -= whole;
+        crate::clock::trace(|| format!("pump frames={} queued={}", samples.len() / 2, ring.queued()));
         while ring.room() < samples.len() {
             if done() {
                 return;

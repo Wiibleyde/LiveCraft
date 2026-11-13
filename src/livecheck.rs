@@ -80,7 +80,96 @@ pub fn run(dir: &str, sabotage: Option<&str>) -> i32 {
     }
 }
 
+// TEMPORARY (#40): the sound path without virtual devices. LIVECRAFT_LIVECHECK_LOCAL=tone uses
+// LiveCraft's own tone; =net a live sender (ffmpeg's sine over UDP), which goes through `Drift`.
+fn local(dir: &str, how: &str) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    crate::platform::tie_children_to_this_process();
+    let mediamtx = std::env::var("LIVECRAFT_MEDIAMTX").unwrap_or_else(|_| "mediamtx".into());
+    let server = Server::start(&mediamtx, dir)?;
+    let mut sender = None;
+    let kind = if how == "net" {
+        let url = format!("rtmp://127.0.0.1:{}/sine", server.rtmp);
+        sender = Some(
+            ffmpeg()
+                .args(["-re", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30"])
+                .args(["-re", "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000,volume=0.5"])
+                .args(["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "30"])
+                .args(["-c:a", "aac", "-b:a", "192k", "-f", "flv"])
+                .arg(&url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| e.to_string())?,
+        );
+        sleep(Duration::from_secs(2));
+        Kind::Network { url, buffer_ms: 0 }
+    } else {
+        Kind::Tone
+    };
+    let mut project = Project::blank();
+    project.out_w = 1280;
+    project.out_h = 720;
+    project.fps = 30;
+    project.headphones_level = 0.0;
+    project.streams[0].enabled = true;
+    project.streams[0].url = format!("rtmp://127.0.0.1:{}/live", server.rtmp);
+    project.streams[0].key = "livecheck".into();
+    project.srt[0].enabled = true;
+    project.srt[0].url =
+        format!("srt://127.0.0.1:{}?streamid=publish:livecheck-srt&pkt_size=1316", server.srt);
+    let engine = Engine::start(project);
+    let id = engine.new_id();
+    let mut input = Input::new(id, "Son", kind);
+    input.audio.follow = false;
+    engine.add_input(input);
+    let _ = engine.call("CutDirect", &Args::new().input("Son"));
+    sleep(Duration::from_secs(1));
+    engine.start_streaming()?;
+    engine.start_srt()?;
+    sleep(Duration::from_secs(3));
+    let rtmp = format!("rtmp://127.0.0.1:{}/live/livecheck", server.rtmp);
+    let srt = format!("srt://127.0.0.1:{}?streamid=read:livecheck-srt", server.srt);
+    let jobs: Vec<_> = [("rtmp", rtmp), ("srt", srt)]
+        .into_iter()
+        .map(|(name, url)| {
+            let dir = dir.to_string();
+            (
+                name,
+                thread::spawn(move || {
+                    let (pictures, sound) = (format!("{dir}/{name}.gray"), format!("{dir}/{name}.pcm"));
+                    pull(&url, &pictures, &sound, &format!("{dir}/{name}-ffmpeg.log"))?;
+                    let pcm = std::fs::read(&sound).map_err(|e| e.to_string())?;
+                    let _ = std::fs::write(format!("{dir}/{name}.wav"), wav(&pcm, SAMPLE_RATE));
+                    let samples: Vec<f32> = pcm
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
+                        .collect();
+                    judge_tone(&samples, SAMPLE_RATE)
+                }),
+            )
+        })
+        .collect();
+    let results: Vec<String> = jobs
+        .into_iter()
+        .map(|(name, j)| format!("{name} {:?}", j.join().unwrap_or_else(|_| Err("panic".into()))))
+        .collect();
+    engine.shutdown();
+    if let Some(mut c) = sender {
+        crate::platform::end_process_tree(&mut c);
+        let _ = c.wait();
+    }
+    let text = results.join(" | ");
+    if text.contains("Err") { Err(text) } else { Ok(text) }
+}
+
 fn check(dir: &str, sabotage: Sabotage) -> Result<String, String> {
+    if let Ok(how) = std::env::var("LIVECRAFT_LIVECHECK_LOCAL") {
+        return local(dir, &how);
+    }
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     crate::platform::tie_children_to_this_process();
     let dll = std::env::var("LIVECRAFT_SOFTCAM")
@@ -227,7 +316,9 @@ fn pull(url: &str, pictures: &str, sound: &str, log: &str) -> Result<(), String>
         // A file left by an earlier run must not pass for pictures received.
         let _ = std::fs::remove_file(pictures);
         let _ = std::fs::remove_file(sound);
+        crate::clock::trace(|| format!("pull start {url}"));
         let tried = pull_once(url, pictures, sound, log);
+        crate::clock::trace(|| format!("pull end {url} {:?}", tried));
         let nothing = std::fs::metadata(pictures).map_or(true, |m| m.len() == 0);
         if tried.is_ok() || !nothing || Instant::now() > end {
             return tried;
@@ -513,6 +604,9 @@ impl Camera {
                     draw_pattern(&mut picture, CAM_W, CAM_H, count);
                     // Paced by Softcam itself at the frame rate given above.
                     (api.send)(cam, picture.as_ptr().cast());
+                    if count % 30 == 0 {
+                        crate::clock::trace(|| format!("cam count={count}"));
+                    }
                     if (api.connected)(cam) {
                         seen.store(true, Ordering::Relaxed);
                     }
@@ -598,6 +692,7 @@ fn play_tone(level: f32) -> Result<cpal::Stream, String> {
     if config.sample_format() != cpal::SampleFormat::F32 {
         return Err(format!("CABLE Input en {:?}, F32 attendu", config.sample_format()));
     }
+    crate::clock::trace(|| format!("tone config {config:?}"));
     let config: cpal::StreamConfig = config.into();
     let channels = config.channels as usize;
     let step = std::f32::consts::TAU * TONE_HZ / config.sample_rate as f32;
@@ -606,6 +701,7 @@ fn play_tone(level: f32) -> Result<cpal::Stream, String> {
         .build_output_stream(
             config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                crate::clock::trace(|| format!("tone frames={}", data.len() / channels));
                 for frame in data.chunks_mut(channels) {
                     frame.fill(phase.sin() * level);
                     phase = (phase + step) % std::f32::consts::TAU;

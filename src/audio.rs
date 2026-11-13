@@ -258,7 +258,21 @@ impl Engine {
                         if skipped > 0 {
                             drift.resync();
                         }
-                        drift.take(ring.queued(), FRAMES, held(ring, strip.may_wait))
+                        let queued = ring.queued();
+                        let take = drift.take(queued, FRAMES, held(ring, strip.may_wait));
+                        let (rate, adjust) = drift.speed();
+                        clock::trace(|| {
+                            format!(
+                                "drift id={} at={} q={queued} discard={} frames={} silence={} short={} rate={rate:.4} adjust={adjust:.4} skipped={skipped}",
+                                strip.id,
+                                pace.stamp(),
+                                take.discard,
+                                take.frames,
+                                take.silence,
+                                (take.discard + take.frames).saturating_sub(queued)
+                            )
+                        });
+                        take
                     }
                     None => {
                         ring.discard(skipped as usize * FRAMES);
@@ -338,6 +352,9 @@ impl Engine {
 
             let step = pace.advance(clock::now(), CATCH_UP);
             skipped = step.skipped;
+            if skipped > 0 {
+                clock::trace(|| format!("loop skipped={skipped}"));
+            }
             thread::sleep(step.wait);
         }
         rack.stop();
