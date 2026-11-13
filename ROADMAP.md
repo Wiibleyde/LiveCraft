@@ -40,6 +40,8 @@ Nothing here has a date. Open an issue before starting something large; the
 - [ ] Packaged builds for Linux and macOS
 - [x] Windows installer and release workflow (#10)
 - [ ] Signed Windows releases (the workflow signs once a certificate is set up)
+- [x] Say when a newer version is out (#34)
+- [ ] Download and install it from the program, once releases are signed (#34)
 
 ## Quality
 

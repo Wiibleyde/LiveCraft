@@ -607,8 +607,7 @@ fn an_ndi_or_omt_input_comes_from_the_menu_and_asks_for_its_source() {
 
 #[test]
 fn network_outputs_start_and_stop_from_the_settings() {
-    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let mut h = desk(small_project());
+    let mut h = desk(project_with_unique_net_names());
     h.state_mut().settings_open = true;
     h.state_mut().settings_tab = 2;
     h.run_steps(3);
@@ -624,7 +623,9 @@ fn network_outputs_start_and_stop_from_the_settings() {
     match crate::netvideo::Net::Ndi.available() {
         Ok(()) => {
             assert!(engine.is_net(), "{}", said(&h));
-            assert_eq!(engine.net.lock().unwrap()[0].name, "LiveCraft");
+            let name = project(&h).ndi_out.name;
+            assert!(name.starts_with("LiveCraft test "));
+            assert_eq!(engine.net.lock().unwrap()[0].name, name);
             click(&mut h, "Arrêter NDI / OMT");
             assert!(!engine.is_net());
         }
@@ -637,16 +638,22 @@ fn network_outputs_start_and_stop_from_the_settings() {
     end(h);
 }
 
-/// Both tests offer the same source names, and a name is taken for the whole
-/// process: they run one after the other.
-static NET_NAMES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// A project whose NDI and OMT senders carry a name no other test run on this
+/// machine uses (process id and counter), as a name is taken machine-wide.
+fn project_with_unique_net_names() -> Project {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut p = small_project();
+    p.ndi_out.name = format!("LiveCraft test {} {n}", std::process::id());
+    p.omt_out.name = format!("LiveCraft test {} {n}", std::process::id());
+    p
+}
 
 /// Stop then Start at once: the sender just stopped is still being torn down,
 /// and the new one must not fail on its name ("nom déjà pris").
 #[test]
 fn a_network_output_starts_again_right_after_it_stops() {
-    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let mut h = desk(small_project());
+    let mut h = desk(project_with_unique_net_names());
     h.state_mut().settings_open = true;
     h.state_mut().settings_tab = 2;
     h.run_steps(3);
@@ -1188,6 +1195,72 @@ fn an_older_session_without_a_language_still_opens() {
         serde_json::from_str(&serde_json::to_string(&Saved { language: "en".into(), ..saved }).unwrap())
             .unwrap();
     assert_eq!(again.language, "en");
+}
+
+/// A check that finds a newer version says so at the right of the status line; the
+/// notice opens that version's page, and once put away it stays away for that version.
+#[test]
+fn a_newer_release_is_announced_until_put_away() {
+    static OPENED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut h = desk(small_project());
+    assert!(h.state().update_at.is_none(), "tests never ask GitHub");
+    h.state_mut().open_in_browser = |url| OPENED.lock().unwrap().push(url.into());
+    let notice = "LiveCraft 99.0.0 est disponible";
+    h.state_mut().saved.updates.checked_by = crate::update::CURRENT.into();
+    assert!(h.query_by_label(notice).is_none());
+
+    // As the check's thread hands its answer over.
+    let answer = r#"[{"tag_name": "v100.0.0", "draft": true}, {"tag_name": "v99.0.0", "prerelease": false}]"#;
+    let newest = crate::update::newest(answer, crate::update::CURRENT);
+    *h.state().update_answer.lock().unwrap() = Some(newest);
+    h.run_steps(3);
+    click(&mut h, notice);
+    assert_eq!(*OPENED.lock().unwrap(), ["https://github.com/Wiibleyde/LiveCraft/releases/tag/v99.0.0"]);
+
+    click(&mut h, "Masquer pour cette version");
+    assert!(h.query_by_label(notice).is_none());
+    assert_eq!(h.state().saved.updates.dismissed, "99.0.0");
+    end(h);
+}
+
+/// Settings, About shows the running version and what the last check found, and
+/// turns the check at start off.
+#[test]
+fn about_tells_the_version_and_turns_the_check_off() {
+    let mut h = desk(small_project());
+    let u = &mut h.state_mut().saved.updates;
+    u.found = Some("99.0.0".into());
+    u.checked_at = Some(1_800_000_000);
+    u.checked_by = crate::update::CURRENT.into();
+    u.dismissed = "99.0.0".into();
+    click(&mut h, "Réglages");
+    click(&mut h, "À propos");
+    h.get_by_label(&format!("Version {}", crate::update::CURRENT));
+    assert!(h.query_by_label_contains(" : LiveCraft 99.0.0 est disponible.").is_some(), "even put away");
+    // The test app's browser does nothing and its check never reaches the network.
+    click(&mut h, "Ouvrir la page de cette version");
+    click(&mut h, "Vérifier maintenant");
+    for _ in 0..100 {
+        h.run_steps(2);
+        if h.state().update_checking == updates::Checking::Idle {
+            break;
+        }
+        sleep(Duration::from_millis(20));
+    }
+    assert_eq!(h.state().update_checking, updates::Checking::Idle);
+    assert_eq!(h.state().saved.updates.found, None, "the stand-in found nothing");
+    assert!(h.state().saved.updates.check);
+    click(&mut h, "Rechercher les mises à jour au démarrage");
+    assert!(!h.state().saved.updates.check);
+    end(h);
+}
+
+/// Sessions saved before the update check existed have it on.
+#[test]
+fn an_older_session_checks_for_updates() {
+    let saved: Saved = serde_json::from_str(r#"{"record_dir":"D:/videos","language":"fr"}"#).unwrap();
+    assert!(saved.updates.check);
+    assert_eq!(saved.updates.checked_at, None);
 }
 
 /// For what sits low in a scrolled window: a click lands where it is shown.

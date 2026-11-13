@@ -525,10 +525,15 @@ fn uses_srt(p: &Project) -> bool {
 
 impl App {
     fn tab_about(&mut self, ui: &mut egui::Ui, p: &Project) {
-        ui.label(RichText::new("LiveCraft").strong());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("LiveCraft").strong());
+            ui.label(t!("settings.about_version", version = crate::update::CURRENT));
+        });
         ui.label(t!("settings.about_tagline"));
         ui.label(RichText::new(t!("settings.about_ffmpeg")).small().color(DIM));
         ui.label(RichText::new(t!("settings.about_ndi")).small().color(DIM));
+        ui.separator();
+        self.about_updates(ui);
         ui.separator();
         self.ffmpeg_section(ui, p);
     }
