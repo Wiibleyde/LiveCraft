@@ -222,12 +222,6 @@ impl Encoder {
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let tracks = s.audio.count.max(1) as usize;
         let channels = tracks * 2;
-        let kind = match &s.target {
-            Target::Rtmp(_) => "rtmp",
-            Target::Srt(_) => "srt",
-            _ => "file",
-        };
-        clock::trace(|| format!("encoder start {kind} port={port}"));
         // Sound is opened first: ffmpeg reads an input before opening the next,
         // and pictures only start once the sound socket is connected.
         let mut cmd = ffmpeg();
@@ -272,7 +266,6 @@ impl Encoder {
             thread::spawn(move || {
                 let mut found_cause = false;
                 for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    clock::trace(|| format!("encoder-ffmpeg port={port} {line}"));
                     // One tee destination dropping out leaves the others running.
                     if line.contains("Slave") && line.to_lowercase().contains("fail") {
                         *warn.lock().unwrap() = Some(t!("output.destination_not_responding").to_string());
@@ -323,7 +316,6 @@ impl Encoder {
                     continue;
                 };
                 if line.cut() > before {
-                    clock::trace(|| format!("encoder port={port} picture cut {} ns", line.cut_ns()));
                     cut_count.store(line.cut(), Ordering::Relaxed);
                     dropped_time.store(line.cut_ns(), Ordering::Release);
                 }
@@ -373,16 +365,6 @@ impl Encoder {
             while let Ok((at, block)) = arx.recv() {
                 let at = at.saturating_sub(dropped_time.load(Ordering::Acquire));
                 let fit = line.place(at, block.len() / channels);
-                if fit.silence > 0 || fit.skip > 0 || line.written() <= 2 * 960 {
-                    clock::trace(|| {
-                        format!(
-                            "encoder port={port} sound at={at} origin={origin} silence={} skip={} written={}",
-                            fit.silence,
-                            fit.skip,
-                            line.written()
-                        )
-                    });
-                }
                 bytes.clear();
                 bytes.extend(block[fit.skip * channels..].iter().flat_map(|v| v.to_le_bytes()));
                 if write_silence(&mut sock, fit.silence, channels)
@@ -451,11 +433,7 @@ impl Encoder {
     pub fn push_audio(&self, s: Vec<i16>, at: u64) {
         if let Some(tx) = &self.audio {
             let samples = (s.len() / (self.pick.count.max(1) as usize * 2)) as u64;
-            let sent = tx.try_send((at, s)).is_ok();
-            if !sent {
-                clock::trace(|| format!("encoder {} sound block dropped at={at}", self.label));
-            }
-            let counter = if sent { &self.audio_sent } else { &self.audio_dropped };
+            let counter = if tx.try_send((at, s)).is_ok() { &self.audio_sent } else { &self.audio_dropped };
             counter.fetch_add(samples, Ordering::Relaxed);
         }
     }
