@@ -34,6 +34,8 @@ const RETRY: Duration = Duration::from_secs(2);
 /// Up to this far behind, blocks run back to back so that none is missing;
 /// further, the time is given up as silence in recordings.
 const CATCH_UP: u64 = clock::NS / 2;
+/// A block made this late is the sound loop catching up: half a block.
+const HURRIED: u64 = clock::NS * FRAMES as u64 / AUDIO_RATE as u64 / 2;
 
 struct DeviceOut {
     ring: Arc<Ring>,
@@ -387,9 +389,12 @@ impl Engine {
             self.feed_calls(&mix, &buses, (&dry, &own), &mut back);
             rack.idle();
 
-            let step = pace.advance(clock::now(), CATCH_UP);
-            // Blocks run back to back to catch up: not a sender's hold-up.
-            (skipped, hurried) = (step.skipped, step.wait.is_zero());
+            let now = clock::now();
+            let step = pace.advance(now, CATCH_UP);
+            // Blocks run back to back to catch up, half a block late or more:
+            // what the inputs lack then is the loop's doing, not a sender's
+            // hold-up. A sleep that overshot a little is not that.
+            (skipped, hurried) = (step.skipped, pace.late_by(now) > HURRIED);
             thread::sleep(step.wait);
         }
         rack.stop();

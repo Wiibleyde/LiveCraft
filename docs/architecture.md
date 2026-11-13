@@ -28,12 +28,13 @@ sources show as it arrives. The speed only ever moves by a few dozen ppm at a ti
 pitch, and follows up to about 0.1 %; a sender further off is cut back to the margin now and then, or
 given it back as a moment of silence. When the network or the page holds up an NDI or OMT sender or a
 guest, its pictures stop, then jump to the latest: the sound that comes late is skipped the same way,
-as much as the silence played meanwhile, so the two stay together instead of the sound trailing for
-a minute. A burst of more than a quarter of a second is cut back as it lands. A block of sound is
-made at the start of the time it stands for and a picture after it is composed, so at any moment the
-sound is ahead. A stopped recording therefore keeps being fed, out of sight, until both reach the first
-picture boundary after the stop; only what fails to come within a second is padded. Closing the program
-waits for that, and for every file still being finished. Streams stop at once.
+as much as the silence played meanwhile, so the two stay together instead of the sound trailing for a
+minute; sound lost on the way is not made up for. A burst of a quarter of a second beyond its usual
+level is cut back as it lands. A block of sound is made at the start of the time it stands for and a
+picture after it is composed, so at any moment the sound is ahead. A stopped recording therefore keeps
+being fed, out of sight, until both reach the first picture boundary after the stop; only what fails to
+come within a second is padded. Closing the program waits for that, and for every file still being
+finished. Streams stop at once.
 
 ## Files
 
