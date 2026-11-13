@@ -209,8 +209,9 @@ pub struct Sound {
     lead: usize,
     /// The delay of the last block, in frames.
     delay: Option<usize>,
-    /// The last block ended in that silence.
-    quiet: bool,
+    /// Frames of sound still to fade in after that silence, which may be
+    /// more than what is left of the block it came back in.
+    fade_in: usize,
 }
 
 impl Sound {
@@ -283,15 +284,17 @@ impl Sound {
         let Some(out) = out else { return };
         out[..quiet].fill(0.0);
         out[quiet..].iter_mut().zip(sound).for_each(|(o, s)| *o = s);
-        if (quiet > 0 || self.quiet) && quiet < n {
-            let frames = SEAM.min((n - quiet) / 2);
-            for (k, pair) in out[quiet..quiet + frames * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
-                let t = (k + 1) as f32 / SEAM as f32;
-                pair[0] *= t;
-                pair[1] *= t;
-            }
+        if quiet > 0 {
+            self.fade_in = SEAM;
         }
-        self.quiet = quiet == n;
+        let frames = self.fade_in.min((n - quiet) / 2);
+        let done = SEAM - self.fade_in;
+        for (k, pair) in out[quiet..quiet + frames * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            let t = (done + k + 1) as f32 / SEAM as f32;
+            pair[0] *= t;
+            pair[1] *= t;
+        }
+        self.fade_in -= frames;
     }
 
     /// Samples held, silence still to play included.
@@ -570,10 +573,14 @@ mod tests {
         let mut s = Sound::default();
         let mut out = vec![0f32; BLOCK];
         let mut heard: Vec<f32> = Vec::new();
-        for b in 0..90u64 {
+        // The second increase ends its silence 260 frames before the end of
+        // a block: the fade carries on into the next one.
+        for b in 0..150u64 {
             let delay = match b {
                 0..30 => 960,
                 30..60 => 960 + 2880 + 333,
+                60..90 => 300,
+                90..120 => 300 + 2880 + 700,
                 _ => 300,
             };
             s.step(Some(&tone(b)), 0, delay, &mut out);

@@ -231,6 +231,8 @@ impl Engine {
             let mut s = self.state.lock().unwrap();
             s.project.inputs.push(input.clone());
             s.version += 1;
+            // A delay brought in with its source takes only the memory left.
+            s.fit_delay(input.id);
             (s.project.out_w, s.project.out_h, s.project.fps, s.project.hardware_decoding)
         };
         let rt = sources::start(&input, w, h, fps, card);
