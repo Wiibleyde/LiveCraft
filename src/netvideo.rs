@@ -258,10 +258,11 @@ pub fn run_input(rt: &Arc<InputRt>, net: Net, source: &str, w: usize, h: usize) 
 }
 
 /// Puts received sound in the input's ring, all of it. The sender runs on its
-/// own clock: the sound loop keeps what waits there in step (`Drift`), taking
-/// a frame more or less now and then, and cutting back to its margin sound
-/// that piled up, oldest first. Dropping the newest sound here instead would
-/// leave a sender that runs a little fast behind its picture for good.
+/// own clock: the sound loop keeps what waits there in step with the pictures
+/// (`Drift::beside_pictures`), taking a frame more or less now and then, and
+/// cutting back sound that came late or piled up, oldest first, at once when
+/// a burst lands. Dropping the newest sound here instead would leave a sender
+/// that runs a little fast behind its picture for good.
 pub(crate) fn hear(s: &Sound, rs: &mut Resampler, stereo: &mut Vec<f32>, ring: &Ring) {
     to_stereo(s, rs, stereo);
     ring.push(stereo);

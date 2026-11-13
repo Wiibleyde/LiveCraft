@@ -26,8 +26,11 @@ loop learns how fast each one runs and takes a frame more or less now and then t
 waits near 10 ms, so a fast device does not fall further and further behind the picture, which these
 sources show as it arrives. The speed only ever moves by a few dozen ppm at a time, so a tone keeps its
 pitch, and follows up to about 0.1 %; a sender further off is cut back to the margin now and then, or
-given it back as a moment of silence. When a recording stops, the shorter of sound and picture is
-padded to the other, so both end together.
+given it back as a moment of silence. When the network or the page holds up an NDI or OMT sender or a
+guest, its pictures stop, then jump to the latest: the sound that comes late is skipped the same way,
+as much as the silence played meanwhile, so the two stay together instead of the sound trailing for
+a minute. A burst of more than a quarter of a second is cut back as it lands. When a recording stops,
+the shorter of sound and picture is padded to the other, so both end together.
 
 ## Files
 

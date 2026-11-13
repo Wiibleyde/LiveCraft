@@ -131,6 +131,9 @@ struct Strip {
     always_on: bool,
     /// Its sound comes at a device's or a sender's pace, not ours.
     live: bool,
+    /// Its pictures are shown as they arrive, and its sound is kept with
+    /// them through hold-ups (`Drift::beside_pictures`).
+    beside: bool,
     /// A stream fetched as fast as its sound is taken, which can run ahead
     /// and wait for room.
     may_wait: bool,
@@ -169,6 +172,7 @@ impl Engine {
                 solo: s.solo.contains(&i.id),
                 always_on: is_always_on(&i.kind),
                 live: is_live(&i.kind),
+                beside: beside_pictures(&i.kind),
                 may_wait: matches!(&i.kind, Kind::Network { url, .. } if may_run_ahead(url)),
                 call: match i.kind {
                     Kind::VideoCall { return_sound, .. } => Some(return_sound),
@@ -229,7 +233,7 @@ impl Engine {
         let mut devices: HashMap<String, Slot> = HashMap::new();
         let mut chains: HashMap<u64, Chain> = HashMap::new();
         let mut gains: HashMap<u64, f32> = HashMap::new();
-        let mut drifts: HashMap<u64, Drift> = HashMap::new();
+        let mut drifts: HashMap<(u64, bool), Drift> = HashMap::new();
         // What each Video Delay holds of its source's sound, and the blocks
         // its sources made this turn, after their own treatment.
         let mut lines: HashMap<u64, delay::Sound> = HashMap::new();
@@ -248,7 +252,7 @@ impl Engine {
         let mut back = vec![0f32; BLOCK];
         let mut rack = Rack::new(&self.plugins);
         let mut pace = Pace::new(clock::now(), (AUDIO_RATE / FRAMES) as u32);
-        let mut skipped = 0;
+        let (mut skipped, mut hurried) = (0, false);
         while !self.quit.load(Ordering::Relaxed) {
             let mix = self.read_mix();
             rack.refresh();
@@ -256,7 +260,9 @@ impl Engine {
             solo.fill(0.0);
             chains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             gains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
-            drifts.retain(|id, _| mix.strips.iter().any(|s| s.id == *id && s.live));
+            drifts.retain(|(id, beside), _| {
+                mix.strips.iter().any(|s| s.id == *id && s.live && s.beside == *beside)
+            });
             own.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             own.values_mut().for_each(|v| v.fill(0.0));
             // Another project's delays have the last one's numbers, not its sound.
@@ -282,10 +288,17 @@ impl Engine {
                     }
                     // Time the loop gave up went by for every input too: a file's
                     // sound stays with its picture, a live input drops what aged.
-                    let take = match strip.live.then(|| drifts.entry(strip.id).or_default()) {
+                    let fresh = || if strip.beside { Drift::beside_pictures() } else { Drift::default() };
+                    let take = match strip
+                        .live
+                        .then(|| drifts.entry((strip.id, strip.beside)).or_insert_with(fresh))
+                    {
                         Some(drift) => {
                             if skipped > 0 {
                                 drift.resync();
+                            }
+                            if hurried {
+                                drift.hurry();
                             }
                             drift.take(ring.queued(), FRAMES, held(ring, strip.may_wait))
                         }
@@ -374,7 +387,8 @@ impl Engine {
             rack.idle();
 
             let step = pace.advance(clock::now(), CATCH_UP);
-            skipped = step.skipped;
+            // Blocks run back to back to catch up: not a sender's hold-up.
+            (skipped, hurried) = (step.skipped, step.wait.is_zero());
             thread::sleep(step.wait);
         }
         rack.stop();
@@ -527,6 +541,15 @@ fn is_live(kind: &Kind) -> bool {
             | Kind::Omt { .. }
             | Kind::VideoCall { .. }
     )
+}
+
+/// Sound sent beside pictures shown as they arrive, by an NDI or OMT sender or
+/// a video call guest: after a hold-up, its late sound is skipped as its
+/// pictures are. A network stream's pictures come through ffmpeg, which may
+/// deliver its sound a third of a second at a time: it is kept as a
+/// microphone is.
+fn beside_pictures(kind: &Kind) -> bool {
+    matches!(kind, Kind::Ndi { .. } | Kind::Omt { .. } | Kind::VideoCall { .. })
 }
 
 /// Whether a stream is fetched as fast as its sound is taken, as a playlist
@@ -798,20 +821,23 @@ mod tests {
     }
 
     /// Every input whose sound comes at a pace other than ours is kept in
-    /// step, and always runs; a file or the test tone, timed by our clock, is not.
+    /// step, and always runs; a file or the test tone, timed by our clock, is
+    /// not. Only those whose sound comes beside their pictures skip what a
+    /// hold-up brings late; microphones and streams are kept as they were.
     #[test]
     fn sound_on_another_clock_is_kept_in_step() {
         let source = String::from("Régie (Caméra 1)");
         let url = String::from("srt://h:9000");
-        for live in [
-            Kind::Microphone { device: "Micro".into() },
-            Kind::SystemAudio,
-            Kind::Network { url, buffer_ms: 0 },
-            Kind::Ndi { source: source.clone() },
-            Kind::Omt { source },
-            crate::call::new_call(),
+        for (live, beside) in [
+            (Kind::Microphone { device: "Micro".into() }, false),
+            (Kind::SystemAudio, false),
+            (Kind::Network { url, buffer_ms: 0 }, false),
+            (Kind::Ndi { source: source.clone() }, true),
+            (Kind::Omt { source }, true),
+            (crate::call::new_call(), true),
         ] {
             assert!(is_live(&live) && is_always_on(&live), "{live:?}");
+            assert_eq!(beside_pictures(&live), beside, "{live:?}");
         }
         for ours in [Kind::Tone, Kind::AudioFile { path: "a.wav".into(), looped: false }] {
             assert!(!is_live(&ours), "{ours:?}");
@@ -845,7 +871,7 @@ mod tests {
         ring: &Ring,
         mut deliver: impl FnMut(&[f32], &Ring),
     ) -> Show {
-        let mut drift = Drift::default();
+        let mut drift = Drift::beside_pictures();
         let (mut raw, mut out) = ([0f32; BLOCK + 2], [0f32; BLOCK]);
         let mut dice = 11u64;
         let mut roll = |n: u64| {

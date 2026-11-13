@@ -242,6 +242,10 @@ pub struct Drift {
     /// The part of a frame not taken yet.
     owed: f64,
     resync: bool,
+    /// The next block is made behind time, the sound loop catching up.
+    hurried: bool,
+    /// Only for sound sent beside pictures shown as they arrive.
+    beside: Option<Beside>,
 }
 
 impl Default for Drift {
@@ -255,15 +259,161 @@ impl Default for Drift {
             adjust: 0.0,
             owed: 0.0,
             resync: false,
+            hurried: false,
+            beside: None,
+        }
+    }
+}
+
+/// Sound waiting beyond this, beside pictures shown as they arrive, is cut
+/// back at once rather than at the end of the second: a burst after a network
+/// stall would otherwise be heard up to a second behind its pictures.
+const MOST_WAITING: i64 = AUDIO_RATE as i64 / 4; // 250 ms
+/// Blocks after running short before what waits says whether the margin came
+/// back: a delivery or two.
+const SETTLING: u32 = 10;
+
+/// What `Drift` also watches of sound sent beside pictures that are shown as
+/// they arrive, as an NDI or OMT sender's or a video call guest's are. When
+/// the network or the page holds such a source up, its pictures stop, then
+/// jump to the latest; meanwhile its sound ran short and silence was played.
+/// The sound that then comes late is skipped as its pictures were, so the two
+/// stay together: heard, it would trail them for a minute or more, and the
+/// margin rebuilt on top of it as silence would cost a second gap. A source
+/// held up again within `MEMORY` seconds needs that margin, and keeps it.
+struct Beside {
+    /// The most that waited beyond a block, in this window and in the last one
+    /// that ran normally: where the ring usually is just after a delivery.
+    high: i64,
+    usual_high: i64,
+    /// Frames of silence played for sound that had not come, to skip if it
+    /// comes late.
+    behind: i64,
+    /// The hold-up under way is the first for a while: its late sound is skipped.
+    skipping: bool,
+    /// Blocks since the ring last ran short, the sound loop being on time.
+    since_short: u32,
+    /// This window ran short, and the least waiting since it last did.
+    short: bool,
+    low_after: i64,
+    /// Whether the margin came back was left for this window to say.
+    deferred: bool,
+}
+
+impl Default for Beside {
+    fn default() -> Self {
+        Self {
+            high: 0,
+            usual_high: 0,
+            behind: 0,
+            skipping: false,
+            since_short: u32::MAX,
+            short: false,
+            low_after: i64::MAX,
+            deferred: false,
+        }
+    }
+}
+
+impl Beside {
+    /// Where the ring usually is just after a delivery: cutting back further
+    /// at an unlucky moment would make it run short before the next one.
+    fn top(&self) -> i64 {
+        self.usual_high.max(SPARE_TARGET)
+    }
+
+    /// What to skip now of what waits beyond the block, `spare`: of late sound,
+    /// as much as the silence played for it, down to the margin, which puts the
+    /// sound back where it was before the hold-up; and beyond `MOST_WAITING`,
+    /// all down to where the ring usually is. Nothing while the sound loop
+    /// catches up: what waits is what it is behind on.
+    fn skip(&mut self, spare: i64, hurried: bool) -> i64 {
+        let skip = if hurried {
+            0
+        } else if spare > MOST_WAITING {
+            self.behind = 0;
+            spare - self.top()
+        } else {
+            self.behind.min(spare - SPARE_TARGET)
+        };
+        if skip > 0 {
+            self.behind = (self.behind - skip).max(0);
+        } else if !hurried {
+            // A burst after a hold-up says nothing of the usual rhythm.
+            self.high = self.high.max(spare);
+        }
+        skip.max(0)
+    }
+
+    /// At the end of a window whose least waiting was `low`: whether it only
+    /// ran short for a moment, its sound back since, which is a hold-up and
+    /// says nothing of the source's speed nor of a margin too thin. Running
+    /// short just before the end, it is left to the next window to say.
+    fn window_done(&mut self, low: i64) -> bool {
+        let passing = if !self.short {
+            false
+        } else if self.since_short >= SETTLING {
+            self.low_after >= SPARE_TARGET / 2
+        } else {
+            // Waited for once; still running short, it lacks a margin.
+            !std::mem::replace(&mut self.deferred, true)
+        };
+        if !self.short && (0..=SPARE_CUT).contains(&low) {
+            self.usual_high = self.high;
+        }
+        self.high = 0;
+        if !self.short || self.since_short >= SETTLING || !passing {
+            (self.short, self.deferred) = (false, false);
+        }
+        passing
+    }
+
+    /// After a block took `frames` of the `have` waiting, `spare` beyond it.
+    fn taken(&mut self, have: i64, frames: usize, spare: i64, hurried: bool) {
+        let short = frames as i64 - have;
+        if short > 0 {
+            (self.short, self.low_after) = (true, i64::MAX);
+            // Running short while the sound loop catches up is its doing.
+            if !hurried {
+                // Blocks short in a row are one hold-up.
+                if self.since_short > 2 {
+                    self.skipping = self.since_short > MEMORY as u32 * WINDOW;
+                }
+                self.since_short = 0;
+                // Once its usual rhythm is known: at the start nothing came
+                // late, the source had not begun.
+                if self.skipping && self.usual_high > 0 {
+                    self.behind += short;
+                }
+            }
+        } else {
+            self.low_after = self.low_after.min(spare);
+            self.since_short = self.since_short.saturating_add(1);
+            // Sound that has not come within a second was lost, not late.
+            if self.since_short > WINDOW {
+                self.behind = 0;
+            }
         }
     }
 }
 
 impl Drift {
+    /// For sound sent beside pictures shown as they arrive: NDI, OMT and video
+    /// call guests. See `Beside`.
+    pub fn beside_pictures() -> Self {
+        Self { beside: Some(Beside::default()), ..Self::default() }
+    }
+
     /// After the sound loop skipped ahead, whatever waited is old: the next
     /// block cuts back to the margin straight away.
     pub fn resync(&mut self) {
         self.resync = true;
+    }
+
+    /// The next block is made behind time, as the sound loop catches up after
+    /// a stall: the sound it finds waiting, or lacks, is not the source's doing.
+    pub fn hurry(&mut self) {
+        self.hurried = true;
     }
 
     /// `queued` is what the input's ring holds before taking a block of
@@ -271,13 +421,23 @@ impl Drift {
     /// streaming a recording faster than it plays does: that is sound still to
     /// come, like a file's, and none of it is cut.
     pub fn take(&mut self, queued: usize, block: usize, held: bool) -> Take {
-        let spare = queued as i64 - block as i64;
+        let mut spare = queued as i64 - block as i64;
         let mut take = Take { discard: 0, frames: block, silence: 0 };
+        let hurried = std::mem::take(&mut self.hurried);
         if std::mem::take(&mut self.resync) && !held {
             // The device's clock did not change: its speed is kept.
             self.restart_window(SPARE_TARGET);
-            take.discard = (spare - SPARE_TARGET).max(0) as usize;
+            let keep = self.beside.as_ref().map_or(SPARE_TARGET, Beside::top);
+            take.discard = (spare - keep).max(0) as usize;
+            if let Some(b) = &mut self.beside {
+                b.behind = 0;
+            }
             return take;
+        }
+        if let Some(b) = self.beside.as_mut().filter(|_| !held) {
+            let skip = b.skip(spare, hurried);
+            take.discard = skip as usize;
+            spare -= skip;
         }
         self.low = self.low.min(spare);
         self.held |= held;
@@ -285,11 +445,15 @@ impl Drift {
         if self.seen == WINDOW {
             let (low, held) = (self.low, self.held);
             (self.low, self.seen, self.held) = (i64::MAX, 0, false);
+            let passing = self.beside.as_mut().is_some_and(|b| b.window_done(low));
             if held {
                 self.adjust = 0.0;
                 self.lows.clear();
+            } else if passing {
+                // Its margin is back by itself: a second silence would only
+                // be a second gap.
             } else if low > SPARE_CUT {
-                take.discard = (low - SPARE_TARGET) as usize;
+                take.discard += (low - SPARE_TARGET) as usize;
                 self.restart_window(SPARE_TARGET);
             } else if low < 0 {
                 // It ran dry, at the start or after a late delivery: that gap
@@ -298,6 +462,9 @@ impl Drift {
                 take.silence = (SPARE_TARGET as usize).min(block);
                 take.frames = block - take.silence;
                 self.restart_window(SPARE_TARGET);
+                if let Some(b) = &mut self.beside {
+                    b.behind = 0;
+                }
             } else {
                 self.lows.push(low);
                 if self.lows.len() > MEMORY {
@@ -313,6 +480,9 @@ impl Drift {
             let step = self.owed.trunc();
             self.owed -= step;
             take.frames = (block as i64 + step as i64) as usize;
+        }
+        if let Some(b) = &mut self.beside {
+            b.taken(queued as i64 - take.discard as i64, take.frames, spare, hurried);
         }
         take
     }
@@ -381,16 +551,24 @@ mod tests {
     /// How far sound strays from picture in what the encoder received.
     #[derive(Debug)]
     struct Report {
-        /// Lowest and highest offset, sound after picture, in ms.
+        /// Lowest and highest offset, sound after picture, in ms, over the
+        /// show and after its first half hour, once the speed is learnt.
         span: (f64, f64),
+        settled: (f64, f64),
         first_hour_mean: f64,
         last_hour_mean: f64,
         picture_s: f64,
         sound_s: f64,
-        /// After the first half hour: times the input was cut back to its
-        /// margin, and given silence to rebuild it.
-        cuts: u64,
-        silences: u64,
+        /// After the first half hour, each hour: times the ring ran short and
+        /// silence was played, the input was cut back or skipped ahead, and
+        /// silence was added to rebuild its margin; seconds its sound came more
+        /// than 50 ms later than it usually does, and more than 125 ms after
+        /// its picture, where people start to notice (ITU-R BT.1359).
+        gaps: f64,
+        cuts: f64,
+        silences: f64,
+        late_s: f64,
+        noticed_s: f64,
     }
 
     /// A pipe that stops reading for a moment now and then, as an encoder
@@ -428,48 +606,42 @@ mod tests {
         ppm: f64,
         /// Frames in each delivery.
         chunk: u64,
-        /// Each delivery is up to this many ms late, at random...
+        /// Each delivery is up to this many ms late, at random.
         jitter_ms: u64,
-        /// ...and one in `every` is `late_ms` late, holding up those behind it.
-        every: u64,
-        late_ms: u64,
+        /// Every 30 to 120 s, the network or the page holds a delivery up 30
+        /// to 80 ms, and those behind it with it, as Wi-Fi or a busy page does.
+        holds: bool,
         /// Frames the input's ring holds; beyond, it drops the oldest.
         ring: u64,
         /// The sender's pictures come with its sound and the mixer shows the
         /// latest, as an NDI or OMT input's do. Otherwise a picture is of the
         /// moment the mixer takes it, as a camera's or a web page's is.
         pictures: bool,
+        /// Kept in step as sound beside pictures shown as they arrive.
+        beside: bool,
     }
 
     impl Feed {
         /// A microphone delivering 10 ms at a time.
         fn microphone(ppm: f64) -> Self {
-            Self {
-                ppm,
-                chunk: 480,
-                jitter_ms: 0,
-                every: 0,
-                late_ms: 0,
-                ring: AUDIO_RATE as u64,
-                pictures: false,
-            }
+            let ring = AUDIO_RATE as u64;
+            Self { ppm, chunk: 480, jitter_ms: 0, holds: false, ring, pictures: false, beside: false }
         }
 
         /// An NDI or OMT sender at 30 pictures a second, sending the sound of
-        /// each picture with it: a few ms of network jitter, and every two
-        /// seconds or so a piece held up 40 ms, with those behind it.
+        /// each picture with it, with a few ms of network jitter.
         fn network_video(ppm: f64) -> Self {
             let ring = AUDIO_RATE as u64;
-            Self { ppm, chunk: 1600, jitter_ms: 4, every: 61, late_ms: 40, ring, pictures: true }
+            Self { ppm, chunk: 1600, jitter_ms: 4, holds: true, ring, pictures: true, beside: true }
         }
 
         /// A video call guest, as the browser receiving the call hands their
         /// sound over: 2048 frames at a time, up to 15 ms late while the page
-        /// or the connection is busy and now and then 60 ms, into a ring of
-        /// 0.3 s. Their picture is the page's, as the mixer takes it.
+        /// or the connection is busy, into a ring of 0.3 s. The page shows
+        /// their picture with the sound it plays, which it then hands over.
         fn guest(ppm: f64) -> Self {
             let ring = AUDIO_RATE as u64 * 3 / 10;
-            Self { ppm, chunk: 2048, jitter_ms: 15, every: 47, late_ms: 60, ring, pictures: false }
+            Self { ppm, chunk: 2048, jitter_ms: 15, holds: true, ring, pictures: true, beside: true }
         }
     }
 
@@ -482,8 +654,9 @@ mod tests {
         delivered: u64,
         head: u64,
         queued: u64,
-        /// When the next piece lands.
+        /// When the next piece lands, and when the next hold-up comes.
         due: u64,
+        hold_at: u64,
         /// When the latest picture delivered was taken.
         picture: Option<i64>,
     }
@@ -491,8 +664,9 @@ mod tests {
     impl Source {
         fn new(feed: Feed) -> Self {
             let rate = AUDIO_RATE as f64 * (1.0 + feed.ppm * 1e-6);
+            let (dice, hold_at) = (Dice(7), 60 * NS);
             let mut source =
-                Self { feed, rate, dice: Dice(7), delivered: 0, head: 0, queued: 0, due: 0, picture: None };
+                Self { feed, rate, dice, delivered: 0, head: 0, queued: 0, due: 0, hold_at, picture: None };
             source.due = source.captured(feed.chunk) as u64;
             source
         }
@@ -511,14 +685,13 @@ mod tests {
                 let over = self.queued.saturating_sub(feed.ring);
                 (self.head, self.queued) = (self.head + over, self.queued - over);
                 self.picture = Some(self.captured(self.delivered));
-                let late = if feed.every > 0 && (self.delivered / feed.chunk).is_multiple_of(feed.every) {
-                    feed.late_ms * MS
-                } else if feed.jitter_ms > 0 {
-                    self.dice.below(feed.jitter_ms * MS)
-                } else {
-                    0
-                };
-                self.due = self.due.max(self.captured(self.delivered + feed.chunk) as u64 + late);
+                let next = self.captured(self.delivered + feed.chunk) as u64;
+                let mut late = if feed.jitter_ms > 0 { self.dice.below(feed.jitter_ms * MS) } else { 0 };
+                if feed.holds && next >= self.hold_at {
+                    late += (30 + self.dice.below(51)) * MS;
+                    self.hold_at = next + (30 + self.dice.below(91)) * NS;
+                }
+                self.due = self.due.max(next + late);
             }
         }
 
@@ -547,8 +720,8 @@ mod tests {
 
         let (mut sound_pace, mut picture_pace) = (Pace::new(0, 50), Pace::new(0, FPS));
         let (mut sound_at, mut picture_at) = (0u64, 0u64);
-        let mut drift = Drift::default();
-        let mut resynced = false;
+        let mut drift = if feed.beside { Drift::beside_pictures() } else { Drift::default() };
+        let (mut resynced, mut hurried) = (false, false);
         let (mut short_stall, mut long_stall) = (1201 * NS, 4001 * NS);
 
         let mut pictures = Pipe { queue: VecDeque::new(), cap: 6 };
@@ -557,22 +730,30 @@ mod tests {
         let mut samples = SampleLine::new(origin);
         let mut picture_lag: Option<i64> = None;
 
-        let mut span = (f64::MAX, f64::MIN);
+        let (mut span, mut settled_span) = ((f64::MAX, f64::MIN), (f64::MAX, f64::MIN));
         let mut hours_seen: Vec<(f64, u64)> = vec![(0.0, 0); hours as usize];
-        let (mut cuts, mut silences) = (0, 0);
+        let (mut gaps, mut cuts, mut silences) = (0u64, 0u64, 0u64);
+        let mut offsets: Vec<f32> = Vec::new();
+        let (mut was_short, mut was_cut) = (false, false);
 
         while sound_at.min(picture_at) < end {
             if sound_at <= picture_at {
                 let t = sound_at;
                 source.deliver_until(t);
+                if hurried {
+                    drift.hurry();
+                }
                 let take = drift.take(source.queued as usize, BLOCK, false);
+                let short = take.frames as u64 > source.queued.saturating_sub(take.discard as u64);
+                // A cut right after the sound loop skipped ahead is not the
+                // source's doing.
+                let cut = take.discard > 0 && !resynced;
                 if t >= settled {
-                    // A cut right after the sound loop skipped ahead is not
-                    // the source's doing.
-                    cuts += (take.discard > 0 && !resynced) as u64;
+                    gaps += (short && !was_short) as u64;
+                    cuts += (cut && !was_cut) as u64;
                     silences += (take.silence > 0) as u64;
                 }
-                resynced = false;
+                (was_short, was_cut, resynced) = (short, cut, false);
                 let first = source.take(&take);
 
                 let mut done = t + 200_000;
@@ -597,8 +778,14 @@ mod tests {
                         let heard = (origin + pos * NS / AUDIO_RATE as u64) as i64 - source.captured(frame);
                         let offset = (heard - picture) as f64 / MS as f64;
                         span = (span.0.min(offset), span.1.max(offset));
+                        if at >= settled {
+                            settled_span = (settled_span.0.min(offset), settled_span.1.max(offset));
+                        }
                         let hour = &mut hours_seen[(at / (3600 * NS)) as usize];
                         *hour = (hour.0 + offset, hour.1 + 1);
+                        if at >= settled {
+                            offsets.push(offset as f32);
+                        }
                     }
                 }
                 let step = sound_pace.advance(done, 500 * MS);
@@ -606,6 +793,7 @@ mod tests {
                     drift.resync();
                     resynced = true;
                 }
+                hurried = step.wait.is_zero();
                 sound_at = done + step.wait.as_nanos() as u64 + dice.below(1_500_000);
             } else {
                 let t = picture_at;
@@ -629,14 +817,23 @@ mod tests {
             }
         }
         let mean = |h: &(f64, u64)| h.0 / h.1.max(1) as f64;
+        let per_hour = |n: u64| n as f64 / (hours as f64 - 0.5);
+        let blocks_s = |n: usize| per_hour(n as u64) * BLOCK as f64 / AUDIO_RATE as f64;
+        let mut sorted = offsets.clone();
+        sorted.sort_by(f32::total_cmp);
+        let usual = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
         Report {
             span,
+            settled: settled_span,
             first_hour_mean: mean(&hours_seen[0]),
             last_hour_mean: mean(&hours_seen[hours as usize - 1]),
             picture_s: frames.written() as f64 / FPS as f64,
             sound_s: samples.written() as f64 / AUDIO_RATE as f64,
-            cuts,
-            silences,
+            gaps: per_hour(gaps),
+            cuts: per_hour(cuts),
+            silences: per_hour(silences),
+            late_s: blocks_s(offsets.iter().filter(|&&o| o > usual + 50.0).count()),
+            noticed_s: blocks_s(offsets.iter().filter(|&&o| o > 125.0).count()),
         }
     }
 
@@ -656,14 +853,6 @@ mod tests {
         check_within("microphone", r, frame_ms, 2.0 * frame_ms + 20.0);
     }
 
-    /// How far a feed's sound may come after its picture once its speed is
-    /// followed: as a microphone's, plus a whole delivery and the most it is
-    /// late, which the margin learns to cover.
-    fn behind_ms(feed: Feed) -> f64 {
-        let piece_ms = feed.chunk as f64 * 1000.0 / AUDIO_RATE as f64;
-        2000.0 / FPS as f64 + 20.0 + piece_ms + (feed.late_ms + feed.jitter_ms) as f64
-    }
-
     const FEEDS: [(&str, fn(f64) -> Feed); 2] = [("NDI/OMT", Feed::network_video), ("guest", Feed::guest)];
 
     #[test]
@@ -677,40 +866,87 @@ mod tests {
     }
 
     /// An NDI or OMT sender, or the browser a guest is heard through, whose
-    /// clock is 0.1 % off ours, further than real devices drift: its speed is
-    /// followed for hours, with its uneven deliveries. It is never cut back,
-    /// and runs dry no more often than the same feed on our clock does.
+    /// clock is 0.1 % off ours, further than real devices drift, held up 30 to
+    /// 80 ms every minute or so: its speed is followed for hours and its sound
+    /// stays in lip sync. Never more than 150 ms after its picture, and less
+    /// than a second an hour beyond the 125 ms where people notice (ITU-R
+    /// BT.1359), or 50 ms later than usual: a hold-up's late sound is skipped
+    /// as its pictures are. Right after one, sound is back to now a picture
+    /// before the pictures are, so it may come up to two pictures early.
     #[test]
-    fn hours_of_network_video_or_a_guest_a_thousandth_off_stay_in_step() {
+    fn hours_of_network_video_or_a_guest_a_thousandth_off_stay_in_lip_sync() {
         let frame_ms = 1000.0 / FPS as f64;
         for (name, feed) in FEEDS {
-            let steady = simulate(6, feed(0.0));
             for ppm in [1000.0, -1000.0] {
                 let r = simulate(6, feed(ppm));
-                check_within(&format!("{name} {ppm} ppm"), &r, frame_ms, behind_ms(feed(ppm)));
-                assert!(r.cuts == 0 && r.silences <= steady.silences + 10, "{name} {ppm}: {r:?}, {steady:?}");
+                let what = format!("{name} {ppm} ppm");
+                check_within(&what, &r, 2.0 * frame_ms, 150.0);
+                assert!(r.noticed_s < 1.0 && r.late_s < 10.0, "{what}: {r:?}");
+                assert!(r.silences < 6.0, "{what}: {r:?}");
             }
+        }
+    }
+
+    /// The same hold-ups on our clock: each costs the silence it played and
+    /// nothing after, where kept as a microphone is, its late sound trailed
+    /// the pictures and the margin was rebuilt on top as a second silence.
+    #[test]
+    fn a_hold_up_beside_pictures_costs_one_gap_not_a_minute_behind() {
+        for (name, feed) in FEEDS {
+            let now = simulate(6, feed(0.0));
+            let before = simulate(6, Feed { beside: false, ..feed(0.0) });
+            let what = format!("{name}: {now:?} against {before:?}");
+            assert!(2.0 * (now.gaps + now.silences) < before.gaps + before.silences, "{what}");
+            assert!(now.late_s * 10.0 < before.late_s && now.noticed_s < 1.0, "{what}");
+            assert!(now.settled.1 < before.settled.1, "{what}");
         }
     }
 
     /// 1 % off is more than a frame per block can follow: a fast sender is
     /// cut back to the margin now and then, and a slow one given it back as
-    /// a moment of silence. Hours later its sound is still where it was, no
-    /// more than the margin's limit further behind than a followed one.
+    /// a moment of silence. That is not lip sync, which such a sender cannot
+    /// keep: hours later its sound must only still be where it was, and never
+    /// pile up past a quarter of a second.
     #[test]
     fn hours_of_network_video_or_a_guest_a_hundredth_off_stay_near_the_margin() {
-        let frame_ms = 1000.0 / FPS as f64;
-        let most = SPARE_CUT as f64 * 1000.0 / AUDIO_RATE as f64;
         for (name, feed) in FEEDS {
             for ppm in [10_000.0, -10_000.0] {
                 let r = simulate(6, feed(ppm));
                 // A cut while the sound loop catches up after a stall puts
                 // sound of now in a block stamped earlier: for a moment, it
                 // comes before its picture.
-                check_within(&format!("{name} {ppm} ppm"), &r, 2.0 * frame_ms, behind_ms(feed(ppm)) + most);
-                assert!(r.cuts + r.silences > 0, "{name} {ppm}: {r:?}");
+                check_within(&format!("{name} {ppm} ppm"), &r, 100.0, 250.0);
+                assert!(r.cuts + r.silences > 0.0, "{name} {ppm}: {r:?}");
             }
         }
+    }
+
+    /// After a network stall the ring fills at once, up to all it holds. Sound
+    /// beside pictures is cut back to the margin as it lands, rather than
+    /// heard up to a second behind them until the end of the second.
+    #[test]
+    fn a_burst_after_a_stall_is_cut_back_at_once() {
+        let most = |mut d: Drift| {
+            let (mut queued, mut sent, mut most) = (0usize, 0usize, 0usize);
+            for n in 0..50 * 6 {
+                // Thirty 1600-frame pieces a second, held up for 1.5 s from
+                // 3 s on, then all at once, as much as the ring holds.
+                if !(150..225).contains(&n) {
+                    let due = (n + 1) * 30 / 50;
+                    queued = (queued + (due - sent) * 1600).min(AUDIO_RATE);
+                    sent = due;
+                }
+                let take = d.take(queued, BLOCK, false);
+                queued -= (take.discard + take.frames).min(queued);
+                if n >= 225 {
+                    most = most.max(queued);
+                }
+            }
+            most * 1000 / AUDIO_RATE
+        };
+        let (beside, kept) = (most(Drift::beside_pictures()), most(Drift::default()));
+        assert!(beside < 80, "{beside} ms waiting");
+        assert!(kept > 250, "as a microphone, {kept} ms waiting");
     }
 
     #[test]
