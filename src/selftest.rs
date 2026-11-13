@@ -172,19 +172,40 @@ fn loop_back(net: Net) -> Result<String, String> {
             }
             sleep(Duration::from_millis(50));
         }
-        sleep(Duration::from_millis(700));
+        let waiting = least_waiting(&rt, Duration::from_secs(3))
+            .map_err(|e| format!("{label} : son de « {source} » {e}"))?;
         let connections = engine.net.lock().unwrap().first().map_or(0, |o| o.connections());
         if connections == 0 {
             return Err(format!("{label} : la sortie ne compte aucune connexion"));
         }
         Ok(format!(
-            "{label} : « {source} » revient rouge en {} ms, crête son {:.2}, {connections} connexion(s)",
+            "{label} : « {source} » revient rouge en {} ms, crête son {:.2}, attente {waiting} ms au plus bas, \
+             {connections} connexion(s)",
             seen_at.unwrap_or_default().as_millis(),
             rt.peak()
         ))
     })();
     engine.shutdown();
     result
+}
+
+/// The least sound waiting at a live input over `span`, in ms. Its sender
+/// runs on its own clock, and the sound loop keeps what waits near its margin
+/// (`Drift`), cutting back at the end of each second sound that piled up: over
+/// a few seconds, it must come down to that margin at least once.
+pub(crate) fn least_waiting(rt: &crate::sources::InputRt, span: Duration) -> Result<usize, String> {
+    let ring = rt.audio.as_ref().ok_or("sans son")?;
+    let started = Instant::now();
+    let mut least = usize::MAX;
+    while started.elapsed() < span {
+        least = least.min(ring.queued());
+        sleep(Duration::from_millis(5));
+    }
+    let ms = least * 1000 / 48_000;
+    if ms > 150 {
+        return Err(format!("en retard : jamais moins de {ms} ms en attente en {} s", span.as_secs()));
+    }
+    Ok(ms)
 }
 
 fn check(dir: &str) -> Result<String, String> {
