@@ -1003,6 +1003,22 @@ settings.ffmpeg_hw_recheck = Check again
 settings.ffmpeg_bad_variable = The {name} variable is set ({value}) but does not name a usable ffmpeg: give the full path of the ffmpeg file or of its folder, or remove the variable, then restart LiveCraft.
 settings.ffmpeg_no_answer = ffmpeg was found but does not answer: the file may be damaged or libraries (DLLs) may be missing. Reinstall it, or give another ffmpeg in the {name} variable, then restart LiveCraft.
 
+# src/delay.rs, src/ui/input_settings.rs (Video Delay)
+model.kind.video_delay = Video delay
+inputs.add_video_delay = Video delay
+inputs.add_video_delay_tip = Shows another input again a little later, with its sound
+inputs.video_delay_name = Video delay
+input_settings.delay.source = Delayed input
+input_settings.delay.source_combo = Delay source
+input_settings.delay.time = Delay
+input_settings.delay.longest = At most {seconds} s for this delay at {w}×{h}, {fps} frames a second, with the memory the others leave.
+input_settings.delay.memory = All video delays keep up to {used} GB of pictures, of {limit} GB at most.
+input_settings.delay.sound = The sound is the delayed input's own, after its settings and before its fader. A camera's microphone is an input of its own: give it a delay too.
+functions.not_a_delay = This input is not a video delay
+functions.delay_loops = This delay would show itself: choose another input
+functions.edit_loops = Change refused: video delay “{name}” would show itself
+inputs.undo_unlinked = Left without a source, as it would have shown itself: {names}
+
 # src/ui/updates.rs
 update.available = LiveCraft {version} is available
 update.open_page = Open this version's page

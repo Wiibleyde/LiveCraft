@@ -1003,6 +1003,22 @@ settings.ffmpeg_hw_recheck = Vérifier à nouveau
 settings.ffmpeg_bad_variable = La variable {name} est définie ({value}) mais ne désigne pas un ffmpeg utilisable : indiquez le chemin complet du fichier ffmpeg ou de son dossier, ou supprimez la variable, puis relancez LiveCraft.
 settings.ffmpeg_no_answer = ffmpeg a été trouvé mais ne répond pas : le fichier est peut-être abîmé ou il manque des bibliothèques (DLL). Réinstallez-le, ou indiquez un autre ffmpeg dans la variable {name}, puis relancez LiveCraft.
 
+# src/delay.rs, src/ui/input_settings.rs (Video Delay)
+model.kind.video_delay = Retard vidéo
+inputs.add_video_delay = Retard vidéo
+inputs.add_video_delay_tip = Montre une autre entrée un peu plus tard, avec son son
+inputs.video_delay_name = Retard vidéo
+input_settings.delay.source = Entrée retardée
+input_settings.delay.source_combo = Source du retard
+input_settings.delay.time = Retard
+input_settings.delay.longest = Au plus {seconds} s pour ce retard en {w}×{h} à {fps} images/s, avec la mémoire que laissent les autres.
+input_settings.delay.memory = Tous les retards vidéo gardent jusqu'à {used} Go d'images, sur {limit} Go au plus.
+input_settings.delay.sound = Le son est celui de l'entrée retardée, après ses réglages et avant son fader. Le micro d'une caméra est une entrée à part : donnez-lui un retard aussi.
+functions.not_a_delay = Cette entrée n'est pas un retard vidéo
+functions.delay_loops = Ce retard se montrerait lui-même : choisissez une autre entrée
+functions.edit_loops = Changement refusé : le retard vidéo « {name} » se montrerait lui-même
+inputs.undo_unlinked = Laissé sans source, car il se serait montré lui-même : {names}
+
 # src/ui/updates.rs
 update.available = LiveCraft {version} est disponible
 update.open_page = Ouvrir la page de cette version

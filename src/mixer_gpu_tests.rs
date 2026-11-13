@@ -281,6 +281,41 @@ fn every_transition_looks_the_same_on_the_card() {
     }
 }
 
+/// A delay keeps its source's finished picture: made on the card, it comes
+/// back to memory to be kept, and shows what the processor shows, as many
+/// ticks later.
+#[test]
+fn a_delay_of_a_scene_made_on_the_card_shows_what_the_processor_shows() {
+    let Some(painter) = card() else { return };
+    let (w, h) = (334, 190);
+    let mut d = desk(w, h);
+    const DELAY: u64 = 30;
+    let kind = Kind::VideoDelay { source: Some(ALL_SETTINGS), ms: 100 };
+    d.state.project.inputs.push(Input::new(DELAY, "Retard", kind));
+    let with_delay = || {
+        let mut r = d.rts.clone();
+        r.insert(DELAY, InputRt::new(false, true));
+        r
+    };
+    let (rts_cpu, rts_gpu) = (with_delay(), with_delay());
+    let (mut cpu, mut gpu) = (Mixer::default(), on_card(painter));
+    let mut made = Vec::new();
+    for n in 0..8u64 {
+        // A layer of the scene changes each tick.
+        d.rts[&11].publish(picture(w, h, 40 + n as u32, false));
+        let plan = d.state.plan(Instant::now(), Vec::new());
+        let at = 10 * clock::NS + n * clock::NS / 30;
+        let c = Ctx { plan: &plan, rts: &rts_cpu };
+        cpu.run_delays(&c, at);
+        made.push(cpu.picture(ALL_SETTINGS, &c, 0).unwrap());
+        gpu.run_delays(&Ctx { plan: &plan, rts: &rts_gpu }, at);
+        let (a, b) = (rts_cpu[&DELAY].latest().unwrap(), rts_gpu[&DELAY].latest().unwrap());
+        assert_close(&format!("retard au temps {n}"), &a, &b);
+        let then = &made[n.saturating_sub(3) as usize];
+        assert!(Arc::ptr_eq(&a, then), "three ticks later, the picture made then");
+    }
+}
+
 /// Opening the card takes up to a second, and the picture must not wait for
 /// it: the processor composes until it is open, then the card takes over.
 #[test]
@@ -568,6 +603,52 @@ fn mixer_cost() {
             }
         }
     });
+}
+
+/// `cargo test delay_cost -- --ignored --nocapture`: what four Video Delays
+/// of four moving 1080p sources, a second each, cost the mixer thread per
+/// tick, paced at 30 frames a second as the show runs.
+#[cfg(windows)]
+#[test]
+#[ignore = "measure: run alone"]
+fn delay_cost() {
+    let (w, h, fps) = (1920, 1080, 30);
+    let mut p = Project::blank();
+    (p.out_w, p.out_h, p.fps) = (w, h, fps);
+    for k in 1..=4 {
+        p.inputs.push(Input::new(k, "Caméra", Kind::Bars));
+        p.inputs.push(Input::new(10 + k, "Retard", Kind::VideoDelay { source: Some(k), ms: 1000 }));
+    }
+    let plan = State::new(p).plan(Instant::now(), Vec::new());
+    let rts: HashMap<u64, Arc<InputRt>> =
+        (1..=4).chain(11..=14).map(|id| (id, InputRt::new(false, true))).collect();
+    let c = Ctx { plan: &plan, rts: &rts };
+    let mut m = Mixer::default();
+    let (warm, ticks) = (60u64, 300u64);
+    let period = clock::NS / fps as u64;
+    let start = clock::now();
+    let (mut took, mut worst) = (Duration::ZERO, Duration::ZERO);
+    for n in 0..warm + ticks {
+        let at = start + n * period;
+        thread::sleep(clock::instant(at).saturating_duration_since(Instant::now()));
+        // A new picture from every camera, in a buffer from the pool, as a decoder's.
+        for k in 1..=4 {
+            rts[&k].publish(Frame::new(w, h));
+        }
+        let t0 = Instant::now();
+        m.run_delays(&c, at);
+        let spent = t0.elapsed();
+        if n >= warm {
+            took += spent;
+            worst = worst.max(spent);
+        }
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    println!(
+        "4 retards 1080p30 d'une seconde : {:.3} ms par image en moyenne, {:.3} ms au pire",
+        ms(took) / ticks as f64,
+        ms(worst)
+    );
 }
 
 /// `cargo test engine_cost -- --ignored --nocapture`: the whole

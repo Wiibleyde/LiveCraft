@@ -13,6 +13,8 @@ mod canvas;
 mod clap;
 mod clock;
 mod decode;
+mod delay;
+mod delaytest;
 mod desk;
 mod dsp;
 mod dvd;
