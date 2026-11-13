@@ -327,25 +327,53 @@ impl Drift {
 #[cfg(any(windows, test))]
 pub(crate) const TONE_HZ: f32 = 1000.0;
 
-/// The tone must be there, loud enough and mostly alone.
-#[cfg(any(windows, test))]
+/// The tone must be there, loud enough, mostly alone and at its pitch: its
+/// strength is taken over the whole stretch at once, which only counts it
+/// within about 70 ppm of 1 kHz and in step with itself throughout.
+#[cfg(test)]
 pub(crate) fn judge_tone(samples: &[f32], rate: usize) -> Result<String, String> {
+    judge(samples, rate, usize::MAX)
+}
+
+/// The tone must be there, loud enough and mostly alone, as the live check
+/// hears its streams: its strength is taken 50 ms at a time, 50 periods. A
+/// live input kept in step with our clock plays up to a thousandth faster or
+/// slower (`MOST_ADJUST`), which nobody hears, and a virtual cable on a busy
+/// machine drops 10 ms now and then. Taken over the whole stretch at once,
+/// either left the tone a few percent of a sound that was nothing else
+/// (#40). Another sound, noise, or a pitch a percent off still fail.
+#[cfg(any(windows, test))]
+pub(crate) fn judge_heard_tone(samples: &[f32], rate: usize) -> Result<String, String> {
+    judge(samples, rate, rate / 20)
+}
+
+/// The tone's power, by Goertzel (the strength of one frequency without a
+/// full spectrum) over each `piece` of `samples`, against all their power.
+#[cfg(any(windows, test))]
+fn judge(samples: &[f32], rate: usize, piece: usize) -> Result<String, String> {
     // The first half second may still hold what the encoder started with.
     let samples = samples.get(rate / 2..).unwrap_or_default();
     if samples.len() < rate {
         return Err(format!("{} ms de son reçus", samples.len() * 1000 / rate));
     }
+    let piece = piece.min(samples.len());
+    let samples = &samples[..samples.len() / piece * piece];
     let power = samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32;
-    // Goertzel: the strength of one frequency, without a full spectrum.
     let k = 2.0 * (std::f32::consts::TAU * TONE_HZ / rate as f32).cos();
-    let (mut s1, mut s2) = (0f32, 0f32);
-    for &v in samples {
-        let s0 = v + k * s1 - s2;
-        s2 = s1;
-        s1 = s0;
-    }
-    let n = samples.len() as f32;
-    let tone_power = 2.0 * (s1 * s1 + s2 * s2 - k * s1 * s2) / (n * n);
+    let n = piece as f32;
+    let tone_power = samples
+        .chunks_exact(piece)
+        .map(|p| {
+            let (mut s1, mut s2) = (0f32, 0f32);
+            for &v in p {
+                let s0 = v + k * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            2.0 * (s1 * s1 + s2 * s2 - k * s1 * s2) / (n * n)
+        })
+        .sum::<f32>()
+        / (samples.len() / piece) as f32;
     let db = |p: f32| 10.0 * p.max(1e-12).log10();
     if tone_power < 1e-4 {
         return Err(format!("pas de son à {TONE_HZ} Hz : {:.0} dB au total", db(power)));
@@ -356,7 +384,11 @@ pub(crate) fn judge_tone(samples: &[f32], rate: usize) -> Result<String, String>
             tone_power / power * 100.0
         ));
     }
-    Ok(format!("tonalité {TONE_HZ} Hz à {:.0} dB", db(tone_power)))
+    Ok(format!(
+        "tonalité {TONE_HZ} Hz à {:.0} dB, {:.0} % du son",
+        db(tone_power),
+        tone_power / power * 100.0
+    ))
 }
 
 #[cfg(test)]

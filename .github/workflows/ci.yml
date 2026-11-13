@@ -166,8 +166,12 @@ jobs:
             if (-not $out.Contains($expected[$what])) { throw "--break $what failed for another reason" }
           }
           exit 0
-      - uses: actions/upload-artifact@v4
+      # What each stream sounded like and what the server and ffmpeg said, to see why a check failed.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
           name: livecheck-logs
-          path: target/livecheck*/mediamtx.log
+          path: |
+            target/livecheck*/mediamtx.log
+            target/livecheck*/*-ffmpeg.log
+            target/livecheck*/*.wav
