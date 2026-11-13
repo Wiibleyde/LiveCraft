@@ -52,6 +52,7 @@ mod text;
 mod titles;
 mod transitions;
 mod ui;
+mod update;
 mod vmix_import;
 mod widgets;
 

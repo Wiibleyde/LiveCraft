@@ -172,6 +172,11 @@ LiveCraft runs on Windows, Linux and macOS. Capture goes through FFmpeg's own de
 > The interface speaks French and English: it follows the system language, and Settings › Options
 > changes it.
 
+LiveCraft says on its status line when a newer version is out. To know, it sends one request to GitHub's
+public API a few seconds after it starts, at most once a day, carrying only its name and version. GitHub
+sees your IP address, as with any web page, and Windows may also check GitHub's certificate with its
+issuer. Settings › About turns it off.
+
 ### What is missing today
 
 - **Without a graphics card, the picture is composed on the CPU.** It holds 1080p on a desktop processor;
