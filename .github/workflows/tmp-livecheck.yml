@@ -99,6 +99,18 @@ jobs:
           Write-Host "$failed of 30 runs failed"
           if ($failed -gt 0) { exit 1 }
           exit 0
+      - name: A broken link must fail the check
+        if: always()
+        run: |
+          # Plain ASCII parts of each expected message, whatever the console encoding.
+          $expected = @{ freeze = 'image fig'; silence = 'pas de son'; drop = 'flux illisible' }
+          foreach ($what in $expected.Keys) {
+            $out = ./target/debug/livecraft.exe --livecheck "target/livecheck-$what" --break $what | Out-String
+            Write-Host "--break $what -> $out"
+            if ($LASTEXITCODE -eq 0) { throw "--break $what passed" }
+            if (-not $out.Contains($expected[$what])) { throw "--break $what failed for another reason" }
+          }
+          exit 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
