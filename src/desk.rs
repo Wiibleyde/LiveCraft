@@ -602,13 +602,16 @@ impl State {
     }
 
     /// The sources of every Video Delay: a delay records whether anyone
-    /// watches it or not, so its source is always being watched.
+    /// watches it or not, so its source is always being watched, with all
+    /// its picture is made of, a key's fill too: a page used as fill off
+    /// air would otherwise send a picture or two a second, and the delay
+    /// would record that.
     pub fn delay_sources(&self) -> HashSet<u64> {
         let sources = self.project.inputs.iter().filter_map(|i| match i.kind {
             Kind::VideoDelay { source, .. } => source,
             _ => None,
         });
-        self.with_layers(sources.collect())
+        shown_by(sources.collect(), Reach::Composed, |id| self.input(id))
     }
 
     /// Points a Video Delay at another input, or at nothing. An input that
@@ -765,6 +768,9 @@ impl State {
         let id = input.id;
         let at = closed.at.min(self.project.inputs.len());
         self.project.inputs.insert(at, input);
+        // A delay brought back keeps its source: it takes only what the
+        // delays given memory since its close leave.
+        self.fit_delay(id);
         for (owner, n, layer) in closed.layers {
             if let Some(i) = self.input_mut(owner) {
                 let n = n.min(i.layers.len());
@@ -1516,6 +1522,37 @@ mod tests {
         assert!(matches!(s.input(52).unwrap().kind, Kind::VideoDelay { ms: 0, .. }), "nothing is left");
         let runs = delays_to_run(&s.project);
         assert!(runs.iter().all(|r| r.id != 51 || (r.ms, r.pictures) == (10_000, 301)));
+
+        // The same when delay A itself is closed and brought back: it keeps
+        // its camera, and comes back with what B leaves.
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(1)));
+        s.project.inputs.push(delay(51, Some(2)));
+        assert_eq!(s.set_delay_ms(50, 10_000), Ok(10_000));
+        s.close_input(50);
+        assert_eq!(s.set_delay_ms(51, 10_000), Ok(10_000), "A gone, B takes it all");
+        let closed = s.undo.take().unwrap();
+        s.restore(closed);
+        assert_eq!(s.project.inputs.iter().position(|i| i.id == 50), Some(16), "A back ahead of B");
+        let runs = delays_to_run(&s.project);
+        let run = |id: u64| *runs.iter().find(|r| r.id == id).unwrap();
+        assert_eq!((run(51).ms, run(51).pictures), (10_000, 301), "B keeps what it holds");
+        assert_eq!((run(50).source, run(50).ms), (Some(1), 2866), "A gets what B leaves");
+    }
+
+    /// A delay records its source whole, a key's fill included: the fill is
+    /// watched, so a page used as fill keeps its rate off air, yet it is not
+    /// on air for all that.
+    #[test]
+    fn a_delays_source_is_watched_with_its_keys_fill() {
+        let mut s = state();
+        let keyed =
+            with(&s, 2, |i| i.key = Key { mode: KeyMode::Fill, fill_input: Some(15), ..Key::default() });
+        s.put_input(keyed).unwrap();
+        s.project.inputs.push(delay(50, Some(2)));
+        let watched = s.delay_sources();
+        assert!(watched.contains(&2) && watched.contains(&15), "{watched:?}");
+        assert!(!s.on_air().contains(&15), "watched, not on air");
     }
 
     /// Only a delay that asks for more is held to what is left. Two delays of
