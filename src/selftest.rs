@@ -79,9 +79,9 @@ fn paddings(engine: &Engine) -> Vec<(String, Pad)> {
 }
 
 /// The longest end padding in seconds, and where each recording's picture
-/// and sound ended before it. Picture and sound follow one clock, so they
-/// end together and the files end together by construction: what had to be
-/// padded shows whether they drifted apart on the way.
+/// and sound ended before it. Picture and sound follow one clock, and a
+/// stopped file is fed both up to the same picture boundary: what had to be
+/// padded shows that they drifted apart, or that one of them came too late.
 fn most_padded(pads: &[(String, Pad)], fps: u32) -> Result<(f64, String), String> {
     let mut most = 0f64;
     let mut each = Vec::new();

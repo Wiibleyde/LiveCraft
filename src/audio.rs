@@ -360,6 +360,9 @@ impl Engine {
         for enc in self.streamers.lock().unwrap().iter() {
             enc.push_audio(pcm(enc.pick), at);
         }
+        for e in self.ending.lock().unwrap().iter() {
+            e.encoder.push_audio(pcm(e.encoder.pick), at);
+        }
         for (_, enc) in self.multi.lock().unwrap().iter() {
             enc.push_audio(pcm(enc.pick), at);
         }

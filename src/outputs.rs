@@ -20,6 +20,18 @@ fn finish_later(list: Vec<Encoder>, patience: Duration) {
     drop(finish_all(list, patience));
 }
 
+/// How long a stopped recording or stream waits for the picture under way
+/// and its sound. Longer means a loop is stuck, and its end is padded.
+const END_WAIT: Duration = Duration::from_secs(1);
+
+/// A recording or stream stopped, which the loops keep feeding the program
+/// until its picture and its sound reach where it ends.
+pub(crate) struct Ending {
+    pub(crate) encoder: Encoder,
+    patience: Duration,
+    since: Instant,
+}
+
 /// Stamp to the millisecond: stopping and starting within a second must not
 /// write over the file still being closed.
 fn stamp() -> String {
@@ -132,7 +144,43 @@ impl Engine {
     pub fn stop_recording(&self) {
         let list = std::mem::take(&mut *self.recorders.lock().unwrap());
         *self.record_started.lock().unwrap() = None;
-        finish_later(list, Duration::from_secs(15));
+        self.end_later(list, Duration::from_secs(15));
+    }
+
+    /// Ends each file where it was stopped, with the picture under way and
+    /// the sound already made: the loops feed it until then, out of sight.
+    fn end_later(&self, list: Vec<Encoder>, patience: Duration) {
+        let since = Instant::now();
+        let mut ending = self.ending.lock().unwrap();
+        for encoder in list {
+            encoder.stop();
+            ending.push(Ending { encoder, patience, since });
+        }
+    }
+
+    /// Finishes the stopped recordings and streams that reached their end,
+    /// or waited too long for it.
+    pub(crate) fn finish_ended(&self) {
+        let done: Vec<Ending> = {
+            let mut ending = self.ending.lock().unwrap();
+            if ending.is_empty() {
+                return;
+            }
+            ending.extract_if(.., |e| e.encoder.ended() || e.since.elapsed() > END_WAIT).collect()
+        };
+        for e in done {
+            finish_later(vec![e.encoder], e.patience);
+        }
+    }
+
+    /// Every encoder the loops feed, stopped ones included.
+    fn each_encoder(&self, mut visit: impl FnMut(&Encoder)) {
+        self.recorders.lock().unwrap().iter().for_each(&mut visit);
+        self.streamers.lock().unwrap().iter().for_each(&mut visit);
+        self.ending.lock().unwrap().iter().for_each(|e| visit(&e.encoder));
+        self.multi.lock().unwrap().iter().for_each(|(_, e)| visit(e));
+        self.srt.lock().unwrap().iter().for_each(|(_, e)| visit(e));
+        self.replay.lock().unwrap().cams.iter().for_each(|c| visit(&c.encoder));
     }
 
     /// Destinations sharing destination 1's quality go through one encoder.
@@ -185,7 +233,7 @@ impl Engine {
     pub fn stop_streaming(&self) {
         let list = std::mem::take(&mut *self.streamers.lock().unwrap());
         *self.stream_started.lock().unwrap() = None;
-        finish_later(list, Duration::from_secs(5));
+        self.end_later(list, Duration::from_secs(5));
     }
 
     /// One file per live input, with the chosen sound. Returns how many.
@@ -341,10 +389,23 @@ impl Engine {
 
     /// For closing the program: waits for files to be complete.
     pub fn shutdown(&self) {
+        // Every file ends where it was stopped, while the loops still run to
+        // bring it the picture under way.
+        self.each_encoder(Encoder::stop);
+        let asked = Instant::now();
+        while asked.elapsed() < END_WAIT {
+            let mut all = true;
+            self.each_encoder(|e| all &= e.ended());
+            if all {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
         self.quit.store(true, Ordering::Relaxed);
         self.replay_stop();
         let mut list = std::mem::take(&mut *self.recorders.lock().unwrap());
         list.extend(std::mem::take(&mut *self.streamers.lock().unwrap()));
+        list.extend(std::mem::take(&mut *self.ending.lock().unwrap()).into_iter().map(|e| e.encoder));
         list.extend(std::mem::take(&mut *self.multi.lock().unwrap()).into_iter().map(|(_, e)| e));
         list.extend(std::mem::take(&mut *self.srt.lock().unwrap()).into_iter().map(|(_, e)| e));
         drop(std::mem::take(&mut *self.net.lock().unwrap()));

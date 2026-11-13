@@ -7,6 +7,7 @@ use crate::frame::Frame;
 use crate::model::*;
 use crate::netvideo::NetOut;
 use crate::output::Encoder;
+use crate::outputs::Ending;
 use crate::plugins::PluginHost;
 use crate::replay::ReplayState;
 use crate::sources::{self, InputRt};
@@ -99,6 +100,8 @@ pub struct Engine {
     pub plugins: PluginHost,
     pub recorders: Mutex<Vec<Encoder>>,
     pub streamers: Mutex<Vec<Encoder>>,
+    /// Recordings and streams stopped, fed until they reach their end.
+    pub(crate) ending: Mutex<Vec<Ending>>,
     pub multi: Mutex<Vec<(u64, Encoder)>>,
     pub srt: Mutex<Vec<(Route, Encoder)>>,
     /// NDI and OMT senders of the program.
@@ -142,6 +145,7 @@ impl Engine {
             plugins: PluginHost::default(),
             recorders: Mutex::new(Vec::new()),
             streamers: Mutex::new(Vec::new()),
+            ending: Mutex::new(Vec::new()),
             multi: Mutex::new(Vec::new()),
             srt: Mutex::new(Vec::new()),
             net: Mutex::new(Vec::new()),

@@ -23,8 +23,10 @@ tick or a full queue costs a repeated picture, a lost block a moment of silence,
 drift apart. Sound from a microphone or a live network sender runs on that device's clock, not ours:
 the sound loop learns how fast each one runs and takes a frame more or less now and then to match,
 keeping what waits near 10 ms, so a fast device does not fall further and further behind the picture.
-The speed only ever moves by a few dozen ppm at a time, so a tone keeps its pitch. When a recording
-stops, the shorter of sound and picture is padded to the other, so both end together.
+The speed only ever moves by a few dozen ppm at a time, so a tone keeps its pitch. A block of sound is
+made at the start of the time it stands for and a picture after it is composed, so at any moment the
+sound is ahead. A stopped recording or stream therefore keeps being fed, out of sight, until both reach
+the first picture boundary after the stop; only what fails to come in time is padded.
 
 ## Files
 

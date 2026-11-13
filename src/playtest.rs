@@ -686,6 +686,70 @@ fn replay_marks(dir: &str) -> Result<(), String> {
     steps
 }
 
+/// A recording stopped while its pictures come late, as from a busy mixer,
+/// and its sound early, as the sound loop makes each block at the start of
+/// the time it stands for. Cut off at the stop, it had pictures repeated at
+/// its end for the sound it already had; it must end on one picture boundary
+/// with both, and nothing added.
+fn stopped_recording(dir: &str) -> Result<String, String> {
+    let (w, h, fps) = (320, 180, 30);
+    let target = Target::File { path: format!("{dir}/arret.mp4"), split_minutes: 0 };
+    let (label, codec, audio) = ("Arrêt".to_string(), "libx264".to_string(), AudioPick::MASTER);
+    let encoder =
+        Encoder::start(Spec { label, target, codec, w, h, fps, kbps: 2000, audio_kbps: 128, audio })?;
+    let block = vec![0i16; 2 * 960];
+    let (block_ns, frame_ns) = (clock::NS / 50, clock::NS / fps as u64);
+    // Two pictures' time: a mixer this late was seen on a busy machine.
+    let late = 2 * frame_ns;
+    let begin = clock::now();
+    let (mut sound_at, mut picture_at, mut n) = (begin, begin, 0);
+    // Sends what is due now, and says whether a block of sound went.
+    let mut feed = |encoder: &Encoder| {
+        let now = clock::now();
+        let sent = sound_at <= now;
+        while sound_at <= now {
+            encoder.push_audio(block.clone(), sound_at);
+            sound_at += block_ns;
+        }
+        while picture_at + late <= now {
+            encoder.push_video(numbered(n, w, h), picture_at);
+            (n, picture_at) = (n + 1, picture_at + frame_ns);
+        }
+        sent
+    };
+    // ffmpeg keeps nothing sent before it is ready.
+    let ready = Instant::now() + Duration::from_secs(15);
+    while encoder.pictures().lock().unwrap().first().is_none() {
+        if Instant::now() > ready {
+            return Err("l'enregistrement arrêté n'enregistre rien".into());
+        }
+        feed(&encoder);
+        sleep(Duration::from_millis(1));
+    }
+    // Stopped just after a block of sound went, when sound is furthest ahead.
+    let recorded = Instant::now() + Duration::from_secs(1);
+    while !(feed(&encoder) && Instant::now() > recorded) {
+        sleep(Duration::from_millis(1));
+    }
+    encoder.stop();
+    until(5.0, "fin de l'enregistrement arrêté", || {
+        feed(&encoder);
+        encoder.ended()
+    })?;
+    let padded = encoder.padded.clone();
+    if !encoder.finish(Duration::from_secs(10)) {
+        return Err("l'enregistrement arrêté se ferme mal".into());
+    }
+    let pad = (*padded.lock().unwrap()).ok_or("fin de l'enregistrement arrêté non égalisée")?;
+    if pad.pictures > 0 || pad.samples > 0 {
+        return Err(format!(
+            "enregistrement arrêté : image jusqu'à {:.3} s, son jusqu'à {:.3} s, {} image(s) et {} échantillons ajoutés",
+            pad.picture_end, pad.sound_end, pad.pictures, pad.samples
+        ));
+    }
+    Ok(format!("arrêt d'un enregistrement aux images en retard, image et son jusqu'à {:.3} s", pad.sound_end))
+}
+
 pub fn check(dir: &str) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let long = clip(dir, "long", 4)?;
@@ -721,17 +785,18 @@ pub fn check(dir: &str) -> Result<String, String> {
         }
         desk.virtual_set(dir)?;
         desk.web_pages()?;
-        replay_marks(dir).map(|()| dvd)
+        replay_marks(dir)?;
+        Ok((dvd, stopped_recording(dir)?))
     })();
     desk.engine.shutdown();
-    steps.map(|dvd| {
+    steps.map(|(dvd, stop)| {
         let card = if crate::decode::CARD.is_some() {
             "carte graphique et repli logiciel"
         } else {
             "carte graphique ignorée (Windows seulement)"
         };
         format!(
-            "marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, {card}, plateau virtuel, pages web, ralenti malgré les pertes"
+            "marques, reprise, boucle, liste, son, {dvd}, compte à rebours, incrustation, {card}, plateau virtuel, pages web, ralenti malgré les pertes, {stop}"
         )
     })
 }

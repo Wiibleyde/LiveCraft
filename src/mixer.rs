@@ -740,6 +740,7 @@ impl Engine {
             let refresh_all = tick_n.is_multiple_of((fps / 6).max(1));
             self.update_routes(&mut m, &c, refresh_all);
             self.feed_outputs(&mut m, &c, pace.stamp());
+            self.finish_ended();
             if refresh_all {
                 self.update_thumbs(&mut m, &c);
             }
@@ -1012,6 +1013,9 @@ impl Engine {
         }
         for enc in self.streamers.lock().unwrap().iter() {
             enc.push_video(out.clone(), at);
+        }
+        for e in self.ending.lock().unwrap().iter() {
+            e.encoder.push_video(out.clone(), at);
         }
         for net in self.net.lock().unwrap().iter() {
             net.push_video(out.clone());
