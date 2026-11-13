@@ -23,15 +23,15 @@ Nothing here has a date. Open an issue before starting something large; the
 - [x] Audio plug-ins (CLAP, #11)
 - [ ] Keep NDI/OMT inputs and video-call guests on the shared clock (#26)
 - [x] Video Delay input (#29)
-- [ ] One encoder shared by stream destinations with identical settings (#28)
-- [ ] Recording profiles for editing: ProRes, DNxHR, MagicYUV (#31)
+- [x] One encoder shared by stream destinations with identical settings
+- [x] Recording profiles for editing: ProRes, DNxHR, MagicYUV (#31)
 - [ ] Encode straight from the graphics card, without a trip through memory
 
 ## Desk
 
-- [ ] Video scopes: waveform, RGB parade, vectorscope and safe areas (#27)
+- [x] Video scopes: waveform, RGB parade, vectorscope and safe areas
 - [x] Production clock with pause, resume and reset (#30)
-- [ ] Open a second project in the running instance (#25)
+- [x] Open a second project in the running instance (#25, follow-ups in #53)
 - [x] Find FFmpeg more robustly and say what it can do (#32)
 
 ## Platforms
@@ -41,11 +41,12 @@ Nothing here has a date. Open an issue before starting something large; the
 - [x] Windows installer and release workflow (#10)
 - [ ] Signed Windows releases (the workflow signs once a certificate is set up)
 - [x] Say when a newer version is out (#34)
-- [ ] Download and install it from the program, once releases are signed (#34)
+- [ ] Download and install it from the program, once releases are signed (#44)
 
 ## Quality
 
 - [x] Replay marks that stay exact when frames are dropped (#13)
 - [x] Long-run tests: a whole show, with memory and timing watched throughout (#12)
 - [x] Automated checks with a virtual camera and a local streaming server (#2)
-- [ ] Intermittent test failures (#22, #23, #24)
+- [x] Intermittent test failures (#22, #23, #24, #40)
+- [ ] Checks that fail on a busy machine (#51)
