@@ -290,6 +290,13 @@ struct Me {
 
 const MEDIUM_LEVEL: u32 = 0x2000;
 
+/// The label a pipe gets, and the least a later start accepts: this
+/// program's own level, never above medium, so that a window run as
+/// administrator and an ordinary start still reach each other.
+fn pipe_level(own: u32) -> u32 {
+    own.min(MEDIUM_LEVEL)
+}
+
 fn me() -> Option<&'static Me> {
     use windows_sys::Win32::Security::{
         GetTokenInformation, SID_AND_ATTRIBUTES, TOKEN_QUERY, TokenIntegrityLevel, TokenUser,
@@ -356,7 +363,11 @@ impl Access {
     /// a later start can tell a pipe made by such a program from ours.
     fn only_me() -> io::Result<Self> {
         let me = me().ok_or_else(no_account)?;
-        Self::from_sddl(&format!("O:{0}D:P(A;;GA;;;{0})S:(ML;;NWNR;;;S-1-16-{1})", me.user, me.level))
+        Self::from_sddl(&format!(
+            "O:{0}D:P(A;;GA;;;{0})S:(ML;;NWNR;;;S-1-16-{1})",
+            me.user,
+            pipe_level(me.level)
+        ))
     }
 
     fn from_sddl(sddl: &str) -> io::Result<Self> {
@@ -390,9 +401,9 @@ impl Drop for Access {
 // SAFETY: the descriptor is only read, and freed once, on drop.
 unsafe impl Send for Access {}
 
-/// Pipe instances at once: the one waiting for a caller, and those being
-/// answered. More callers wait their turn.
-const PIPE_INSTANCES: u32 = 10;
+/// Pipe instances at once: the one waiting for a caller, those being
+/// answered, and room to tell more that it is full. Beyond, callers wait.
+const PIPE_INSTANCES: u32 = 16;
 
 fn new_pipe(path: &[u16], access: &Access, first: bool) -> io::Result<File> {
     use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
@@ -457,15 +468,14 @@ impl LocalListener {
 
 /// Opens the pipe of the LiveCraft already running for this account:
 /// `NotFound` when there is none, `PermissionDenied` when what holds the name
-/// is not ours or cannot be checked.
-pub fn connect_local(name: &str) -> io::Result<LocalStream> {
+/// is not ours, `TimedOut` when every instance stays taken until `until`.
+pub fn connect_local(name: &str, until: std::time::Instant) -> io::Result<LocalStream> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
     use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
     let path = pipe_path(name)?;
     let text = String::from_utf16_lossy(&path[..path.len() - 1]);
-    let mut tries = 0;
     let pipe = loop {
         // The other side may learn who calls, never act as them.
         let opened = std::fs::OpenOptions::new()
@@ -474,16 +484,15 @@ pub fn connect_local(name: &str) -> io::Result<LocalStream> {
             .security_qos_flags(SECURITY_IDENTIFICATION)
             .open(&text);
         match opened {
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) && tries < 20 => {
-                tries += 1;
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                // Every instance stays taken: a window frozen whole, most likely.
+                if std::time::Instant::now() >= until {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, e));
+                }
                 // SAFETY: the name is NUL-terminated.
                 unsafe {
                     WaitNamedPipeW(path.as_ptr(), 100);
                 }
-            }
-            // Every instance stays taken: whoever holds them cannot be checked.
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, e));
             }
             other => break other?,
         }
@@ -546,7 +555,7 @@ fn made_by_me(pipe: &File) -> bool {
             }
         }
         LocalFree(sd);
-        ours && level >= me.level
+        ours && level >= pipe_level(me.level)
     }
 }
 
@@ -583,6 +592,23 @@ pub fn read_some(stream: &mut LocalStream, buf: &mut [u8], until: std::time::Ins
             return Err(io::ErrorKind::TimedOut.into());
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Brings that window forward from any thread, even while its own thread
+/// sits in a file dialog: the dialog, which belongs to it, comes along.
+pub fn raise_window(window: Option<isize>) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindowAsync,
+    };
+    let Some(window) = window else { return };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: plain calls; a window that is gone is refused by Windows.
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindowAsync(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
     }
 }
 
@@ -658,6 +684,20 @@ pub fn font_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_elevated_window_and_an_ordinary_start_still_reach_each_other() {
+        let (elevated, ordinary, lesser) = (0x3000, MEDIUM_LEVEL, 0x1000);
+        assert_eq!(
+            pipe_level(elevated),
+            pipe_level(ordinary),
+            "the same label, and the same least level accepted"
+        );
+        assert!(
+            pipe_level(lesser) < pipe_level(ordinary),
+            "a program with fewer rights still cannot pass for one"
+        );
+    }
 
     #[test]
     fn reads_device_list() {

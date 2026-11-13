@@ -67,7 +67,6 @@ bars.snapshot_failed = Snapshot failed: {error}
 app.capture_failed = Capture failed: {error}
 app.second_window = LiveCraft is already open but not answering: to keep its session safe, this window does not save over it.
 app.first_again = The other LiveCraft has closed: this window saves the session again.
-app.session_taken_back = The other LiveCraft has closed: its session is back here, and this window saves it again.
 app.session_set_aside = The other LiveCraft has closed: this window saves the session again. Its last session is kept beside it, in {file}.
 app.session_not_set_aside = The other LiveCraft has closed, but its session could not be set aside: this window still does not save it.
 app.channel_foreign = LiveCraft's private channel is held by another account or by a program with fewer rights: this window runs on its own.

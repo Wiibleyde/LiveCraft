@@ -31,15 +31,22 @@ pub struct Timing {
     /// How long a later start stays while the window says it is busy. Then
     /// it ends, leaving the request with the window.
     pub patience: Duration,
+    /// How long a window may take to start: until its first pass it is busy,
+    /// then it counts as frozen like any other.
+    pub startup: Duration,
 }
 
-pub const TIMING: Timing = Timing { window: Duration::from_secs(8), patience: Duration::from_secs(60) };
+pub const TIMING: Timing = Timing {
+    window: Duration::from_secs(8),
+    patience: Duration::from_secs(60),
+    startup: Duration::from_secs(30),
+};
 
 /// How often a window that found the session taken asks for it again.
 const RETRY_EVERY: Duration = Duration::from_secs(3);
 /// Room for any path, and no more.
 const MAX_REQUEST: usize = 256 * 1024;
-/// Callers answered at once; more are turned away.
+/// Callers answered at once; more are told to try again.
 const MAX_CALLERS: usize = 8;
 /// How long a caller has to say what it wants, and to hang up after the answer.
 const SPEAK_WITHIN: Duration = Duration::from_secs(2);
@@ -136,35 +143,54 @@ pub enum Handed {
 
 /// Gives `request` to the window already open.
 pub fn hand_over(name: &str, request: &Request, timing: Timing) -> Handed {
-    let mut conn = match connect_local(name) {
-        Ok(conn) => conn,
-        Err(e) => {
-            return match e.kind() {
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => Handed::NobodyThere,
-                io::ErrorKind::PermissionDenied => Handed::Foreign,
-                _ => Handed::NoAnswer,
-            };
-        }
-    };
     let Ok(mut line) = serde_json::to_string(request) else { return Handed::Refused };
     line.push('\n');
-    // Counted once connected: reaching the window is quick, or fails at once.
-    let since = Instant::now();
-    if conn.write_all(line.as_bytes()).is_err() {
-        return Handed::NoAnswer;
-    }
-    let mut answers = Lines::default();
+    let name = name.to_string();
+    let (tx, rx) = mpsc::channel();
+    // Whatever blocks on the way, a write to a window frozen whole say, is
+    // left behind: this start waits so long at most.
+    std::thread::spawn(move || {
+        let _ = tx.send(exchange(&name, line.as_bytes(), timing));
+    });
+    let longest = timing.window * 2 + timing.patience + Duration::from_secs(2);
+    rx.recv_timeout(longest).unwrap_or(Handed::NoAnswer)
+}
+
+fn exchange(name: &str, line: &[u8], timing: Timing) -> Handed {
     // Between two words from the window: long enough for one free to take it.
     let silence = timing.window + Duration::from_secs(2);
+    let mut connected = None::<Instant>;
     loop {
-        match answers.next(&mut conn, 16, Instant::now() + silence).as_deref() {
-            Ok("ok") => return Handed::Taken,
-            Ok("wait") if since.elapsed() >= timing.patience => return Handed::Kept,
-            Ok("wait") => {}
-            Ok("gone") => return Handed::NobodyThere,
-            Ok("bad") => return Handed::Refused,
-            _ => return Handed::NoAnswer,
+        let mut conn = match connect_local(name, Instant::now() + timing.window) {
+            Ok(conn) => conn,
+            Err(e) => {
+                return match e.kind() {
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => Handed::NobodyThere,
+                    io::ErrorKind::PermissionDenied => Handed::Foreign,
+                    _ => Handed::NoAnswer,
+                };
+            }
+        };
+        // Counted once connected: reaching the window is quick, or fails at once.
+        let since = *connected.get_or_insert_with(Instant::now);
+        if conn.write_all(line).is_err() {
+            return Handed::NoAnswer;
         }
+        let mut answers = Lines::default();
+        loop {
+            match answers.next(&mut conn, 16, Instant::now() + silence).as_deref() {
+                Ok("ok") => return Handed::Taken,
+                Ok("wait") if since.elapsed() >= timing.patience => return Handed::Kept,
+                Ok("wait") => {}
+                // Too many callers at once: this one tries again shortly.
+                Ok("full") if since.elapsed() < timing.patience => break,
+                Ok("gone") => return Handed::NobodyThere,
+                Ok("bad") => return Handed::Refused,
+                _ => return Handed::NoAnswer,
+            }
+        }
+        drop(conn);
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -240,11 +266,13 @@ impl Ticket {
 }
 
 /// What the window and the threads answering callers share.
-#[derive(Default)]
 struct Shared {
     waker: Mutex<Option<Box<dyn Fn() + Send>>>,
-    /// The window runs its loop: before that, requests wait.
+    /// The window runs its loop: before that, and for `startup` at most,
+    /// requests wait.
     ready: AtomicBool,
+    claimed: Instant,
+    startup: Duration,
     callers: AtomicUsize,
     /// The window let the name go: callers still there are told so.
     gone: AtomicBool,
@@ -252,7 +280,8 @@ struct Shared {
 
 impl Shared {
     fn busy(&self) -> bool {
-        !self.ready.load(Ordering::Acquire) || BUSY.load(Ordering::Acquire) > 0
+        let starting = !self.ready.load(Ordering::Acquire) && self.claimed.elapsed() < self.startup;
+        starting || BUSY.load(Ordering::Acquire) > 0
     }
 
     fn wake(&self) {
@@ -276,7 +305,14 @@ impl First {
     pub fn claim(name: &str, timing: Timing) -> io::Result<Self> {
         let mut listener = crate::platform::LocalListener::bind(name)?;
         let (tx, tickets) = mpsc::channel();
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            waker: Mutex::default(),
+            ready: AtomicBool::new(false),
+            claimed: Instant::now(),
+            startup: timing.startup,
+            callers: AtomicUsize::new(0),
+            gone: AtomicBool::new(false),
+        });
         let stop = Arc::new(AtomicBool::new(false));
         let (s, halt) = (shared.clone(), stop.clone());
         let accepting = std::thread::Builder::new().name("later starts".into()).spawn(move || {
@@ -294,9 +330,10 @@ impl First {
                             s.callers.fetch_sub(1, Ordering::AcqRel);
                         });
                     }
-                    // Too many at once: this one is turned away.
-                    Ok(_) => {
+                    // Too many at once: this one is told to try again shortly.
+                    Ok(mut conn) => {
                         s.callers.fetch_sub(1, Ordering::AcqRel);
+                        say_last(&mut conn, &mut Lines::default(), b"full\n");
                     }
                     // A caller that left at once, or no instance free: never spin.
                     Err(_) => std::thread::sleep(Duration::from_millis(50)),
@@ -332,7 +369,7 @@ impl Drop for First {
         self.stop.store(true, Ordering::Release);
         // The accepting thread waits for a caller: be one, and stay until it
         // has let the name go.
-        if let Ok(_wake) = connect_local(&self.name)
+        if let Ok(_wake) = connect_local(&self.name, Instant::now() + Duration::from_secs(1))
             && let Some(accepting) = self.accepting.take()
         {
             let _ = accepting.join();
@@ -428,7 +465,7 @@ mod tests {
     }
 
     const WAIT: Duration = Duration::from_secs(5);
-    const QUICK: Timing = Timing { window: WAIT, patience: WAIT };
+    const QUICK: Timing = Timing { window: WAIT, patience: WAIT, startup: WAIT };
 
     /// Takes the next request as a window would, on each pass of its loop.
     fn next_request(first: &First) -> Request {
@@ -500,7 +537,7 @@ mod tests {
     #[test]
     fn a_window_that_does_not_answer_is_not_waited_on() {
         let name = unique("frozen");
-        let short = Timing { window: Duration::from_millis(300), patience: WAIT };
+        let short = Timing { window: Duration::from_millis(300), ..QUICK };
         let first = running(&name, short);
         let started = Instant::now();
         let Some(Role::Second(mut second)) = settle(&name, &Request::Open("x.livecraft".into()), short)
@@ -522,7 +559,8 @@ mod tests {
     #[test]
     fn a_busy_window_keeps_the_request_for_later() {
         let name = unique("busy");
-        let timing = Timing { window: Duration::from_millis(300), patience: Duration::from_millis(1500) };
+        let timing =
+            Timing { window: Duration::from_millis(300), patience: Duration::from_millis(1500), ..QUICK };
         // Its loop has not run yet.
         let first = First::claim(&name, timing).unwrap();
         let started = Instant::now();
@@ -532,15 +570,71 @@ mod tests {
         assert_eq!(next_request(&first), Request::Open("y.livecraft".into()), "taken once free");
     }
 
-    /// A process stuck whole, its listening thread too, answers nothing at all.
+    /// A process stuck whole, its listening thread too, answers nothing at
+    /// all: each later start runs on its own without the session, the second
+    /// one too, though the first took the only way in.
     #[test]
     fn a_process_that_froze_is_not_waited_on() {
         let name = unique("stuck");
         let _listening_but_stuck = crate::platform::LocalListener::bind(&name).unwrap();
-        let timing = Timing { window: Duration::from_millis(300), patience: WAIT };
+        let timing =
+            Timing { window: Duration::from_millis(300), patience: Duration::from_millis(300), ..QUICK };
+        for start in ["first", "second"] {
+            let started = Instant::now();
+            assert_eq!(hand_over(&name, &Request::Show, timing), Handed::NoAnswer, "{start}");
+            assert!(started.elapsed() < Duration::from_secs(4), "{start}: {:?}", started.elapsed());
+        }
+        // A request bigger than what the way in holds, which nobody reads.
+        let big = Request::Open("a".repeat(200_000));
         let started = Instant::now();
-        assert_eq!(hand_over(&name, &Request::Show, timing), Handed::NoAnswer);
+        assert_eq!(hand_over(&name, &big, timing), Handed::NoAnswer);
         assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+    }
+
+    /// A window that never gets through its start is busy for so long only,
+    /// then counts as frozen.
+    #[test]
+    fn a_window_stuck_starting_is_not_waited_on_for_long() {
+        let name = unique("starting");
+        let timing = Timing {
+            window: Duration::from_millis(300),
+            patience: WAIT,
+            startup: Duration::from_millis(300),
+        };
+        let _never_ready = First::claim(&name, timing).unwrap();
+        let started = Instant::now();
+        assert!(matches!(settle(&name, &Request::Show, timing), Some(Role::Second(_))));
+        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+    }
+
+    /// More callers at once than the window answers together: the others are
+    /// told to try again, and every request gets through.
+    #[test]
+    fn many_starts_at_once_all_get_through() {
+        let name = unique("many");
+        let timing =
+            Timing { window: WAIT, patience: Duration::from_secs(10), startup: Duration::from_secs(60) };
+        // Busy starting, so that the first callers stay on the line.
+        let first = First::claim(&name, timing).unwrap();
+        let starts: Vec<_> = (0..MAX_CALLERS + 3)
+            .map(|i| later_start(&name, Request::Open(format!("{i}.livecraft")), timing))
+            .collect();
+        std::thread::sleep(Duration::from_secs(1));
+        first.set_ready();
+        let mut taken = std::collections::HashSet::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while taken.len() < starts.len() && Instant::now() < deadline {
+            match first.next() {
+                Some(request) => {
+                    taken.insert(format!("{request:?}"));
+                }
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert_eq!(taken.len(), starts.len(), "each one taken once");
+        for start in starts {
+            assert!(start.join().unwrap().is_none(), "and each start ended");
+        }
     }
 
     /// Only one side ever settles a request, whichever comes first.
@@ -556,7 +650,7 @@ mod tests {
 
         // The window takes it just as the wait runs out, again and again.
         let name = unique("race");
-        let timing = Timing { window: Duration::from_millis(100), patience: WAIT };
+        let timing = Timing { window: Duration::from_millis(100), ..QUICK };
         let first = running(&name, timing);
         for _ in 0..5 {
             let later = later_start(&name, Request::Show, timing);
@@ -573,7 +667,7 @@ mod tests {
         let name = unique("bad");
         let _first = running(&name, QUICK);
         for sent in [vec![b'a'; MAX_REQUEST + 1], b"not a request\n".to_vec()] {
-            let mut conn = connect_local(&name).unwrap();
+            let mut conn = connect_local(&name, Instant::now() + WAIT).unwrap();
             let started = Instant::now();
             conn.write_all(&sent).unwrap();
             let answer = Lines::default().next(&mut conn, 16, Instant::now() + WAIT);
@@ -611,11 +705,8 @@ mod tests {
     fn a_pipe_that_is_not_ours_is_left_alone() {
         let name = unique("lesser");
         let _lesser = crate::platform::bind_as_lesser(&name).unwrap();
-        assert_eq!(hand_over(&name, &Request::Open("z.livecraft".into()), QUICK), Handed::Foreign);
-        // Its only instance is taken from now on: still not ours, never waited on.
-        let started = Instant::now();
-        assert!(matches!(settle(&name, &Request::Show, QUICK), Some(Role::Alone { foreign: true })));
-        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        let request = Request::Open("z.livecraft".into());
+        assert!(matches!(settle(&name, &request, QUICK), Some(Role::Alone { foreign: true })));
     }
 
     /// A crash leaves the socket file behind: it must not pass for a window.

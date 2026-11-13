@@ -840,8 +840,11 @@ fn a_dropped_project_asks_first_and_respects_the_padlock() {
 }
 
 /// Long enough for a window under test to take what it is handed.
-const PATIENT: instance::Timing =
-    instance::Timing { window: Duration::from_secs(5), patience: Duration::from_secs(5) };
+const PATIENT: instance::Timing = instance::Timing {
+    window: Duration::from_secs(5),
+    patience: Duration::from_secs(5),
+    startup: Duration::from_secs(5),
+};
 
 /// Starts LiveCraft again while `h` is the window open, as a double-click
 /// does: true once that start handed its request over and ended.
@@ -914,7 +917,7 @@ fn a_later_start_opens_its_project_in_the_window_already_open() {
 /// closed, is set up here.
 fn second_window(tag: &str) -> (Harness<'static, App>, instance::First, std::path::PathBuf) {
     let name = format!("lc-ui-{}-{tag}", std::process::id());
-    let frozen = instance::Timing { window: Duration::from_millis(300), patience: Duration::from_secs(5) };
+    let frozen = instance::Timing { window: Duration::from_millis(300), ..PATIENT };
     let first = instance::First::claim(&name, frozen).unwrap();
     // Free to take requests, yet taking none: frozen.
     first.set_ready();
@@ -953,26 +956,14 @@ fn said(h: &Harness<'static, App>) -> String {
     h.state().message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default()
 }
 
-/// Nothing was done on this desk: the other window's last save comes back
-/// to it, rather than this desk saved over it.
+/// This desk stays, worked on or not: it may be on air. The other window's
+/// last save is copied aside first, never silently overwritten.
 #[test]
-fn an_untouched_second_window_takes_the_other_ones_session_back() {
-    let (mut h, first, session) = second_window("untouched");
-    other_window_closes(&mut h, first);
-    assert_eq!(h.state().session_file.as_ref(), Some(&session));
-    assert!(shows(&h, "Caméra de l'autre"), "the session as the other window left it");
-    assert!(said(&h).starts_with("L'autre LiveCraft s'est fermé : sa session est reprise"), "{}", said(&h));
-    end(h);
-    let _ = std::fs::remove_dir_all(session.parent().unwrap());
-}
-
-/// This desk was worked on: it stays, and the other window's last save is
-/// copied aside first, never silently overwritten.
-#[test]
-fn a_second_window_worked_on_sets_the_other_ones_session_aside() {
-    let (mut h, first, session) = second_window("worked");
+fn a_second_window_keeps_its_desk_and_sets_the_other_ones_session_aside() {
+    let (mut h, first, session) = second_window("aside");
     click(&mut h, "Entrée CAM 2");
     other_window_closes(&mut h, first);
+    assert!(!shows(&h, "Caméra de l'autre"), "never replaced by the other one's");
     assert_eq!(h.state().session_file.as_ref(), Some(&session));
     assert_eq!(project(&h).preview, Some(2), "this desk stays");
     let aside: Vec<_> = std::fs::read_dir(session.parent().unwrap())

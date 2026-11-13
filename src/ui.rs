@@ -34,6 +34,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use wgpu::rwh::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    WindowHandle,
+};
 
 const CARD_W: f32 = 214.0;
 const CARD_H: f32 = 182.0;
@@ -125,11 +129,8 @@ impl Saved {
     }
 
     fn load() -> Self {
-        Self::load_from(&session_to_read(saved_path(), older_saved_path()))
-    }
-
-    fn load_from(path: &std::path::Path) -> Self {
-        let Ok(bytes) = std::fs::read(path) else { return Self::default() };
+        let path = session_to_read(saved_path(), older_saved_path());
+        let Ok(bytes) = std::fs::read(&path) else { return Self::default() };
         match serde_json::from_slice::<Self>(&bytes) {
             Ok(mut saved) => {
                 saved.each_secret(secret::open);
@@ -138,7 +139,7 @@ impl Saved {
             Err(_) => {
                 // Set aside, not overwritten: the empty desk that starts now
                 // must not erase a session someone could still recover.
-                let _ = std::fs::rename(path, path.with_extension("illisible.json"));
+                let _ = std::fs::rename(&path, path.with_extension("illisible.json"));
                 Self::default()
             }
         }
@@ -266,17 +267,53 @@ struct SessionHeld {
     second: instance::Second,
     /// Where this window will keep the session once the other one is gone.
     session: Option<PathBuf>,
-    /// The desk as this window started, to tell whether it was worked on.
-    desk_at_start: Project,
 }
 
-/// The system's file dialog. While one is up the window cannot take anything
-/// else: later starts are told to wait, not taken for a frozen window.
+thread_local! {
+    /// The main window, set as the window starts. File dialogs belong to it,
+    /// so they stay in front of it instead of hiding behind.
+    static MAIN_WINDOW: std::cell::Cell<Option<(RawWindowHandle, RawDisplayHandle)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+struct MainWindow((RawWindowHandle, RawDisplayHandle));
+
+impl HasWindowHandle for MainWindow {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        // SAFETY: the main window lasts as long as its loop, and dialogs only
+        // open on that loop's thread, while it runs.
+        Ok(unsafe { WindowHandle::borrow_raw(self.0.0) })
+    }
+}
+
+impl HasDisplayHandle for MainWindow {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        // SAFETY: as above.
+        Ok(unsafe { DisplayHandle::borrow_raw(self.0.1) })
+    }
+}
+
+/// The main window's number on Windows, which another thread can bring
+/// forward while this one sits in a file dialog.
+fn main_window_id() -> Option<isize> {
+    match MAIN_WINDOW.get()?.0 {
+        RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
+        _ => None,
+    }
+}
+
+/// The system's file dialog, in front of the main window. While one is up
+/// the window cannot take anything else: later starts are told to wait, not
+/// taken for a frozen window.
 struct FileDialog(rfd::FileDialog);
 
 impl FileDialog {
     fn new() -> Self {
-        Self(rfd::FileDialog::new())
+        let dialog = rfd::FileDialog::new();
+        Self(match MAIN_WINDOW.get() {
+            Some(main) => dialog.set_parent(&MainWindow(main)),
+            None => dialog,
+        })
     }
 
     fn add_filter(self, name: impl Into<String>, extensions: &[impl ToString]) -> Self {
@@ -320,6 +357,9 @@ impl App {
     ) -> Self {
         let open = open.as_deref().unwrap_or("");
         apply_style(&cc.egui_ctx);
+        if let (Ok(window), Ok(display)) = (cc.window_handle(), cc.display_handle()) {
+            MAIN_WINDOW.set(Some((window.as_raw(), display.as_raw())));
+        }
         // The check picture opens the worked example, as the reference picture
         // shows a project already open. A normal first start is an empty desk.
         let saved = if shot_path.is_some() {
@@ -345,8 +385,7 @@ impl App {
         match role {
             instance::Role::First(first) => self.become_first(ctx, first),
             instance::Role::Second(second) => {
-                let desk_at_start = self.with(|s| s.project.clone());
-                self.second = Some(SessionHeld { second, session: self.session_file.take(), desk_at_start });
+                self.second = Some(SessionHeld { second, session: self.session_file.take() });
                 self.not_saving = true;
                 self.say(t!("app.second_window"));
             }
@@ -356,8 +395,14 @@ impl App {
     }
 
     fn become_first(&mut self, ctx: &egui::Context, first: instance::First) {
-        let ctx = ctx.clone();
-        first.wake_with(move || ctx.request_repaint());
+        let (ctx, window) = (ctx.clone(), main_window_id());
+        // Brought forward from the thread that took the request: with a file
+        // dialog up, this window's own loop cannot do it, and the dialog
+        // could stay hidden while the later start waits.
+        first.wake_with(move || {
+            crate::platform::raise_window(window);
+            ctx.request_repaint();
+        });
         self.first = Some(first);
     }
 
@@ -384,35 +429,23 @@ impl App {
         }
     }
 
-    /// The other window is gone, and saved the session as it closed: that save
-    /// is never lost. A desk left as it started gives way to it; a desk worked
-    /// on stays, the other one's save first copied aside.
+    /// The other window is gone, and saved the session as it closed. This
+    /// window keeps its own desk, which may be on air, and first copies that
+    /// save aside, so that it is never overwritten silently.
     fn take_session_back(&mut self, held: SessionHeld) {
-        let Some(path) = held.session else {
-            self.not_saving = false;
-            self.say(t!("app.first_again"));
-            return;
-        };
-        if !path.is_file() {
-            // The other window never saved: nothing to lose.
-            self.say(t!("app.first_again"));
-        } else if self.with(|s| s.project == held.desk_at_start) {
-            let saved = Saved::load_from(&path);
-            self.engine.load_project(saved.project.clone());
-            self.after_load(None, None);
-            self.saved = saved;
-            self.say(t!("app.session_taken_back"));
-        } else {
+        if let Some(path) = held.session.as_ref().filter(|p| p.is_file()) {
             let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
             let aside = path.with_file_name(format!("session.{stamp}.json"));
-            if std::fs::copy(&path, &aside).is_err() {
+            if std::fs::copy(path, &aside).is_err() {
                 self.say(t!("app.session_not_set_aside"));
                 return;
             }
             let shown = aside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             self.say(t!("app.session_set_aside", file = shown));
+        } else {
+            self.say(t!("app.first_again"));
         }
-        self.session_file = Some(path);
+        self.session_file = held.session;
         self.not_saving = false;
     }
 

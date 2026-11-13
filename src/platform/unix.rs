@@ -192,10 +192,15 @@ impl Drop for LocalListener {
 }
 
 /// Opens the socket of the LiveCraft already running for this account:
-/// `NotFound`, or `ConnectionRefused` after a crash, when there is none.
-pub fn connect_local(name: &str) -> std::io::Result<LocalStream> {
+/// `NotFound`, or `ConnectionRefused` after a crash, when there is none. A
+/// caller waits its turn in the socket's queue, so `until` is not needed here.
+pub fn connect_local(name: &str, _until: std::time::Instant) -> std::io::Result<LocalStream> {
     LocalStream::connect(socket_path(name)?)
 }
+
+/// Bringing a window forward from outside its own loop is for the window
+/// system to refuse here: the window does it itself when it takes a request.
+pub fn raise_window(_window: Option<isize>) {}
 
 /// Reads what has come, waiting until `until` at most: `TimedOut` then, and
 /// 0 once the other side hung up.
