@@ -804,12 +804,15 @@ fn a_dropped_project_asks_first_and_respects_the_padlock() {
     end(h);
 }
 
+/// Long enough for a window under test to take what it is handed.
+const PATIENT: instance::Timing =
+    instance::Timing { window: Duration::from_secs(5), patience: Duration::from_secs(5) };
+
 /// Starts LiveCraft again while `h` is the window open, as a double-click
 /// does: true once that start handed its request over and ended.
 fn start_again(h: &mut Harness<'static, App>, name: &str, request: instance::Request) -> bool {
     let name = name.to_string();
-    let later =
-        std::thread::spawn(move || instance::settle(&name, &request, Duration::from_secs(5)).is_none());
+    let later = std::thread::spawn(move || instance::settle(&name, &request, PATIENT).is_none());
     while !later.is_finished() {
         wait(h, 10);
     }
@@ -840,7 +843,7 @@ fn a_later_start_opens_its_project_in_the_window_already_open() {
     // Its own name: neither another test nor a LiveCraft running here answers.
     let name = format!("lc-ui-{}-later", std::process::id());
     let mut h = desk(Project::blank());
-    let role = instance::settle(&name, &instance::Request::Show, Duration::from_secs(5)).unwrap();
+    let role = instance::settle(&name, &instance::Request::Show, PATIENT).unwrap();
     let ctx = h.ctx.clone();
     h.state_mut().take_role(&ctx, role);
     assert!(h.state().first.is_some(), "the first window answers later starts");
@@ -871,33 +874,109 @@ fn a_later_start_opens_its_project_in_the_window_already_open() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A window started while another one holds the session without answering
-/// must not save over that session, and says so, until the other one closes.
-#[test]
-fn a_second_window_leaves_the_session_alone_until_the_first_closes() {
-    let name = format!("lc-ui-{}-second", std::process::id());
-    let short = Duration::from_millis(300);
-    let frozen = instance::First::claim(&name, short).unwrap();
-    let Some(role @ instance::Role::Second(_)) = instance::settle(&name, &instance::Request::Show, short)
+/// A window started while another one holds the session: it does not save
+/// over that session and says so. The other one's session, saved as it
+/// closed, is set up here.
+fn second_window(tag: &str) -> (Harness<'static, App>, instance::First, std::path::PathBuf) {
+    let name = format!("lc-ui-{}-{tag}", std::process::id());
+    let frozen = instance::Timing { window: Duration::from_millis(300), patience: Duration::from_secs(5) };
+    let first = instance::First::claim(&name, frozen).unwrap();
+    // Free to take requests, yet taking none: frozen.
+    first.set_ready();
+    let Some(role @ instance::Role::Second(_)) = instance::settle(&name, &instance::Request::Show, frozen)
     else {
         panic!("runs on its own");
     };
+    let dir = std::env::temp_dir().join(format!("livecraft-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = dir.join("session.json");
+    let mut theirs = small_project();
+    theirs.inputs.iter_mut().find(|i| i.id == 1).unwrap().name = "Caméra de l'autre".into();
+    saved(theirs).store(&session);
+
     let mut h = desk(small_project());
-    let session = std::env::temp_dir().join(format!("livecraft-second-{}.json", std::process::id()));
     h.state_mut().session_file = Some(session.clone());
     let ctx = h.ctx.clone();
     h.state_mut().take_role(&ctx, role);
     h.run_steps(2);
     assert!(h.state().session_file.is_none(), "neither saved as it goes nor on closing");
     h.get_by_label("Session non enregistrée");
+    (h, first, session)
+}
 
-    drop(frozen);
-    h.state_mut().second.as_mut().unwrap().0.ask_now();
+/// The other window closes: this one takes the session back.
+fn other_window_closes(h: &mut Harness<'static, App>, first: instance::First) {
+    drop(first);
+    h.state_mut().second.as_mut().unwrap().second.ask_now();
     h.run_steps(2);
-    assert_eq!(h.state().session_file, Some(session), "the session comes back once the other one closed");
-    assert!(h.state().first.is_some(), "and later starts come here");
+    assert!(h.state().first.is_some(), "later starts come here now");
     assert!(h.query_by_label("Session non enregistrée").is_none());
+}
+
+fn said(h: &Harness<'static, App>) -> String {
+    h.state().message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default()
+}
+
+/// Nothing was done on this desk: the other window's last save comes back
+/// to it, rather than this desk saved over it.
+#[test]
+fn an_untouched_second_window_takes_the_other_ones_session_back() {
+    let (mut h, first, session) = second_window("untouched");
+    other_window_closes(&mut h, first);
+    assert_eq!(h.state().session_file.as_ref(), Some(&session));
+    assert!(shows(&h, "Caméra de l'autre"), "the session as the other window left it");
+    assert!(said(&h).starts_with("L'autre LiveCraft s'est fermé : sa session est reprise"), "{}", said(&h));
     end(h);
+    let _ = std::fs::remove_dir_all(session.parent().unwrap());
+}
+
+/// This desk was worked on: it stays, and the other window's last save is
+/// copied aside first, never silently overwritten.
+#[test]
+fn a_second_window_worked_on_sets_the_other_ones_session_aside() {
+    let (mut h, first, session) = second_window("worked");
+    click(&mut h, "Entrée CAM 2");
+    other_window_closes(&mut h, first);
+    assert_eq!(h.state().session_file.as_ref(), Some(&session));
+    assert_eq!(project(&h).preview, Some(2), "this desk stays");
+    let aside: Vec<_> = std::fs::read_dir(session.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p != &session && p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(
+        std::fs::read(&aside[0]).unwrap(),
+        std::fs::read(&session).unwrap(),
+        "a copy of what it saved"
+    );
+    let name = aside[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(said(&h).contains(&name), "says where: {}", said(&h));
+    end(h);
+    let _ = std::fs::remove_dir_all(session.parent().unwrap());
+}
+
+/// Closing saves the session, then lets the name go before the outputs
+/// stop, which can take a while: a start meanwhile becomes the first and
+/// finds the session saved, instead of waiting on a window that will not
+/// answer.
+#[test]
+fn a_closing_window_lets_a_later_start_take_over_at_once() {
+    let name = format!("lc-ui-{}-closing", std::process::id());
+    let mut h = desk(small_project());
+    let role = instance::settle(&name, &instance::Request::Show, PATIENT).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().take_role(&ctx, role);
+    assert!(h.state().first.is_some());
+    eframe::App::on_exit(h.state_mut(), None);
+    assert!(h.state().first.is_none(), "let go on closing");
+    let started = Instant::now();
+    assert!(matches!(
+        instance::settle(&name, &instance::Request::Show, PATIENT),
+        Some(instance::Role::First(_))
+    ));
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
 }
 
 #[test]

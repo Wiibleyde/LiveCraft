@@ -125,8 +125,11 @@ impl Saved {
     }
 
     fn load() -> Self {
-        let path = session_to_read(saved_path(), older_saved_path());
-        let Ok(bytes) = std::fs::read(&path) else { return Self::default() };
+        Self::load_from(&session_to_read(saved_path(), older_saved_path()))
+    }
+
+    fn load_from(path: &std::path::Path) -> Self {
+        let Ok(bytes) = std::fs::read(path) else { return Self::default() };
         match serde_json::from_slice::<Self>(&bytes) {
             Ok(mut saved) => {
                 saved.each_secret(secret::open);
@@ -135,7 +138,7 @@ impl Saved {
             Err(_) => {
                 // Set aside, not overwritten: the empty desk that starts now
                 // must not erase a session someone could still recover.
-                let _ = std::fs::rename(&path, path.with_extension("illisible.json"));
+                let _ = std::fs::rename(path, path.with_extension("illisible.json"));
                 Self::default()
             }
         }
@@ -251,9 +254,58 @@ pub struct App {
     asks_ffmpeg: bool,
     /// Requests from later starts, while this is the first window open.
     first: Option<instance::First>,
-    /// While another window holds the session: this one leaves it alone, and
-    /// keeps where it would save it for when that window is gone.
-    second: Option<(instance::Second, Option<PathBuf>)>,
+    /// While another window holds the session.
+    second: Option<SessionHeld>,
+    /// This window does not save the session: another one holds it, or what
+    /// that one saved last could not be set aside.
+    not_saving: bool,
+}
+
+/// A window that found the session held by another one.
+struct SessionHeld {
+    second: instance::Second,
+    /// Where this window will keep the session once the other one is gone.
+    session: Option<PathBuf>,
+    /// The desk as this window started, to tell whether it was worked on.
+    desk_at_start: Project,
+}
+
+/// The system's file dialog. While one is up the window cannot take anything
+/// else: later starts are told to wait, not taken for a frozen window.
+struct FileDialog(rfd::FileDialog);
+
+impl FileDialog {
+    fn new() -> Self {
+        Self(rfd::FileDialog::new())
+    }
+
+    fn add_filter(self, name: impl Into<String>, extensions: &[impl ToString]) -> Self {
+        Self(self.0.add_filter(name, extensions))
+    }
+
+    fn set_directory(self, path: impl AsRef<std::path::Path>) -> Self {
+        Self(self.0.set_directory(path))
+    }
+
+    fn set_file_name(self, name: impl Into<String>) -> Self {
+        Self(self.0.set_file_name(name))
+    }
+
+    fn pick_file(self) -> Option<PathBuf> {
+        instance::while_busy(|| self.0.pick_file())
+    }
+
+    fn pick_files(self) -> Option<Vec<PathBuf>> {
+        instance::while_busy(|| self.0.pick_files())
+    }
+
+    fn pick_folder(self) -> Option<PathBuf> {
+        instance::while_busy(|| self.0.pick_folder())
+    }
+
+    fn save_file(self) -> Option<PathBuf> {
+        instance::while_busy(|| self.0.save_file())
+    }
 }
 
 impl App {
@@ -293,10 +345,13 @@ impl App {
         match role {
             instance::Role::First(first) => self.become_first(ctx, first),
             instance::Role::Second(second) => {
-                self.second = Some((second, self.session_file.take()));
+                let desk_at_start = self.with(|s| s.project.clone());
+                self.second = Some(SessionHeld { second, session: self.session_file.take(), desk_at_start });
+                self.not_saving = true;
                 self.say(t!("app.second_window"));
             }
-            instance::Role::Alone => {}
+            instance::Role::Alone { foreign: true } => self.say(t!("app.channel_foreign")),
+            instance::Role::Alone { foreign: false } => {}
         }
     }
 
@@ -309,12 +364,14 @@ impl App {
     /// What later starts handed over: each brings this window to the front,
     /// and a project opens as one dropped on the window would.
     fn take_handed_over(&mut self, ctx: &egui::Context) {
-        if let Some((second, _)) = &mut self.second
-            && let Some(first) = second.try_first()
+        if let Some(held) = &mut self.second
+            && let Some(first) = held.second.try_first()
         {
-            self.session_file = self.second.take().and_then(|(_, session)| session);
+            first.set_ready();
             self.become_first(ctx, first);
-            self.say(t!("app.first_again"));
+            if let Some(held) = self.second.take() {
+                self.take_session_back(held);
+            }
         }
         let handed: Vec<_> =
             self.first.as_ref().map(|f| std::iter::from_fn(|| f.next()).collect()).unwrap_or_default();
@@ -325,6 +382,38 @@ impl App {
                 self.open_from_outside(path);
             }
         }
+    }
+
+    /// The other window is gone, and saved the session as it closed: that save
+    /// is never lost. A desk left as it started gives way to it; a desk worked
+    /// on stays, the other one's save first copied aside.
+    fn take_session_back(&mut self, held: SessionHeld) {
+        let Some(path) = held.session else {
+            self.not_saving = false;
+            self.say(t!("app.first_again"));
+            return;
+        };
+        if !path.is_file() {
+            // The other window never saved: nothing to lose.
+            self.say(t!("app.first_again"));
+        } else if self.with(|s| s.project == held.desk_at_start) {
+            let saved = Saved::load_from(&path);
+            self.engine.load_project(saved.project.clone());
+            self.after_load(None, None);
+            self.saved = saved;
+            self.say(t!("app.session_taken_back"));
+        } else {
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let aside = path.with_file_name(format!("session.{stamp}.json"));
+            if std::fs::copy(&path, &aside).is_err() {
+                self.say(t!("app.session_not_set_aside"));
+                return;
+            }
+            let shown = aside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.say(t!("app.session_set_aside", file = shown));
+        }
+        self.session_file = Some(path);
+        self.not_saving = false;
     }
 
     /// A project named on the command line, as a double-clicked file is,
@@ -519,6 +608,7 @@ impl App {
             asks_ffmpeg,
             first: None,
             second: None,
+            not_saving: false,
         }
     }
 
@@ -762,6 +852,9 @@ impl App {
 impl eframe::App for App {
     /// Runs while the window is minimised too, so a later start finds it.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(first) = &self.first {
+            first.set_ready();
+        }
         self.take_handed_over(ctx);
     }
 
@@ -850,6 +943,9 @@ impl eframe::App for App {
             self.saved.project = self.with(|s| s.project.clone());
             self.saved.store(&path);
         }
+        // Outputs can take a while to close: a later start meanwhile finds the
+        // name free and the session saved, not a window that will not answer.
+        self.first = None;
         self.engine.shutdown();
     }
 }

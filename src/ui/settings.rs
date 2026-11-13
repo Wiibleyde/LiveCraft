@@ -264,7 +264,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&self.saved.record_dir).small());
             if ui.button(t!("settings.folder")).clicked()
-                && let Some(d) = rfd::FileDialog::new().pick_folder()
+                && let Some(d) = FileDialog::new().pick_folder()
             {
                 self.saved.record_dir = d.to_string_lossy().into_owned();
             }
@@ -465,7 +465,7 @@ fn tab_data(ui: &mut egui::Ui, p: &mut Project) {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(120.0));
                 if ui.button(t!("settings.file")).clicked()
-                    && let Some(f) = rfd::FileDialog::new().pick_file()
+                    && let Some(f) = FileDialog::new().pick_file()
                 {
                     d.path = f.to_string_lossy().into_owned();
                 }

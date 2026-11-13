@@ -557,7 +557,7 @@ impl App {
                         });
                     }
                     if ui.button(t!("tools.add_image")).clicked()
-                        && let Some(p) = rfd::FileDialog::new().pick_file()
+                        && let Some(p) = FileDialog::new().pick_file()
                     {
                         let path = p.to_string_lossy().into_owned();
                         list.push(TitleObject::Image { path, x: 0.8, y: 0.05, w: 0.15, h: 0.15 });

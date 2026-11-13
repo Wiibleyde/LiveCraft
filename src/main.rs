@@ -97,12 +97,12 @@ fn main() -> eframe::Result {
     // runs apart, as the modes above do.
     let role = if screenshot.is_none() {
         let request = instance::Request::for_project(project.as_deref());
-        match instance::settle(instance::NAME, &request, instance::WINDOW_WAIT) {
+        match instance::settle(instance::NAME, &request, instance::TIMING) {
             Some(role) => role,
             None => std::process::exit(0),
         }
     } else {
-        instance::Role::Alone
+        instance::Role::Alone { foreign: false }
     };
     // One thread per physical core: the second half would only fight over the
     // same units, and the window, ffmpeg and the browser need their share.
@@ -158,6 +158,10 @@ fn hand_over_to_avx2_build() -> Option<i32> {
     // The children of this process end with it, so closing or killing this
     // wrapper (the one the shortcut and Task Manager show) ends the real program.
     platform::tie_children_to_this_process();
+    // Explorer lets this wrapper, not its child, bring a window forward. The
+    // child needs that leave to bring the LiveCraft already open to the front
+    // when it hands a project over; without it, winit still asks on its own.
+    let _passed = platform::pass_on_foreground_leave();
     let started = std::time::Instant::now();
     // If it cannot start, or dies at once, this build still can.
     let status = std::process::Command::new(faster).args(std::env::args_os().skip(1)).status().ok()?;

@@ -117,7 +117,7 @@ impl App {
             }
             if ui.button(t!("plugin_chain.pick_file")).clicked() {
                 let picked =
-                    rfd::FileDialog::new().add_filter(t!("plugin_chain.file_filter"), &["clap"]).pick_file();
+                    FileDialog::new().add_filter(t!("plugin_chain.file_filter"), &["clap"]).pick_file();
                 if let Some(path) = picked {
                     self.engine.plugins.scan_file(path);
                 }
