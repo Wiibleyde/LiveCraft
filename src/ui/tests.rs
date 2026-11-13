@@ -572,8 +572,7 @@ fn an_ndi_or_omt_input_comes_from_the_menu_and_asks_for_its_source() {
 
 #[test]
 fn network_outputs_start_and_stop_from_the_settings() {
-    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let mut h = desk(small_project());
+    let mut h = desk(project_with_unique_net_names());
     h.state_mut().settings_open = true;
     h.state_mut().settings_tab = 2;
     h.run_steps(3);
@@ -589,7 +588,9 @@ fn network_outputs_start_and_stop_from_the_settings() {
     match crate::netvideo::Net::Ndi.available() {
         Ok(()) => {
             assert!(engine.is_net(), "{}", said(&h));
-            assert_eq!(engine.net.lock().unwrap()[0].name, "LiveCraft");
+            let name = project(&h).ndi_out.name;
+            assert!(name.starts_with("LiveCraft test "));
+            assert_eq!(engine.net.lock().unwrap()[0].name, name);
             click(&mut h, "Arrêter NDI / OMT");
             assert!(!engine.is_net());
         }
@@ -602,16 +603,22 @@ fn network_outputs_start_and_stop_from_the_settings() {
     end(h);
 }
 
-/// Both tests offer the same source names, and a name is taken for the whole
-/// process: they run one after the other.
-static NET_NAMES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// A project whose NDI and OMT senders carry a name no other test run on this
+/// machine uses (process id and counter), as a name is taken machine-wide.
+fn project_with_unique_net_names() -> Project {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut p = small_project();
+    p.ndi_out.name = format!("LiveCraft test {} {n}", std::process::id());
+    p.omt_out.name = format!("LiveCraft test {} {n}", std::process::id());
+    p
+}
 
 /// Stop then Start at once: the sender just stopped is still being torn down,
 /// and the new one must not fail on its name ("nom déjà pris").
 #[test]
 fn a_network_output_starts_again_right_after_it_stops() {
-    let _alone = NET_NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let mut h = desk(small_project());
+    let mut h = desk(project_with_unique_net_names());
     h.state_mut().settings_open = true;
     h.state_mut().settings_tab = 2;
     h.run_steps(3);
