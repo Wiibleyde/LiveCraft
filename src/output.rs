@@ -71,12 +71,15 @@ pub struct Encoder {
     pictures: Arc<Mutex<FrameLog>>,
 }
 
-/// Pictures and sound frames added at the end of a file. Both lines follow
-/// the same clock, so more than a frame means they had drifted apart.
+/// Pictures and sound frames added at the end of a file, and where its
+/// picture and sound ended before, in seconds. Both lines follow the same
+/// clock, so more than a frame means they had drifted apart.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Padding {
     pub pictures: u64,
     pub samples: u64,
+    pub picture_end: f64,
+    pub sound_end: f64,
 }
 
 /// Where a file starts on the shared clock until ffmpeg is ready.
@@ -123,7 +126,12 @@ fn join_by<T>(job: JoinHandle<Option<T>>, deadline: Instant) -> Result<Option<T>
 fn padding(p: &PictureTail, s: &SoundTail, fps: u32) -> Option<Padding> {
     p.last.as_ref()?;
     let (frames, samples) = clock::even_end(p.frames, s.samples, fps);
-    Some(Padding { pictures: frames - p.frames, samples: samples - s.samples })
+    Some(Padding {
+        pictures: frames - p.frames,
+        samples: samples - s.samples,
+        picture_end: p.frames as f64 / fps.max(1) as f64,
+        sound_end: s.samples as f64 / AUDIO_RATE as f64,
+    })
 }
 
 /// Pads the shorter of picture and sound to the end of the other: a file
@@ -608,6 +616,7 @@ mod tests {
         let (done, finished) = std::sync::mpsc::channel();
         thread::spawn(move || done.send(enc.finish(Duration::from_secs(1))));
         assert_eq!(finished.recv_timeout(Duration::from_secs(60)), Ok(false));
-        assert_eq!(*padded.lock().unwrap(), Some(Padding { pictures: 30, samples: 0 }));
+        let ends = Padding { pictures: 30, samples: 0, picture_end: 9.0, sound_end: 10.0 };
+        assert_eq!(*padded.lock().unwrap(), Some(ends));
     }
 }
