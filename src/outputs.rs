@@ -538,8 +538,10 @@ mod tests {
     #[test]
     fn a_recording_that_never_reaches_its_end_is_finished_after_a_second() {
         let engine = Engine::start(Project::blank());
+        // Its process never ends by itself: finishing it waits this long.
+        let patience = Duration::from_secs(2);
         let stopped = Instant::now();
-        engine.ending.lock().unwrap().end([(crate::output::never_ending(), None)], Duration::from_secs(1));
+        engine.ending.lock().unwrap().end([(crate::output::never_ending(), None)], patience);
         engine.finish_ended();
         assert_eq!(engine.ending.lock().unwrap().list.len(), 1, "finished before its end");
         // Both loops hand it on once the second is up.
@@ -549,7 +551,9 @@ mod tests {
         }
         assert!(stopped.elapsed() >= END_WAIT);
         assert_eq!(engine.ending.lock().unwrap().finishing.len(), 1);
+        let handed = Instant::now();
         engine.shutdown();
-        assert!(engine.ending.lock().unwrap().finishing.is_empty(), "closing did not wait for it");
+        let waited = handed.elapsed();
+        assert!(waited >= patience - Duration::from_millis(300), "closing waited only {waited:?} for it");
     }
 }
