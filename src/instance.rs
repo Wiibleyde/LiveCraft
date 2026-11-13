@@ -44,6 +44,8 @@ pub const TIMING: Timing = Timing {
 
 /// How often a window that found the session taken asks for it again.
 const RETRY_EVERY: Duration = Duration::from_secs(3);
+/// How long a start told the window is full waits before calling again.
+const RETRY_PAUSE: Duration = Duration::from_millis(100);
 /// Room for any path, and no more.
 const MAX_REQUEST: usize = 256 * 1024;
 /// Callers answered at once; more are told to try again.
@@ -151,18 +153,24 @@ pub fn hand_over(name: &str, request: &Request, timing: Timing) -> Handed {
     line.push('\n');
     let name = name.to_string();
     let (tx, rx) = mpsc::channel();
-    // Whatever blocks on the way, a write to a window frozen whole say, is
-    // left behind: this start waits so long at most.
-    std::thread::spawn(move || {
-        let _ = tx.send(exchange(&name, line.as_bytes(), timing));
-    });
     let longest = timing.window * 2 + timing.patience + Duration::from_secs(2);
-    rx.recv_timeout(longest).unwrap_or(Handed::NoAnswer)
+    let until = Instant::now() + longest;
+    std::thread::spawn(move || {
+        let _ = tx.send(exchange(&name, line.as_bytes(), timing, until));
+    });
+    // The exchange ends by `until`. Only what blocks on the way, a write to a
+    // window frozen whole say, is left behind: this start waits so long at most.
+    rx.recv_timeout(longest + Duration::from_secs(2)).unwrap_or(Handed::NoAnswer)
 }
 
-fn exchange(name: &str, line: &[u8], timing: Timing) -> Handed {
+/// Ends by `until`, unless reaching or writing to the window blocks (a window
+/// frozen whole): once a start has given up, a request still on its way could
+/// be opened by the window as well.
+fn exchange(name: &str, line: &[u8], timing: Timing, until: Instant) -> Handed {
     // Between two words from the window: long enough for one free to take it.
     let silence = timing.window + Duration::from_secs(2);
+    // What one more try takes at most: the pause, reaching the window, its answer.
+    let one_try = RETRY_PAUSE + timing.window + silence;
     let mut connected = None::<Instant>;
     loop {
         let mut conn = match connect_local(name, Instant::now() + timing.window) {
@@ -186,15 +194,18 @@ fn exchange(name: &str, line: &[u8], timing: Timing) -> Handed {
                 Ok("ok") => return Handed::Taken,
                 Ok("wait") if since.elapsed() >= timing.patience => return Handed::Kept,
                 Ok("wait") => {}
-                // Too many callers at once: this one tries again shortly.
-                Ok("full") if since.elapsed() < timing.patience => break,
+                // Too many callers at once: this one tries again shortly, if
+                // a whole try still fits. Turned away, it left nothing behind.
+                Ok("full") if since.elapsed() < timing.patience && Instant::now() + one_try < until => {
+                    break;
+                }
                 Ok("gone") => return Handed::NobodyThere,
                 Ok("bad") => return Handed::Refused,
                 _ => return Handed::NoAnswer,
             }
         }
         drop(conn);
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(RETRY_PAUSE);
     }
 }
 
@@ -668,6 +679,37 @@ mod tests {
         expected.sort();
         assert_eq!(taken, expected, "each one taken once; the starts: {ended:?}");
         assert!(ended.iter().all(|e| e == "handed over"), "each start ended: {ended:?}");
+    }
+
+    /// However a crowd of starts ends, left with a busy window or turned away
+    /// to run on their own, each project opens in one window only.
+    #[test]
+    fn crowded_starts_open_each_project_in_one_window_only() {
+        let name = unique("crowd");
+        let timing = Timing {
+            window: Duration::from_secs(1),
+            patience: Duration::from_millis(600),
+            startup: Duration::from_secs(60),
+        };
+        // Busy starting throughout: the first callers are kept, the others turned away.
+        let first = First::claim(&name, timing).unwrap();
+        let request = |i: usize| format!("{:?}", Request::Open(format!("{i}.livecraft")));
+        let starts: Vec<_> = (0..MAX_CALLERS + MAX_TURNED_AWAY + 3)
+            .map(|i| later_start(&name, Request::Open(format!("{i}.livecraft")), timing))
+            .collect();
+        let mut left_with_it: Vec<String> = Vec::new();
+        for (i, start) in starts.into_iter().enumerate() {
+            match start.join().unwrap() {
+                None => left_with_it.push(request(i)),
+                Some(Role::Second(_)) => {}
+                Some(_) => panic!("start {i} took the name"),
+            }
+        }
+        first.set_ready();
+        let mut taken: Vec<String> = std::iter::from_fn(|| first.next()).map(|r| format!("{r:?}")).collect();
+        taken.sort();
+        left_with_it.sort();
+        assert_eq!(taken, left_with_it, "opened by the first exactly when left with it");
     }
 
     /// A caller turned away hears so even when slow to read: the window hangs
