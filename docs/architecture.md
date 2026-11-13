@@ -48,6 +48,7 @@ stops, the shorter of sound and picture is padded to the other, so both end toge
 | `output.rs`, `outputs.rs` | One encoder, and starting and stopping them |
 | `netvideo.rs`, `ndi.rs`, `omt.rs` | NDI and OMT in and out; runtimes loaded on first use, never shipped |
 | `replay.rs`, `extras.rs` | Instant replay, scripts, data sources, PTZ |
+| `delay.rs` | Video Delay: the pictures and sound kept to show an input again later; the mixer and the sound loop feed it |
 | `functions.rs`, `api.rs` | Named functions, and HTTP and TCP remote control, also https for guests |
 | `vmix_import.rs` | Reading `.vmix` projects |
 | `secret.rs` | Sealing secrets in the session file |
@@ -56,7 +57,7 @@ stops, the shorter of sound and picture is padded to the other, so both end toge
 | `instance.rs` | One window per person: a later start, such as a double-clicked project, hands its project to the window already open and ends |
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
 | `i18n.rs`, `locales/` | Interface text: `t!("key")` reads it from one catalog per language |
-| `selftest.rs`, `playtest.rs`, `calltest.rs` | `--selftest`: real end-to-end checks |
+| `selftest.rs`, `playtest.rs`, `calltest.rs`, `delaytest.rs` | `--selftest`: real end-to-end checks |
 | `soak.rs` | `--soak`: a whole show left running, with memory, timing and outputs watched |
 | `livecheck.rs` | `--livecheck`: a virtual camera and microphone streamed to a local server and read back |
 

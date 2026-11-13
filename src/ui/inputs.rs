@@ -842,6 +842,15 @@ impl App {
                 self.editing = Some(id);
                 ui.close();
             }
+            let delay =
+                ui.button(t!("inputs.add_video_delay")).on_hover_text(t!("inputs.add_video_delay_tip"));
+            if delay.clicked() {
+                let kind = Kind::VideoDelay { source: None, ms: 1000 };
+                let id = self.add_input(t!("inputs.video_delay_name"), kind);
+                self.editing = Some(id);
+                self.edit_tab = 0;
+                ui.close();
+            }
             if ui.button(t!("inputs.telestrator")).clicked() {
                 let id = self.add_input(t!("inputs.telestrator"), Kind::Telestrator { background: None });
                 self.telestrator_for = Some(id);
