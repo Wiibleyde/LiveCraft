@@ -235,6 +235,8 @@ impl Engine {
             let mut s = self.state.lock().unwrap();
             s.project.inputs.push(input.clone());
             s.version += 1;
+            // A delay brought in with its source takes only the memory left.
+            s.fit_delay(input.id);
             (s.project.out_w, s.project.out_h, s.project.fps, s.project.hardware_decoding)
         };
         let rt = sources::start(&input, w, h, fps, card);
@@ -250,10 +252,12 @@ impl Engine {
         self.stop_outputs_of(id);
     }
 
-    /// Brings back the last closed input and everything that used it.
-    pub fn undo(&self) {
+    /// Brings back the last closed input and everything that used it. Says
+    /// which Video Delays were left without a source rather than show
+    /// themselves through it.
+    pub fn undo(&self) -> Option<String> {
         let back = self.state.lock().unwrap().undo.take();
-        let Some(closed) = back else { return };
+        let closed = back?;
         let (w, h, fps, card) = {
             let s = self.state.lock().unwrap();
             (s.project.out_w, s.project.out_h, s.project.fps, s.project.hardware_decoding)
@@ -261,7 +265,8 @@ impl Engine {
         // The running source first, so the input never appears without one.
         let rt = sources::start(&closed.input, w, h, fps, card);
         self.rts.lock().unwrap().insert(closed.input.id, rt);
-        self.state.lock().unwrap().restore(closed);
+        let unlinked = self.state.lock().unwrap().restore(closed);
+        (!unlinked.is_empty()).then(|| t!("inputs.undo_unlinked", names = unlinked.join(", ")))
     }
 
     /// Restarts an input after its source settings changed. With `keep`, it
@@ -360,6 +365,7 @@ impl Engine {
                     renumber(output);
                 }
                 Kind::Telestrator { background } => renumber(background),
+                Kind::VideoDelay { source, .. } => renumber(source),
                 Kind::VirtualSet { background, foreground, .. } => {
                     renumber(background);
                     renumber(foreground);

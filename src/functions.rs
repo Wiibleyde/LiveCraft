@@ -122,6 +122,8 @@ pub const NAMES: &[&str] = &[
     "SetPanY",
     "SetPosition",
     "SetText",
+    "SetVideoDelay",
+    "SetVideoDelaySource",
     "SetVolume",
     "SetZoom",
     "Solo",
@@ -268,6 +270,22 @@ impl Engine {
             }
             "LayerOn" | "LayerOff" | "LayerOnOff" => return self.layer_function(name, a),
             "VirtualSet" => return self.virtual_set_function(a),
+            // Milliseconds, held to what memory allows at the project's size.
+            "SetVideoDelay" => {
+                let id = self.target(a)?;
+                let ms = a.number()?.max(0.0) as u32;
+                self.state.lock().unwrap().set_delay_ms(id, ms)?;
+            }
+            // The source by number, name or key; none without a value.
+            "SetVideoDelaySource" => {
+                let id = self.target(a)?;
+                let mut s = self.state.lock().unwrap();
+                let source = match a.value.as_deref() {
+                    None => None,
+                    v => Some(resolve(&s, v).ok_or(t!("functions.input_not_found"))?),
+                };
+                s.set_delay_source(id, source)?;
+            }
             "Audio" | "AudioOn" | "AudioOff" => {
                 self.with_input(a, |i| {
                     i.audio.muted = match name {
@@ -387,7 +405,9 @@ impl Engine {
             }
             "StopPlayList" => self.state.lock().unwrap().playlist_on = false,
             "NextPlayListEntry" => self.playlist_step(),
-            "Undo" => self.undo(),
+            "Undo" => {
+                self.undo();
+            }
             "ScriptStart" => {
                 let wanted = a.value.clone().unwrap_or_default();
                 let code = {
@@ -606,6 +626,30 @@ mod tests {
                 assert!(NAMES.contains(&text), "{text} n'est pas dans NAMES");
             }
         }
+    }
+
+    #[test]
+    fn a_video_delay_is_pointed_and_timed_by_name() {
+        let mut p = Project::blank();
+        p.inputs = vec![
+            Input::new(1, "Caméra", Kind::Bars),
+            Input::new(2, "Retard", Kind::VideoDelay { source: None, ms: 0 }),
+        ];
+        let engine = Engine::start(p);
+        let kind = || engine.state.lock().unwrap().input(2).unwrap().kind.clone();
+        let call =
+            |name: &str, input: &str, value: &str| engine.call(name, &Args::new().input(input).value(value));
+        call("SetVideoDelaySource", "Retard", "Caméra").unwrap();
+        call("setvideodelay", "2", "1500").unwrap();
+        assert_eq!(kind(), Kind::VideoDelay { source: Some(1), ms: 1500 });
+        assert!(call("SetVideoDelaySource", "2", "2").is_err(), "never itself");
+        assert!(call("SetVideoDelaySource", "2", "Personne").is_err());
+        assert!(call("SetVideoDelay", "1", "100").is_err(), "not a delay");
+        call("SetVideoDelay", "2", "999999").unwrap();
+        assert_eq!(kind(), Kind::VideoDelay { source: Some(1), ms: 10_000 }, "held to ten seconds");
+        call("SetVideoDelaySource", "2", "").unwrap();
+        assert_eq!(kind(), Kind::VideoDelay { source: None, ms: 10_000 });
+        engine.shutdown();
     }
 
     #[test]

@@ -121,3 +121,16 @@ fn a_virtual_set_with_missing_fields_still_opens() {
     assert_eq!((look, background, camera), (SetLook::Studio, None, 0));
     assert_eq!(cameras[0].view, SetView::default());
 }
+
+/// Nothing runs for a delay: a new source or time is followed at once, and
+/// what it already holds keeps playing.
+#[test]
+fn a_video_delay_saved_without_its_settings_still_opens() {
+    let kind: Kind = serde_json::from_str(r#"{"VideoDelay":{}}"#).unwrap();
+    assert_eq!(kind, Kind::VideoDelay { source: None, ms: 0 });
+    let a = Kind::VideoDelay { source: Some(1), ms: 500 };
+    let b = Kind::VideoDelay { source: Some(2), ms: 900 };
+    assert!(!b.restarts_source(&a));
+    assert!(b.same_source(&a));
+    assert!(b.restarts_source(&Kind::Scene));
+}

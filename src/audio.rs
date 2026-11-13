@@ -3,8 +3,9 @@
 
 use crate::clap;
 use crate::clock::{self, Drift, Pace, Take};
+use crate::delay;
 use crate::dsp::Chain;
-use crate::engine::Engine;
+use crate::engine::{Engine, delays_to_run};
 use crate::model::{AudioCfg, AudioPick, Kind, ReturnSound};
 use crate::plugins::{Owner, Rack};
 use crate::sources::{AUDIO_RATE, Ring};
@@ -135,6 +136,10 @@ struct Strip {
     may_wait: bool,
     /// What a video call guest hears back.
     call: Option<ReturnSound>,
+    /// A Video Delay: its source, and how many frames later it plays it.
+    delay: Option<(Option<u64>, usize)>,
+    /// A Video Delay plays this input's sound later.
+    tapped: bool,
 }
 
 struct Mix {
@@ -152,7 +157,8 @@ impl Engine {
         let s = self.state.lock().unwrap();
         let p = &s.project;
         let air = s.on_air();
-        let strips = p
+        let delays = delays_to_run(p);
+        let mut strips: Vec<Strip> = p
             .inputs
             .iter()
             .filter(|i| i.kind.has_audio())
@@ -168,8 +174,14 @@ impl Engine {
                     Kind::VideoCall { return_sound, .. } => Some(return_sound),
                     _ => None,
                 },
+                delay: delays.iter().find(|d| d.id == i.id).map(|d| (d.source, delay::sound_frames(d.ms))),
+                tapped: delays.iter().any(|d| d.source == Some(i.id)),
             })
             .collect();
+        // A delay takes its source's block of this turn: sources first, then
+        // the delays, each after any it plays.
+        let rank = |id: u64| delays.iter().position(|d| d.id == id).map_or(0, |n| n + 1);
+        strips.sort_by_key(|s| rank(s.id));
         let fade = if p.ftb_audio { 1.0 - s.ftb_level } else { 1.0 };
         let master = if p.master_muted { 0.0 } else { p.master_level * p.master_level * fade };
         let buses = p
@@ -218,6 +230,11 @@ impl Engine {
         let mut chains: HashMap<u64, Chain> = HashMap::new();
         let mut gains: HashMap<u64, f32> = HashMap::new();
         let mut drifts: HashMap<u64, Drift> = HashMap::new();
+        // What each Video Delay holds of its source's sound, and the blocks
+        // its sources made this turn, after their own treatment.
+        let mut lines: HashMap<u64, delay::Sound> = HashMap::new();
+        let mut taps: HashMap<u64, Vec<f32>> = HashMap::new();
+        let mut project = self.project_generation.load(Ordering::Acquire);
         let mut raw = vec![0f32; BLOCK + 2];
         let mut tmp = vec![0f32; BLOCK];
         let mut buses = vec![vec![0f32; BLOCK]; 8];
@@ -242,33 +259,51 @@ impl Engine {
             drifts.retain(|id, _| mix.strips.iter().any(|s| s.id == *id && s.live));
             own.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             own.values_mut().for_each(|v| v.fill(0.0));
+            // Another project's delays have the last one's numbers, not its sound.
+            if std::mem::replace(&mut project, self.project_generation.load(Ordering::Acquire)) != project {
+                lines.clear();
+            }
+            lines.retain(|id, _| mix.strips.iter().any(|s| s.id == *id && s.delay.is_some()));
+            taps.clear();
             dry.fill(0.0);
             let minus = mix.strips.iter().any(|s| s.call == Some(ReturnSound::MasterMinusGuest));
             for strip in &mix.strips {
-                let Some(rt) = self.rt(strip.id) else { continue };
-                let Some(ring) = &rt.audio else { continue };
-                if !rt.is_playing() && !strip.always_on {
-                    rt.peak.store(0, Ordering::Relaxed);
-                    continue;
-                }
-                // Time the loop gave up went by for every input too: a file's
-                // sound stays with its picture, a live input drops what aged.
-                let take = match strip.live.then(|| drifts.entry(strip.id).or_default()) {
-                    Some(drift) => {
-                        if skipped > 0 {
-                            drift.resync();
+                let rt = self.rt(strip.id);
+                if let Some((source, frames)) = strip.delay {
+                    // Runs whatever happens, as its time goes by all the same.
+                    let fresh = source.and_then(|s| taps.get(&s)).map(Vec::as_slice);
+                    lines.entry(strip.id).or_default().step(fresh, skipped as usize, frames, &mut tmp);
+                } else {
+                    let Some(rt) = &rt else { continue };
+                    let Some(ring) = &rt.audio else { continue };
+                    if !rt.is_playing() && !strip.always_on {
+                        rt.peak.store(0, Ordering::Relaxed);
+                        continue;
+                    }
+                    // Time the loop gave up went by for every input too: a file's
+                    // sound stays with its picture, a live input drops what aged.
+                    let take = match strip.live.then(|| drifts.entry(strip.id).or_default()) {
+                        Some(drift) => {
+                            if skipped > 0 {
+                                drift.resync();
+                            }
+                            drift.take(ring.queued(), FRAMES, held(ring, strip.may_wait))
                         }
-                        drift.take(ring.queued(), FRAMES, held(ring, strip.may_wait))
-                    }
-                    None => {
-                        ring.discard(skipped as usize * FRAMES);
-                        Take { discard: 0, frames: FRAMES, silence: 0 }
-                    }
-                };
-                fill(ring, &take, &mut raw, &mut tmp);
+                        None => {
+                            ring.discard(skipped as usize * FRAMES);
+                            Take { discard: 0, frames: FRAMES, silence: 0 }
+                        }
+                    };
+                    fill(ring, &take, &mut raw, &mut tmp);
+                }
                 let chain = chains.entry(strip.id).or_default();
                 chain.process(&mut tmp, &strip.cfg);
                 rack.run(Owner::Input(strip.id), &mut tmp);
+                // As the input treats it, before its fader: the delay has a
+                // fader of its own, and plays its source muted or not.
+                if strip.tapped {
+                    taps.insert(strip.id, tmp.clone());
+                }
                 let fader = strip.cfg.volume * strip.cfg.volume;
                 let target = if strip.audible { fader } else { 0.0 };
                 let from = *gains.get(&strip.id).unwrap_or(&target);
@@ -309,7 +344,9 @@ impl Engine {
                         solo[n * 2 + 1] += pair[1] * phones;
                     }
                 }
-                rt.peak.store(peak.to_bits(), Ordering::Relaxed);
+                if let Some(rt) = rt {
+                    rt.peak.store(peak.to_bits(), Ordering::Relaxed);
+                }
             }
             // Buses first, because some of them feed Master.
             for b in 1..8 {
