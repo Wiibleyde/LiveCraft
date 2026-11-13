@@ -121,10 +121,16 @@ fn check(dir: &str, sabotage: Sabotage) -> Result<String, String> {
         engine.stats.mix_us.load(Ordering::Relaxed)
     );
     engine.shutdown();
-    let mut lines = Vec::new();
-    for (name, pull) in outcome.map_err(|e| format!("{e} ({pace})"))? {
-        lines.push(format!("{name} {}", pull.map_err(|e| format!("{name} : {e} ({pace})"))?));
+    // Every stream is judged: one failing alone points at its own path, both
+    // failing at what they share.
+    let pulls = outcome.map_err(|e| format!("{e} ({pace})"))?;
+    let failed: Vec<String> =
+        pulls.iter().filter_map(|(name, pull)| Some(format!("{name} : {}", pull.as_ref().err()?))).collect();
+    if !failed.is_empty() {
+        return Err(format!("{} ({pace})", failed.join(" | ")));
     }
+    let mut lines: Vec<String> =
+        pulls.into_iter().filter_map(|(name, pull)| Some(format!("{name} {}", pull.ok()?))).collect();
     lines.push(pace);
     Ok(lines.join(" | "))
 }
@@ -199,9 +205,11 @@ fn spawn_pull(dir: String, name: &'static str, url: String) -> JoinHandle<Result
     thread::spawn(move || {
         let pictures = format!("{dir}/{name}.gray");
         let sound = format!("{dir}/{name}.pcm");
-        pull(&url, &pictures, &sound)?;
+        pull(&url, &pictures, &sound, &format!("{dir}/{name}-ffmpeg.log"))?;
         let frames = std::fs::read(&pictures).map_err(|e| e.to_string())?;
         let pcm = std::fs::read(&sound).map_err(|e| e.to_string())?;
+        // What was heard, kept to be listened to and studied when the check fails.
+        let _ = std::fs::write(format!("{dir}/{name}.wav"), wav(&pcm, SAMPLE_RATE));
         let samples: Vec<f32> =
             pcm.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b) as f32 / 32768.0).collect();
         let picture = judge_pictures(&frames, PULL_W, PULL_H)?;
@@ -213,13 +221,13 @@ fn spawn_pull(dir: String, name: &'static str, url: String) -> JoinHandle<Result
 /// A publisher shows up at the server only once its encoder has a first
 /// picture, which can take seconds; until then opening fails at once. A
 /// stream that breaks once it has given pictures is not tried again.
-fn pull(url: &str, pictures: &str, sound: &str) -> Result<(), String> {
+fn pull(url: &str, pictures: &str, sound: &str, log: &str) -> Result<(), String> {
     let end = Instant::now() + Duration::from_secs(15);
     loop {
         // A file left by an earlier run must not pass for pictures received.
         let _ = std::fs::remove_file(pictures);
         let _ = std::fs::remove_file(sound);
-        let tried = pull_once(url, pictures, sound);
+        let tried = pull_once(url, pictures, sound, log);
         let nothing = std::fs::metadata(pictures).map_or(true, |m| m.len() == 0);
         if tried.is_ok() || !nothing || Instant::now() > end {
             return tried;
@@ -229,10 +237,11 @@ fn pull(url: &str, pictures: &str, sound: &str) -> Result<(), String> {
 }
 
 /// Reads a few seconds of a stream as small grey pictures and mono sound.
-fn pull_once(url: &str, pictures: &str, sound: &str) -> Result<(), String> {
+/// What ffmpeg says, warnings included, goes to `log`.
+fn pull_once(url: &str, pictures: &str, sound: &str, log: &str) -> Result<(), String> {
     let seconds = PULL_SECONDS.to_string();
     let mut child = ffmpeg()
-        .args(["-y", "-loglevel", "error", "-i", url])
+        .args(["-y", "-loglevel", "warning", "-i", url])
         .args([
             "-map",
             "0:v:0",
@@ -252,7 +261,7 @@ fn pull_once(url: &str, pictures: &str, sound: &str) -> Result<(), String> {
         .spawn()
         .map_err(|_| "ffmpeg est introuvable".to_string())?;
     let mut err = child.stderr.take().unwrap();
-    let log = thread::spawn(move || {
+    let said = thread::spawn(move || {
         let mut text = String::new();
         let _ = err.read_to_string(&mut text);
         text
@@ -268,13 +277,36 @@ fn pull_once(url: &str, pictures: &str, sound: &str) -> Result<(), String> {
         }
         sleep(Duration::from_millis(50));
     };
-    let text = log.join().unwrap_or_default();
-    let why = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("sans message").trim().to_string();
+    let text = said.join().unwrap_or_default();
+    let _ = std::fs::write(log, &text);
+    // A warning may come first; the error says why it stopped.
+    let lines = || text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let why = lines().find(|l| l.contains("rror")).or_else(|| lines().next()).unwrap_or("sans message");
     match status {
         Some(s) if s.success() => Ok(()),
         Some(_) => Err(format!("flux illisible : {why}")),
         None => Err(format!("flux muet pendant 25 s : {why}")),
     }
+}
+
+/// Mono 16-bit sound as a WAV file, which any sound editor opens.
+fn wav(pcm: &[u8], rate: usize) -> Vec<u8> {
+    let (len, rate) = (pcm.len() as u32, rate as u32);
+    let mut out = Vec::with_capacity(44 + pcm.len());
+    out.extend(b"RIFF");
+    out.extend((36 + len).to_le_bytes());
+    out.extend(b"WAVEfmt ");
+    out.extend(16u32.to_le_bytes());
+    out.extend(1u16.to_le_bytes()); // integer samples
+    out.extend(1u16.to_le_bytes()); // one channel
+    out.extend(rate.to_le_bytes());
+    out.extend((rate * 2).to_le_bytes()); // bytes a second
+    out.extend(2u16.to_le_bytes()); // bytes a frame
+    out.extend(16u16.to_le_bytes()); // bits a sample
+    out.extend(b"data");
+    out.extend(len.to_le_bytes());
+    out.extend(pcm);
+    out
 }
 
 /// The count shown in frame `n`, drawn into a top-down BGR picture.

@@ -356,7 +356,11 @@ pub(crate) fn judge_tone(samples: &[f32], rate: usize) -> Result<String, String>
             tone_power / power * 100.0
         ));
     }
-    Ok(format!("tonalité {TONE_HZ} Hz à {:.0} dB", db(tone_power)))
+    Ok(format!(
+        "tonalité {TONE_HZ} Hz à {:.0} dB, {:.0} % du son",
+        db(tone_power),
+        tone_power / power * 100.0
+    ))
 }
 
 #[cfg(test)]
