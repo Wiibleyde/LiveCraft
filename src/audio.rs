@@ -763,71 +763,95 @@ mod tests {
         }
     }
 
+    /// Checks `done` every few milliseconds until it holds, for ten seconds
+    /// at most: on a busy machine sound comes late, but it still comes.
+    fn within_10s(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if done() {
+                return true;
+            }
+            if Instant::now() > deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Moves what waits in `ring` to the end of `out`, and says how much.
+    /// Blocks go in whole, so with one reader whole blocks come out.
+    fn take_all(ring: &Ring, out: &mut Vec<f32>) -> usize {
+        let (n, at) = (ring.len(), out.len());
+        out.resize(at + n, 0.0);
+        ring.pull(&mut out[at..]);
+        n
+    }
+
     /// The trap of any return feed: the guest hears their own voice come
     /// back a moment late. What they hear is Master without them.
     #[test]
     fn a_guest_hears_the_show_but_not_themselves() {
         use crate::model::{Input, Project};
+        use crate::sources::InputRt;
         let mut p = Project::blank();
         p.inputs.push(Input::new(1, "Son", Kind::Tone));
+        let engine = Engine::start(p);
+        // The guest joins without the page that receives a call: once open,
+        // it takes the sound going back every 40 ms, before the test can,
+        // and while opening it puts the guest out of the call. The test
+        // plays its part.
         let mut guest = Input::new(2, "Invité", crate::call::new_call());
         guest.audio.follow = false;
-        p.inputs.push(guest);
-        let engine = Engine::start(p);
-        let rt = engine.rt(2).unwrap();
+        let rt = InputRt::for_call();
+        engine.rts.lock().unwrap().insert(2, rt.clone());
+        engine.state.lock().unwrap().project.inputs.push(guest);
         let link = rt.call.clone().unwrap();
+        link.set_connected(true);
         // The guest's voice: a steady level, easy to find in what comes back,
-        // kept a little ahead so a late wake-up does not make a gap in it.
-        // Connected again each time, as the page opening meanwhile resets it.
+        // kept as far ahead as its ring holds. After a stall the sound loop
+        // runs blocks back to back until it is in step again, faster than
+        // anyone talks, so some blocks can still go without it.
         let voice = rt.audio.clone().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
-        let (talking, connection) = (stop.clone(), link.clone());
+        let talking = stop.clone();
         let talker = thread::spawn(move || {
             while !talking.load(Ordering::Relaxed) {
-                connection.set_connected(true);
-                while voice.len() < 9600 {
+                while voice.room() >= 960 {
                     voice.push(&[0.3f32; 960]);
                 }
                 thread::sleep(Duration::from_millis(5));
             }
         });
-        // The sound thread first lists the devices, and on a busy machine a
-        // source can start late: wait until the show's tone and the guest
-        // are both on their meters, then take a fresh stretch.
         let tone = engine.rt(1).unwrap();
-        let (mut tone_seen, mut guest_seen) = (false, false);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !(tone_seen && guest_seen) && Instant::now() < deadline {
-            tone_seen |= tone.peak() > 0.05;
-            guest_seen |= rt.peak() > 0.2;
-            thread::sleep(Duration::from_millis(5));
-        }
-        // Master is read during that stretch, while the guest talks: read
-        // after they stop, it only holds the rest of the show.
-        let until = |enough: usize| {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut master = 0f32;
-            loop {
-                master = master.max(f32::from_bits(engine.bus_peaks[0].load(Ordering::Relaxed)));
-                if link.sound.len() >= enough || Instant::now() > deadline {
-                    return master;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-        };
-        until(1);
+        let tone_heard = within_10s(|| tone.peak() > 0.05);
+        let guest_heard = tone_heard && within_10s(|| rt.peak() > 0.2);
+        // Master's meter shows only the last block made: after a stall, many
+        // go by between two looks. So the test waits until it shows the guest,
+        // meanwhile taking what goes back to them as it comes. That block goes
+        // back right after it is made, so it is in by the next block taken.
         link.sound.clear();
-        let master_peak = until(9600);
-        let mut back = vec![0f32; link.sound.len()];
-        link.sound.pull(&mut back);
+        let mut back = Vec::new();
+        let mut master = 0f32;
+        let on_master = guest_heard
+            && within_10s(|| {
+                master = f32::from_bits(engine.bus_peaks[0].load(Ordering::Relaxed));
+                take_all(&link.sound, &mut back);
+                master > 0.3
+            });
+        let went_back = on_master && within_10s(|| take_all(&link.sound, &mut back) > 0);
         stop.store(true, Ordering::Relaxed);
         let _ = talker.join();
         engine.shutdown();
-        assert!(back.len() > 4800, "sound goes back: {}", back.len());
-        let mean = back.iter().sum::<f32>() / back.len() as f32;
+        assert!(tone_heard, "the show's tone is on its meter: {}", tone.peak());
+        assert!(guest_heard, "the guest is on their meter: {}", rt.peak());
+        assert!(on_master, "the guest is on Master: {master}");
+        assert!(went_back, "sound goes back to the guest");
+        // A block with the guest still in it would be off centre by their level.
+        for (n, block) in back.chunks(BLOCK).enumerate() {
+            let mean = block.iter().sum::<f32>() / block.len() as f32;
+            assert!(mean.abs() < 0.02, "the guest's own voice came back in block {n}: {mean}");
+        }
         let loudest = back.iter().fold(0f32, |m, v| m.max(v.abs()));
-        assert!(master_peak > 0.3, "the guest is on Master: {master_peak}");
-        assert!(mean.abs() < 0.02, "the guest's own voice came back: {mean}");
         assert!(loudest > 0.05, "the rest of the show is heard: {loudest}");
     }
 }
