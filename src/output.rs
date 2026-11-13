@@ -139,7 +139,33 @@ fn even_ends(mut p: PictureTail, mut s: SoundTail, pad: Padding, channels: usize
     let _ = write_silence(&mut s.sock, pad.samples, channels);
 }
 
+/// Recording profiles for editing: intra-only pictures and uncompressed sound,
+/// so no bitrate. The container is chosen by the file's extension.
+fn add_editing(cmd: &mut Command, codec: &str) -> bool {
+    match codec {
+        // 4:2:2 10 bit, profile 3 is 422 HQ; the vendor tag makes editors accept it.
+        "prores_ks" => {
+            cmd.args(["-c:v", "prores_ks", "-profile:v", "3", "-vendor", "apl0", "-pix_fmt", "yuv422p10le"])
+                .args(["-c:a", "pcm_s24le"]);
+        }
+        // DNxHR HQ takes 8 bit 4:2:2 at any size and rate; MXF carries 24 bit PCM.
+        "dnxhd" => {
+            cmd.args(["-c:v", "dnxhd", "-profile:v", "dnxhr_hq", "-pix_fmt", "yuv422p"])
+                .args(["-c:a", "pcm_s24le"]);
+        }
+        // Lossless: planar RGB keeps every value of the picture; AVI wants 16 bit PCM.
+        "magicyuv" => {
+            cmd.args(["-c:v", "magicyuv", "-pix_fmt", "gbrp"]).args(["-c:a", "pcm_s16le"]);
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn add_quality(cmd: &mut Command, s: &Spec, low_latency: bool) {
+    if add_editing(cmd, &s.codec) {
+        return;
+    }
     let kbps = s.kbps.max(100);
     let keyframes = (s.fps * 2).to_string();
     cmd.args(["-c:v", &s.codec, "-pix_fmt", "yuv420p", "-g", &keyframes]);
@@ -505,6 +531,72 @@ pub fn list_encoders() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn arguments(codec: &str, path: &str, split: u32) -> Vec<String> {
+        let spec = Spec {
+            label: String::new(),
+            target: Target::File { path: path.into(), split_minutes: split },
+            codec: codec.into(),
+            w: 1920,
+            h: 1080,
+            fps: 30,
+            kbps: 25000,
+            audio_kbps: 192,
+            audio: AudioPick::MASTER,
+        };
+        let mut cmd = Command::new("ffmpeg");
+        add_quality(&mut cmd, &spec, false);
+        add_file_target(&mut cmd, path, split);
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    fn has(args: &[String], pair: [&str; 2]) -> bool {
+        args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1])
+    }
+
+    #[test]
+    fn prores_is_422_hq_with_24_bit_sound() {
+        let a = arguments("prores_ks", "out.mov", 0);
+        for pair in
+            [["-c:v", "prores_ks"], ["-profile:v", "3"], ["-pix_fmt", "yuv422p10le"], ["-c:a", "pcm_s24le"]]
+        {
+            assert!(has(&a, pair), "{pair:?} in {a:?}");
+        }
+        assert!(!a.iter().any(|x| x == "-b:v" || x == "aac"), "no bitrate, no compressed sound: {a:?}");
+        assert_eq!(a.last().unwrap(), "out.mov");
+    }
+
+    #[test]
+    fn dnxhr_is_hq_422_with_pcm_in_mxf() {
+        let a = arguments("dnxhd", "out.mxf", 0);
+        for pair in
+            [["-c:v", "dnxhd"], ["-profile:v", "dnxhr_hq"], ["-pix_fmt", "yuv422p"], ["-c:a", "pcm_s24le"]]
+        {
+            assert!(has(&a, pair), "{pair:?} in {a:?}");
+        }
+        assert!(!a.iter().any(|x| x == "-movflags"), "mxf is not fragmented: {a:?}");
+    }
+
+    #[test]
+    fn magicyuv_is_lossless_rgb_with_pcm_in_avi() {
+        let a = arguments("magicyuv", "out.avi", 0);
+        for pair in [["-c:v", "magicyuv"], ["-pix_fmt", "gbrp"], ["-c:a", "pcm_s16le"]] {
+            assert!(has(&a, pair), "{pair:?} in {a:?}");
+        }
+        assert!(!a.iter().any(|x| x == "-movflags"), "{a:?}");
+    }
+
+    #[test]
+    fn streaming_codecs_keep_their_arguments() {
+        let a = arguments("libx264", "out.mp4", 0);
+        assert!(has(&a, ["-c:a", "aac"]) && has(&a, ["-pix_fmt", "yuv420p"]), "{a:?}");
+    }
+
+    #[test]
+    fn a_split_profile_file_names_its_extension() {
+        let a = arguments("dnxhd", "dir/out.mxf", 10);
+        assert_eq!(a.last().unwrap(), "dir/out-%03d.mxf");
+    }
 
     #[test]
     fn tee_keeps_every_destination_apart() {

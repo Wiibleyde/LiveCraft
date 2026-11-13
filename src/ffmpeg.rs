@@ -30,6 +30,10 @@ const HARDWARE: [&str; 7] =
 /// Software encoders offered besides libx264, when the build has them.
 const SOFTWARE: [&str; 2] = ["libx265", "libsvtav1"];
 
+/// Encoders of the recording profiles for editing, kept apart from the ones
+/// offered for streaming: they are only asked for by a profile.
+pub const EDITING: [&str; 3] = ["prores_ks", "dnxhd", "magicyuv"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum How {
     /// Named by `LIVECRAFT_FFMPEG`.
@@ -157,6 +161,8 @@ pub struct Capabilities {
     /// Encoders it lists, software ones first, libx264 leading. Listed is not
     /// proven to work: hardware ones are only tried when asked.
     pub encoders: Vec<String>,
+    /// The encoders of the editing recording profiles it lists.
+    pub editing: Vec<String>,
 }
 
 impl Capabilities {
@@ -167,6 +173,11 @@ impl Capabilities {
     /// The listed encoders that are tied to hardware.
     pub fn hardware(&self) -> Vec<String> {
         self.encoders.iter().filter(|e| HARDWARE.contains(&e.as_str())).cloned().collect()
+    }
+
+    /// Whether an editing encoder is missing, which is only known once ffmpeg answered.
+    pub fn lacks_editing(&self, encoder: &str) -> bool {
+        self.answered() && !self.editing.iter().any(|e| e == encoder)
     }
 
     fn silent() -> Self {
@@ -223,7 +234,8 @@ fn probe() -> Capabilities {
     let has = |n: &&&str| listed.iter().any(|l| l == **n);
     let mut encoders = vec!["libx264".to_string()];
     encoders.extend(SOFTWARE.iter().filter(has).chain(HARDWARE.iter().filter(has)).map(|n| n.to_string()));
-    Capabilities { version: Some(version), srt, encoders }
+    let editing = EDITING.iter().filter(has).map(|n| n.to_string()).collect();
+    Capabilities { version: Some(version), srt, encoders, editing }
 }
 
 static CAPABILITIES: OnceLock<Capabilities> = OnceLock::new();
@@ -510,8 +522,18 @@ mod tests {
             version: None,
             srt: true,
             encoders: vec!["libx264".into(), "libx265".into(), "h264_nvenc".into()],
+            editing: vec![],
         };
         assert_eq!(c.hardware(), ["h264_nvenc"]);
+    }
+
+    #[test]
+    fn an_editing_encoder_is_missing_only_once_ffmpeg_answered() {
+        let c =
+            Capabilities { version: Some("9".into()), editing: vec!["dnxhd".into()], ..Default::default() };
+        assert!(!c.lacks_editing("dnxhd"));
+        assert!(c.lacks_editing("prores_ks"));
+        assert!(!Capabilities::default().lacks_editing("prores_ks"), "not answered is not a fault");
     }
 
     #[test]

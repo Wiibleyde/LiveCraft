@@ -1105,11 +1105,15 @@ impl AudioPick {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
 pub struct RecordCfg {
     pub enabled: bool,
     /// mp4, mkv, mov, ts
     pub container: String,
     pub codec: String,
+    /// "" records with `container` and `codec`; otherwise a profile for
+    /// editing that sets both itself (see `EDITING_PROFILES`).
+    pub profile: String,
     pub video_kbps: u32,
     pub audio_kbps: u32,
     pub audio: AudioPick,
@@ -1124,6 +1128,7 @@ impl RecordCfg {
             enabled,
             container: "mp4".into(),
             codec: "libx264".into(),
+            profile: String::new(),
             video_kbps,
             audio_kbps: 192,
             audio: AudioPick::MASTER,
@@ -1131,7 +1136,44 @@ impl RecordCfg {
             split_minutes: 0,
         }
     }
+
+    /// The profile for editing chosen, if any.
+    pub fn editing(&self) -> Option<&'static EditingProfile> {
+        EDITING_PROFILES.iter().find(|p| p.id == self.profile)
+    }
+
+    /// The file extension: the profile's, or the chosen container.
+    pub fn extension(&self) -> &str {
+        self.editing().map_or(self.container.as_str(), |p| p.container)
+    }
+
+    /// The encoder: the profile's, or the chosen codec.
+    pub fn encoder(&self) -> &str {
+        self.editing().map_or(self.codec.as_str(), |p| p.encoder)
+    }
 }
+
+impl Default for RecordCfg {
+    fn default() -> Self {
+        Self::new(false, 6000)
+    }
+}
+
+/// A way of recording meant for editing afterwards: its own container,
+/// encoder and sound, without bitrate to choose.
+pub struct EditingProfile {
+    /// What is saved in the project.
+    pub id: &'static str,
+    pub container: &'static str,
+    /// ffmpeg's encoder name.
+    pub encoder: &'static str,
+}
+
+pub const EDITING_PROFILES: [EditingProfile; 3] = [
+    EditingProfile { id: "prores", container: "mov", encoder: "prores_ks" },
+    EditingProfile { id: "dnxhr", container: "mxf", encoder: "dnxhd" },
+    EditingProfile { id: "magicyuv", container: "avi", encoder: "magicyuv" },
+];
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
@@ -1470,5 +1512,33 @@ impl Project {
         p.preview = Some(8);
         p.program = Some(7);
         p
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    #[test]
+    fn an_old_recorder_loads_without_a_profile() {
+        let old = r#"{"enabled":true,"container":"mkv","codec":"libx265","video_kbps":9000,
+            "audio_kbps":192,"audio":{"buses":[0,0,0,0],"count":0},"folder":"","split_minutes":0}"#;
+        let r: RecordCfg = serde_json::from_str(old).unwrap();
+        assert_eq!(r.profile, "");
+        assert_eq!((r.extension(), r.encoder()), ("mkv", "libx265"));
+        let bare: RecordCfg = serde_json::from_str("{}").unwrap();
+        assert_eq!(bare.extension(), "mp4");
+    }
+
+    #[test]
+    fn a_profile_sets_its_container_and_encoder() {
+        for (id, ext, enc) in
+            [("prores", "mov", "prores_ks"), ("dnxhr", "mxf", "dnxhd"), ("magicyuv", "avi", "magicyuv")]
+        {
+            let r = RecordCfg { profile: id.into(), container: "mkv".into(), ..RecordCfg::default() };
+            assert_eq!((r.extension(), r.encoder()), (ext, enc));
+        }
+        let unknown = RecordCfg { profile: "gone".into(), ..RecordCfg::default() };
+        assert_eq!(unknown.extension(), "mp4", "an unknown profile records as before");
     }
 }

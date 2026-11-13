@@ -94,14 +94,20 @@ impl Engine {
         for (n, cfg) in cfgs.iter().enumerate().filter(|(_, c)| c.enabled) {
             let dir = if cfg.folder.is_empty() { fallback_dir } else { &cfg.folder };
             let path = std::path::Path::new(dir)
-                .join(format!("{stamp}-{}.{}", n + 1, cfg.container))
+                .join(format!("{stamp}-{}.{}", n + 1, cfg.extension()))
                 .to_string_lossy()
                 .into_owned();
+            if let Some(p) = cfg.editing()
+                && crate::ffmpeg::capabilities().lacks_editing(p.encoder)
+            {
+                finish_later(started, Duration::from_secs(5));
+                return Err(t!("outputs.profile_missing", n = n + 1, encoder = p.encoder));
+            }
             let opened = std::fs::create_dir_all(dir).map_err(|e| e.to_string()).and_then(|()| {
                 Encoder::start(Spec {
                     label: t!("outputs.recording_n", n = n + 1),
                     target: Target::File { path: path.clone(), split_minutes: cfg.split_minutes },
-                    codec: cfg.codec.clone(),
+                    codec: cfg.encoder().to_string(),
                     w,
                     h,
                     fps,
