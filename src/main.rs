@@ -23,6 +23,7 @@ mod frame;
 mod functions;
 mod fx;
 mod gpu;
+mod instance;
 // The live check drives Windows-only parts: a virtual camera, VB-CABLE and the registry.
 #[cfg(windows)]
 mod livecheck;
@@ -87,13 +88,25 @@ fn main() -> eframe::Result {
     if let Some(file) = value_of("--scan-clap") {
         std::process::exit(plugins::scan_one_and_print(&file));
     }
+    let screenshot = value_of("--screenshot");
+    let project = value_of("--project");
+    let open = value_of("--open");
+    // A start while LiveCraft already runs for this person, a double-clicked
+    // project say, hands its project to that window and ends. A check picture
+    // runs apart, as the modes above do.
+    let role = if screenshot.is_none() {
+        let request = instance::Request::for_project(project.as_deref());
+        match instance::settle(instance::NAME, &request, instance::WINDOW_WAIT) {
+            Some(role) => role,
+            None => std::process::exit(0),
+        }
+    } else {
+        instance::Role::Alone
+    };
     // One thread per physical core: the second half would only fight over the
     // same units, and the window, ffmpeg and the browser need their share.
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
     let _ = rayon::ThreadPoolBuilder::new().num_threads((cores / 2).max(2)).build_global();
-    let screenshot = value_of("--screenshot");
-    let project = value_of("--project");
-    let open = value_of("--open");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("LiveCraft")
@@ -105,7 +118,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "LiveCraft",
         options,
-        Box::new(move |cc| Ok(Box::new(ui::App::new(cc, screenshot, open, project, lang)))),
+        Box::new(move |cc| Ok(Box::new(ui::App::new(cc, screenshot, open, project, lang, role)))),
     )
 }
 
@@ -164,7 +177,8 @@ fn crashed_at_start(code: i32, after: std::time::Duration) -> bool {
 }
 
 /// Lets the installer see that LiveCraft is running (`AppMutex`), so that an
-/// upgrade or an uninstall asks to close it. It does not stop a second copy.
+/// upgrade or an uninstall asks to close it. It is the same for every account
+/// and stops nothing: `instance` keeps one window per person.
 #[cfg(windows)]
 fn announce_running() {
     use windows_sys::Win32::System::Threading::CreateMutexW;

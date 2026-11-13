@@ -589,15 +589,7 @@ impl App {
             "mp3" | "wav" | "m4a" | "flac" | "ogg" | "aac" => {
                 self.add_input(&name, Kind::AudioFile { path, looped: false });
             }
-            "livecraft" | "regie" | "vmix" => {
-                if self.with(|s| s.padlock) {
-                    self.say(t!("inputs.locked_open_project"));
-                } else if self.with(|s| s.project.inputs.is_empty()) {
-                    self.open_path(path);
-                } else {
-                    self.confirm_open = Some(path);
-                }
-            }
+            "livecraft" | "regie" | "vmix" => self.open_from_outside(path),
             _ if crate::slides::is_presentation(&path) => {
                 self.add_input(&name, Kind::PowerPoint { path });
             }

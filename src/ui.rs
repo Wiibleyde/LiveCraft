@@ -20,6 +20,7 @@ use crate::api::ApiConfig;
 use crate::engine::{Compositor, Engine, ROUTES, State};
 use crate::functions::Args;
 use crate::i18n::{Lang, language, set_language};
+use crate::instance;
 use crate::model::*;
 use crate::netvideo::Net;
 use crate::output;
@@ -236,6 +237,11 @@ pub struct App {
     session_file: Option<PathBuf>,
     /// Whether ffmpeg is asked what it can do: a real run, or a look at the About tab.
     asks_ffmpeg: bool,
+    /// Requests from later starts, while this is the first window open.
+    first: Option<instance::First>,
+    /// While another window holds the session: this one leaves it alone, and
+    /// keeps where it would save it for when that window is gone.
+    second: Option<(instance::Second, Option<PathBuf>)>,
 }
 
 impl App {
@@ -246,6 +252,7 @@ impl App {
         open: Option<String>,
         project_file: Option<String>,
         lang: Option<Lang>,
+        role: instance::Role,
     ) -> Self {
         let open = open.as_deref().unwrap_or("");
         apply_style(&cc.egui_ctx);
@@ -261,7 +268,48 @@ impl App {
             saved.language = lang.code().into();
         }
         let remote = shot_path.is_none();
-        Self::start(cc, saved, shot_path, open, project_file, remote)
+        let mut app = Self::start(cc, saved, shot_path, open, project_file, remote);
+        app.take_role(&cc.egui_ctx, role);
+        app
+    }
+
+    /// Where this window stands among the LiveCraft windows of this account.
+    fn take_role(&mut self, ctx: &egui::Context, role: instance::Role) {
+        match role {
+            instance::Role::First(first) => self.become_first(ctx, first),
+            instance::Role::Second(second) => {
+                self.second = Some((second, self.session_file.take()));
+                self.say(t!("app.second_window"));
+            }
+            instance::Role::Alone => {}
+        }
+    }
+
+    fn become_first(&mut self, ctx: &egui::Context, first: instance::First) {
+        let ctx = ctx.clone();
+        first.wake_with(move || ctx.request_repaint());
+        self.first = Some(first);
+    }
+
+    /// What later starts handed over: each brings this window to the front,
+    /// and a project opens as one dropped on the window would.
+    fn take_handed_over(&mut self, ctx: &egui::Context) {
+        if let Some((second, _)) = &mut self.second
+            && let Some(first) = second.try_first()
+        {
+            self.session_file = self.second.take().and_then(|(_, session)| session);
+            self.become_first(ctx, first);
+            self.say(t!("app.first_again"));
+        }
+        let handed: Vec<_> =
+            self.first.as_ref().map(|f| std::iter::from_fn(|| f.next()).collect()).unwrap_or_default();
+        for request in handed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            if let instance::Request::Open(path) = request {
+                self.open_from_outside(path);
+            }
+        }
     }
 
     /// A project named on the command line, as a double-clicked file is,
@@ -449,6 +497,8 @@ impl App {
             api_lan,
             session_file: remote.then(saved_path),
             asks_ffmpeg,
+            first: None,
+            second: None,
         }
     }
 
@@ -690,6 +740,11 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Runs while the window is minimised too, so a later start finds it.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.take_handed_over(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.sync_textures(&ctx);

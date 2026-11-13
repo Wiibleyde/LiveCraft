@@ -57,12 +57,16 @@ bars.format_vertical = Vertical {fps}
 bars.starting = Démarrage…
 bars.stats_line = i/s : {ticks}   Rendu : {render} ms   Processeur LiveCraft : {me} %   Total : {total} %
 bars.machine_busy = Machine chargée
+bars.session_not_saved = Session non enregistrée
+bars.session_not_saved_tip = Un autre LiveCraft ouvert garde la session : cette fenêtre ne l'écrase pas. Enregistrez votre projet avec Enregistrer sous. La session revient à cette fenêtre dès que l'autre se ferme.
 bars.nothing_to_capture = Rien à capturer
 bars.image_saved = Image enregistrée : {path}
 bars.snapshot_failed = Échec de l'instantané : {error}
 
 # src/ui.rs
 app.capture_failed = Capture impossible : {error}
+app.second_window = LiveCraft est déjà ouvert mais ne répond pas : cette fenêtre n'enregistre pas la session, pour ne pas écraser la sienne.
+app.first_again = L'autre LiveCraft s'est fermé : cette fenêtre enregistre de nouveau la session.
 
 # src/widgets.rs
 widgets.input_settings = Réglages de l'entrée

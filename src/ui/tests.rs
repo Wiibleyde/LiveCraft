@@ -797,6 +797,102 @@ fn a_dropped_project_asks_first_and_respects_the_padlock() {
     end(h);
 }
 
+/// Starts LiveCraft again while `h` is the window open, as a double-click
+/// does: true once that start handed its request over and ended.
+fn start_again(h: &mut Harness<'static, App>, name: &str, request: instance::Request) -> bool {
+    let name = name.to_string();
+    let later =
+        std::thread::spawn(move || instance::settle(&name, &request, Duration::from_secs(5)).is_none());
+    while !later.is_finished() {
+        wait(h, 10);
+    }
+    h.run_steps(3);
+    later.join().unwrap()
+}
+
+fn project_file(dir: &std::path::Path, file: &str, camera: &str) -> String {
+    let mut p = small_project();
+    p.inputs.iter_mut().find(|i| i.id == 1).unwrap().name = camera.into();
+    let path = dir.join(file);
+    std::fs::write(&path, serde_json::to_vec(&p).unwrap()).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+fn shows(h: &Harness<'static, App>, camera: &str) -> bool {
+    project(h).inputs.iter().any(|i| i.name == camera)
+}
+
+/// A project double-clicked while LiveCraft runs opens in the window already
+/// open, with the same care as a project dropped on it.
+#[test]
+fn a_later_start_opens_its_project_in_the_window_already_open() {
+    let dir = std::env::temp_dir().join(format!("livecraft-later-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let public = project_file(&dir, "public.livecraft", "Caméra du public");
+    let balcony = project_file(&dir, "balcon.livecraft", "Caméra du balcon");
+    // Its own name: neither another test nor a LiveCraft running here answers.
+    let name = format!("lc-ui-{}-later", std::process::id());
+    let mut h = desk(Project::blank());
+    let role = instance::settle(&name, &instance::Request::Show, Duration::from_secs(5)).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().take_role(&ctx, role);
+    assert!(h.state().first.is_some(), "the first window answers later starts");
+
+    assert!(start_again(&mut h, &name, instance::Request::Open(public.clone())));
+    assert!(shows(&h, "Caméra du public"), "an empty desk takes it at once");
+    assert_eq!(h.state().current_file.as_deref(), Some(public.as_str()), "and saves back to it");
+
+    assert!(start_again(&mut h, &name, instance::Request::Open(balcony.clone())));
+    assert_eq!(h.state().confirm_open.as_deref(), Some(balcony.as_str()), "a desk in use asks first");
+    assert!(shows(&h, "Caméra du public"), "nothing replaced before the answer");
+    // The top bar's menu has the same name; this is the question's button.
+    h.get_all_by_label("Ouvrir").max_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).unwrap().click();
+    h.run_steps(3);
+    assert!(shows(&h, "Caméra du balcon"));
+
+    h.state().with(|s| s.padlock = true);
+    assert!(start_again(&mut h, &name, instance::Request::Open(public)));
+    assert!(h.state().confirm_open.is_none(), "never past the padlock");
+    let said = h.state().message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
+    assert!(said.starts_with("Verrouillé"), "{said}");
+    assert!(
+        start_again(&mut h, &name, instance::Request::Show),
+        "a start without a project only brings it forward"
+    );
+    assert!(shows(&h, "Caméra du balcon"));
+    end(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A window started while another one holds the session without answering
+/// must not save over that session, and says so, until the other one closes.
+#[test]
+fn a_second_window_leaves_the_session_alone_until_the_first_closes() {
+    let name = format!("lc-ui-{}-second", std::process::id());
+    let short = Duration::from_millis(300);
+    let frozen = instance::First::claim(&name, short).unwrap();
+    let Some(role @ instance::Role::Second(_)) = instance::settle(&name, &instance::Request::Show, short)
+    else {
+        panic!("runs on its own");
+    };
+    let mut h = desk(small_project());
+    let session = std::env::temp_dir().join(format!("livecraft-second-{}.json", std::process::id()));
+    h.state_mut().session_file = Some(session.clone());
+    let ctx = h.ctx.clone();
+    h.state_mut().take_role(&ctx, role);
+    h.run_steps(2);
+    assert!(h.state().session_file.is_none(), "neither saved as it goes nor on closing");
+    h.get_by_label("Session non enregistrée");
+
+    drop(frozen);
+    h.state_mut().second.as_mut().unwrap().0.ask_now();
+    h.run_steps(2);
+    assert_eq!(h.state().session_file, Some(session), "the session comes back once the other one closed");
+    assert!(h.state().first.is_some(), "and later starts come here");
+    assert!(h.query_by_label("Session non enregistrée").is_none());
+    end(h);
+}
+
 #[test]
 fn simple_mode_shows_inputs_whatever_tab_was_chosen() {
     let mut h = desk(small_project());

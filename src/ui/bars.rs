@@ -142,6 +142,18 @@ impl App {
         }
     }
 
+    /// A project from outside, dropped on the window or handed over by a later
+    /// start, replaces the desk: it asks first, and never gets past the padlock.
+    pub(super) fn open_from_outside(&mut self, path: String) {
+        if self.with(|s| s.padlock) {
+            self.say(t!("inputs.locked_open_project"));
+        } else if self.with(|s| s.project.inputs.is_empty()) {
+            self.open_path(path);
+        } else {
+            self.confirm_open = Some(path);
+        }
+    }
+
     /// Nothing from the previous project may linger on the new one, which
     /// reuses the same input numbers.
     pub(super) fn after_load(&mut self, file: Option<String>, imported: Option<String>) {
@@ -347,6 +359,11 @@ impl App {
             ui.label(RichText::new(line).size(11.0).color(DIM));
             if st.struggling.load(Ordering::Relaxed) {
                 ui.label(RichText::new(format!("  {}", t!("bars.machine_busy"))).size(11.0).color(ORANGE));
+            }
+            if self.second.is_some() {
+                ui.add_space(8.0);
+                let said = RichText::new(t!("bars.session_not_saved")).size(11.0).color(ORANGE);
+                ui.label(said).on_hover_text(t!("bars.session_not_saved_tip"));
             }
             if let Some((msg, at)) = &self.message
                 && at.elapsed() < Duration::from_secs(12)
