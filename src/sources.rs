@@ -155,6 +155,13 @@ impl InputRt {
         Self::build(with_audio.then(|| Ring::new(1.0)), playing, None)
     }
 
+    /// A video call's: it always runs, and passes sound both ways.
+    pub(crate) fn for_call() -> Arc<Self> {
+        // A conversation cannot wait: sound that falls behind is dropped
+        // rather than heard late.
+        Self::build(Some(Ring::new(0.3)), true, Some(Arc::default()))
+    }
+
     fn build(audio: Option<Ring>, playing: bool, call: Option<Arc<crate::call::CallLink>>) -> Arc<Self> {
         Arc::new(Self {
             frame: Mutex::new(None),
@@ -338,9 +345,7 @@ pub fn start_seeded(
     let countdown = matches!(input.kind, Kind::Title { style: TitleStyle::Countdown, .. });
     let waits = input.kind.has_timeline() || countdown;
     let rt = if let Kind::VideoCall { .. } = input.kind {
-        // A conversation cannot wait: sound that falls behind is dropped
-        // rather than heard late.
-        InputRt::build(Some(Ring::new(0.3)), true, Some(Arc::default()))
+        InputRt::for_call()
     } else {
         InputRt::new(has_audio, !waits)
     };
