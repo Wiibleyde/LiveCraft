@@ -21,6 +21,7 @@ pub fn run(dir: &str) -> i32 {
     let all = crate::playtest::check(dir)
         .and_then(|media| Ok(format!("{media}\nOK: {}", crate::delaytest::check(dir)?)))
         .and_then(|media| Ok(format!("{media}\nOK: {}", check(dir)?)))
+        .and_then(|done| Ok(format!("{done}\nOK: {}", editing_profiles(dir)?)))
         .and_then(|done| Ok(format!("{done}\nOK: {}", net_loopback()?)));
     match all {
         Ok(msg) => {
@@ -70,6 +71,105 @@ fn ends(path: &str) -> Result<(f64, f64), String> {
         return Err(format!("{path} : image ou son absent"));
     }
     Ok((picture, sound))
+}
+
+/// One stream's `codec_name,r_frame_rate` as ffprobe says it, by kind.
+fn stream_of(path: &str, kind: &str) -> Result<String, String> {
+    let out = Command::new(crate::ffmpeg::program("ffprobe"))
+        .args(["-v", "error", "-select_streams", kind, "-show_entries", "stream=codec_name,r_frame_rate"])
+        .args(["-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// The colour space, primaries and transfer ffprobe reads on the picture.
+fn color_of(path: &str) -> Result<String, String> {
+    let out = Command::new(crate::ffmpeg::program("ffprobe"))
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-show_entries", "stream=color_space,color_primaries,color_transfer", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Records a short clip with each recording profile for editing and reads
+/// the file back: codec, frame rate, and sound present and ending with the
+/// picture. A profile whose encoder this ffmpeg lacks is skipped, and said so.
+fn editing_profiles(dir: &str) -> Result<String, String> {
+    let dir = format!("{dir}/profils");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let clip = format!("{dir}/clip.mp4");
+    let made = ffmpeg()
+        .args(["-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=4"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=4"])
+        .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+        .arg(&clip)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !made.success() {
+        return Err("impossible de créer la vidéo de test".into());
+    }
+    let mut told = Vec::new();
+    for profile in &EDITING_PROFILES {
+        if crate::ffmpeg::capabilities().lacks_editing(profile.encoder) {
+            println!("profil {} ignoré : cet ffmpeg n'a pas l'encodeur {}", profile.id, profile.encoder);
+            told.push(format!("{} ignoré (pas d'encodeur {})", profile.id, profile.encoder));
+            continue;
+        }
+        let mut project = Project::sample();
+        (project.out_w, project.out_h) = (1280, 720);
+        project.records[0].profile = profile.id.into();
+        project.records[0].folder = dir.clone();
+        project.records[1].enabled = false;
+        let fps = project.fps;
+        let engine = Engine::start(project);
+        let id = engine.new_id();
+        let video = Kind::Video { path: clip.clone(), looped: true, mark_in: 0, mark_out: 0, rate: 1.0 };
+        engine.add_input(Input::new(id, "Test", video));
+        engine.call("CutDirect", &Args::new().input("Test"))?;
+        engine.call("Play", &Args::new().input("Test"))?;
+        sleep(Duration::from_secs(2));
+        let file = engine.start_recording(&dir)?;
+        if !file.ends_with(&format!(".{}", profile.container)) {
+            return Err(format!("{} : fichier {file} sans l'extension {}", profile.id, profile.container));
+        }
+        sleep(Duration::from_secs(3));
+        engine.shutdown();
+        let video = stream_of(&file, "v:0")?;
+        let sound = stream_of(&file, "a:0")?;
+        // ffprobe names the codec, not the encoder: prores_ks writes "prores".
+        let codec = if profile.encoder == "prores_ks" { "prores" } else { profile.encoder };
+        let want = format!("{codec},{fps}/1");
+        if video != want {
+            return Err(format!("{} : image « {video} » au lieu de « {want} »", profile.id));
+        }
+        if profile.encoder != "magicyuv" {
+            let tags = color_of(&file)?;
+            if tags != "bt709,bt709,bt709" {
+                return Err(format!("{} : couleurs « {tags} » au lieu de bt709", profile.id));
+            }
+        }
+        if !sound.starts_with("pcm_") {
+            return Err(format!("{} : son « {sound} », pas du PCM", profile.id));
+        }
+        let (picture, heard) = ends(&file)?;
+        let frame = 1.0 / fps.max(1) as f64;
+        if picture < 2.0 || (picture - heard).abs() > frame {
+            return Err(format!("{file} : image jusqu'à {picture:.3} s, son jusqu'à {heard:.3} s"));
+        }
+        told.push(format!(
+            "{} {video} / {sound}, écart son-image {:.0} ms",
+            profile.id,
+            (heard - picture) * 1000.0
+        ));
+    }
+    Ok(format!("profils de montage : {}", told.join(" ; ")))
 }
 
 /// The end padding of each recorder, to read once they are finished.

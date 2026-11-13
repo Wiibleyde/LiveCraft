@@ -519,6 +519,41 @@ fn the_settings_show_and_switch_what_composes_the_picture() {
     end(h);
 }
 
+/// A recording profile for editing is chosen from the recording settings,
+/// and hides the bitrate and container it sets itself.
+#[test]
+fn a_recording_profile_for_editing_is_chosen_in_the_settings() {
+    let mut h = desk(small_project());
+    h.state_mut().settings_open = true;
+    h.state_mut().settings_tab = 3;
+    h.run_steps(3);
+    let bitrates = h.query_all_by_label_contains("Vidéo (kb/s)").count();
+    assert!(bitrates > 0);
+    let containers = h.query_all_by_label("mkv").count();
+    assert!(containers > 0);
+    h.get_all_by_role(egui::accesskit::Role::ComboBox).next().unwrap().click();
+    h.run_steps(3);
+    click(&mut h, "AVI MagicYUV (sans perte)");
+    assert_eq!(project(&h).records[0].profile, "magicyuv");
+    assert_eq!(project(&h).records[0].extension(), "avi");
+    assert_eq!(h.query_all_by_label_contains("Pour le montage").count(), 1);
+    assert_eq!(
+        h.query_all_by_label_contains("Vidéo (kb/s)").count(),
+        bitrates / 2,
+        "only the other recorder has a bitrate"
+    );
+    assert_eq!(h.query_all_by_label("mkv").count(), containers / 2, "no container choice either");
+    // Back to the standard choice brings them all back.
+    h.get_all_by_role(egui::accesskit::Role::ComboBox).next().unwrap().click();
+    h.run_steps(3);
+    h.get_all_by_label("Standard (conteneur et codec au choix)").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(project(&h).records[0].profile, "");
+    assert_eq!(h.query_all_by_label_contains("Vidéo (kb/s)").count(), bitrates);
+    assert_eq!(h.query_all_by_label("mkv").count(), containers);
+    end(h);
+}
+
 #[test]
 fn a_settings_change_does_not_undo_what_the_desk_just_did() {
     let mut h = desk(small_project());
