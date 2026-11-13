@@ -330,7 +330,7 @@ pub(crate) const TONE_HZ: f32 = 1000.0;
 /// The tone must be there, loud enough, mostly alone and at its pitch: its
 /// strength is taken over the whole stretch at once, which only counts it
 /// within about 70 ppm of 1 kHz and in step with itself throughout.
-#[cfg(any(windows, test))]
+#[cfg(test)]
 pub(crate) fn judge_tone(samples: &[f32], rate: usize) -> Result<String, String> {
     judge(samples, rate, usize::MAX)
 }
