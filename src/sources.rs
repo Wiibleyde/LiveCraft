@@ -155,6 +155,13 @@ impl InputRt {
         Self::build(with_audio.then(|| Ring::new(1.0)), playing, None)
     }
 
+    /// A video call's: it always runs, and passes sound both ways.
+    pub(crate) fn for_call() -> Arc<Self> {
+        // A conversation cannot wait: sound that falls behind is dropped
+        // rather than heard late.
+        Self::build(Some(Ring::new(0.3)), true, Some(Arc::default()))
+    }
+
     fn build(audio: Option<Ring>, playing: bool, call: Option<Arc<crate::call::CallLink>>) -> Arc<Self> {
         Arc::new(Self {
             frame: Mutex::new(None),
@@ -215,6 +222,21 @@ impl InputRt {
 
     pub(crate) fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Shows a picture made elsewhere, as a Video Delay's: nothing changes,
+    /// and nothing is composed again, while it is the same one.
+    pub fn show(&self, f: Option<Arc<Frame>>) {
+        let mut slot = self.frame.lock().unwrap();
+        let same = match (&*slot, &f) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            *slot = f;
+            self.seq.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Returns the buffer it replaced when nobody else still uses it.
@@ -333,14 +355,13 @@ pub fn start_seeded(
     seed: Option<Arc<Frame>>,
     resume: Option<Resume>,
 ) -> Arc<InputRt> {
-    let has_audio = input.kind.has_audio();
+    // A delay's sound is made in the sound loop, from its source's.
+    let has_audio = input.kind.has_audio() && !matches!(input.kind, Kind::VideoDelay { .. });
     // Files and countdowns wait until something starts them.
     let countdown = matches!(input.kind, Kind::Title { style: TitleStyle::Countdown, .. });
     let waits = input.kind.has_timeline() || countdown;
     let rt = if let Kind::VideoCall { .. } = input.kind {
-        // A conversation cannot wait: sound that falls behind is dropped
-        // rather than heard late.
-        InputRt::build(Some(Ring::new(0.3)), true, Some(Arc::default()))
+        InputRt::for_call()
     } else {
         InputRt::new(has_audio, !waits)
     };
@@ -371,7 +392,7 @@ fn run(rt: Arc<InputRt>, kind: Kind, w: usize, h: usize, fps: u32, hardware: boo
             rt.publish(Frame::solid(w, h, color));
         }
         // These are built by the mixer, which sees all the inputs.
-        Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. } => {}
+        Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. } | Kind::VideoDelay { .. } => {}
         Kind::Tone => run_tone(&rt),
         Kind::SystemAudio => run_system_audio(&rt),
         Kind::Motion => run_motion(&rt, w, h, fps),

@@ -13,6 +13,8 @@ mod canvas;
 mod clap;
 mod clock;
 mod decode;
+mod delay;
+mod delaytest;
 mod desk;
 mod dsp;
 mod dvd;
@@ -50,6 +52,7 @@ mod text;
 mod titles;
 mod transitions;
 mod ui;
+mod update;
 mod vmix_import;
 mod widgets;
 

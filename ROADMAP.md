@@ -22,7 +22,7 @@ Nothing here has a date. Open an issue before starting something large; the
 - [x] Hardware decoding where it pays off (#8)
 - [x] Audio plug-ins (CLAP, #11)
 - [ ] Keep NDI/OMT inputs and video-call guests on the shared clock (#26)
-- [ ] Video Delay input (#29)
+- [x] Video Delay input (#29)
 - [ ] One encoder shared by stream destinations with identical settings (#28)
 - [ ] Recording profiles for editing: ProRes, DNxHR, MagicYUV (#31)
 - [ ] Encode straight from the graphics card, without a trip through memory
@@ -40,6 +40,8 @@ Nothing here has a date. Open an issue before starting something large; the
 - [ ] Packaged builds for Linux and macOS
 - [x] Windows installer and release workflow (#10)
 - [ ] Signed Windows releases (the workflow signs once a certificate is set up)
+- [x] Say when a newer version is out (#34)
+- [ ] Download and install it from the program, once releases are signed (#34)
 
 ## Quality
 

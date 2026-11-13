@@ -10,7 +10,9 @@ impl App {
         let choices: Vec<(u64, String)> = project
             .inputs
             .iter()
-            .filter(|i| i.id != id && i.kind.has_picture())
+            .filter(|i| {
+                i.id != id && i.kind.has_picture() && !crate::desk::link_loops(&project.inputs, id, i.id)
+            })
             .map(|i| (i.id, i.name.clone()))
             .collect();
         let Kind::VirtualSet { look, background, foreground, cameras, camera, move_ms } = &mut input.kind

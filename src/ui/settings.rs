@@ -275,13 +275,40 @@ impl App {
             ui.push_id(n, |ui| {
                 ui.checkbox(&mut r.enabled, t!("settings.recorder_n", n = n + 1));
                 ui.horizontal(|ui| {
-                    for c in ["mp4", "mkv", "mov", "ts"] {
-                        ui.selectable_value(&mut r.container, c.to_string(), c);
-                    }
-                    self.codec_combo(ui, "codec", &mut r.codec);
+                    ui.label(t!("settings.record_profile"));
+                    let shown = match r.editing() {
+                        Some(p) => profile_label(p.id),
+                        None => t!("settings.profile_standard").to_string(),
+                    };
+                    egui::ComboBox::from_id_salt("profile").selected_text(shown).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut r.profile, String::new(), t!("settings.profile_standard"));
+                        for p in &EDITING_PROFILES {
+                            ui.selectable_value(&mut r.profile, p.id.to_string(), profile_label(p.id));
+                        }
+                    });
                 });
-                ui.add(egui::Slider::new(&mut r.video_kbps, 1000..=100000).text(t!("settings.video_kbps")));
-                ui.add(egui::Slider::new(&mut r.audio_kbps, 64..=320).text(t!("settings.audio_kbps")));
+                if let Some(p) = r.editing() {
+                    ui.label(RichText::new(profile_note(p.id)).small().color(DIM));
+                    let caps = crate::ffmpeg::capabilities_if_known();
+                    if caps.is_some_and(|c| c.lacks_editing(p.encoder)) {
+                        ui.label(
+                            RichText::new(t!("settings.profile_missing", encoder = p.encoder))
+                                .small()
+                                .color(egui::Color32::from_rgb(230, 160, 60)),
+                        );
+                    }
+                } else {
+                    ui.horizontal(|ui| {
+                        for c in ["mp4", "mkv", "mov", "ts"] {
+                            ui.selectable_value(&mut r.container, c.to_string(), c);
+                        }
+                        self.codec_combo(ui, "codec", &mut r.codec);
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut r.video_kbps, 1000..=100000).text(t!("settings.video_kbps")),
+                    );
+                    ui.add(egui::Slider::new(&mut r.audio_kbps, 64..=320).text(t!("settings.audio_kbps")));
+                }
                 ui.add(egui::Slider::new(&mut r.split_minutes, 0..=240).text(t!("settings.split_minutes")));
                 audio_pick(ui, "audio", &mut r.audio);
             });
@@ -498,10 +525,15 @@ fn uses_srt(p: &Project) -> bool {
 
 impl App {
     fn tab_about(&mut self, ui: &mut egui::Ui, p: &Project) {
-        ui.label(RichText::new("LiveCraft").strong());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("LiveCraft").strong());
+            ui.label(t!("settings.about_version", version = crate::update::CURRENT));
+        });
         ui.label(t!("settings.about_tagline"));
         ui.label(RichText::new(t!("settings.about_ffmpeg")).small().color(DIM));
         ui.label(RichText::new(t!("settings.about_ndi")).small().color(DIM));
+        ui.separator();
+        self.about_updates(ui);
         ui.separator();
         self.ffmpeg_section(ui, p);
     }
@@ -585,4 +617,22 @@ impl App {
             ffmpeg::start_tests();
         }
     }
+}
+
+fn profile_label(id: &str) -> String {
+    match id {
+        "prores" => t!("settings.profile_prores"),
+        "dnxhr" => t!("settings.profile_dnxhr"),
+        _ => t!("settings.profile_magicyuv"),
+    }
+    .to_string()
+}
+
+fn profile_note(id: &str) -> String {
+    match id {
+        "prores" => t!("settings.profile_prores_note"),
+        "dnxhr" => t!("settings.profile_dnxhr_note"),
+        _ => t!("settings.profile_magicyuv_note"),
+    }
+    .to_string()
 }

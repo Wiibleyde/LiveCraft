@@ -101,7 +101,8 @@ input, SRT output, the program with sound as an NDI or OMT source, fullscreen an
 multiview. NVENC, Quick Sync and AMF are used when your FFmpeg offers them.
 
 **Show tools.** Instant replay with events and tags and marks that stay exact when frames are dropped, playlists, triggers, data sources from CSV,
-scripts, VISCA PTZ control, a telestrator, and a web controller for phones and tablets.
+scripts, VISCA PTZ control, a telestrator, video delays that show an input again with its sound up to
+ten seconds later, and a web controller for phones and tablets.
 
 ## Why LiveCraft
 
@@ -170,6 +171,11 @@ LiveCraft runs on Windows, Linux and macOS. Capture goes through FFmpeg's own de
 > **not** been tried with physical cameras, capture cards, PTZ heads or a live streaming platform.
 > The interface speaks French and English: it follows the system language, and Settings › Options
 > changes it.
+
+LiveCraft says on its status line when a newer version is out. To know, it sends one request to GitHub's
+public API a few seconds after it starts, at most once a day, carrying only its name and version. GitHub
+sees your IP address, as with any web page, and Windows may also check GitHub's certificate with its
+issuer. Settings › About turns it off.
 
 ### What is missing today
 

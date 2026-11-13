@@ -88,19 +88,24 @@ impl App {
         }
         if input != before {
             let source_changed = input.kind.restarts_source(&before.kind);
-            let live = !matches!(input.kind, Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. });
+            let live = !matches!(
+                input.kind,
+                Kind::Scene | Kind::Mix { .. } | Kind::VirtualSet { .. } | Kind::VideoDelay { .. }
+            );
             let keep = input.kind.same_source(&before.kind);
-            self.with(|s| {
-                if let Some(slot) = s.input_mut(id) {
-                    // Plug-ins are edited straight in the project, and their
-                    // state moves on by itself: this window's copy is stale.
-                    let mut before = before.clone();
-                    before.audio.plugins.clone_from(&slot.audio.plugins);
-                    input.audio.plugins.clone_from(&slot.audio.plugins);
-                    slot.merge_changes(&before, input);
-                }
+            let refused = self.with(|s| {
+                let mut next = s.input(id)?.clone();
+                // Plug-ins are edited straight in the project, and their
+                // state moves on by itself: this window's copy is stale.
+                let mut before = before.clone();
+                before.audio.plugins.clone_from(&next.audio.plugins);
+                input.audio.plugins.clone_from(&next.audio.plugins);
+                next.merge_changes(&before, input);
+                s.put_input(next).err()
             });
-            if source_changed && live {
+            if let Some(why) = refused {
+                self.say(why);
+            } else if source_changed && live {
                 self.queue_restart(id, keep);
             }
         }
@@ -520,6 +525,7 @@ impl App {
                     self.telestrator_for = Some(id);
                 }
             }
+            Kind::VideoDelay { source, ms } => delay_editor(ui, id, source, ms, project),
             Kind::VideoCall { token, address, stun, turn, turn_user, turn_password, return_sound } => {
                 let connected = rt.as_ref().and_then(|r| r.call.as_ref()).is_some_and(|c| c.is_connected());
                 call_editor(ui, token, address, self.api_lan, connected);
@@ -675,8 +681,13 @@ impl App {
         if let Some(n) = layers_canvas(ui, &mut input.layers, &names, self.selected_layer, aspect) {
             self.selected_layer = n;
         }
-        let choices: Vec<&Input> =
-            project.inputs.iter().filter(|i| i.id != id && i.kind.has_picture()).collect();
+        let choices: Vec<&Input> = project
+            .inputs
+            .iter()
+            .filter(|i| {
+                i.id != id && i.kind.has_picture() && !crate::desk::link_loops(&project.inputs, id, i.id)
+            })
+            .collect();
         let mut remove = None;
         let mut up = None;
         for (n, l) in input.layers.iter_mut().enumerate() {
@@ -745,6 +756,54 @@ impl App {
 
 fn path_row(ui: &mut egui::Ui, path: &str) {
     ui.add(egui::Label::new(RichText::new(path).small()).truncate());
+}
+
+/// A Video Delay's source and time. Only inputs that would not bring the
+/// delay back into its own picture are offered, and the time stops at what
+/// memory allows at the project's size and frame rate.
+fn delay_editor(ui: &mut egui::Ui, id: u64, source: &mut Option<u64>, ms: &mut u32, project: &Project) {
+    let find = |i: u64| project.inputs.iter().find(|x| x.id == i);
+    ui.horizontal(|ui| {
+        ui.label(t!("input_settings.delay.source"));
+        let shown = source.and_then(find).map_or(t!("widgets.none").to_string(), |i| i.name.clone());
+        let combo = egui::ComboBox::from_id_salt("retard-source").selected_text(shown).show_ui(ui, |ui| {
+            ui.selectable_value(source, None, t!("widgets.none"));
+            for i in project.inputs.iter().filter(|i| !crate::desk::delay_loops(id, i.id, find)) {
+                ui.selectable_value(source, Some(i.id), &i.name);
+            }
+        });
+        named(combo.response, t!("input_settings.delay.source_combo"));
+    });
+    let (w, h, fps) = (project.out_w, project.out_h, project.fps);
+    let mut delays = crate::desk::listed_delays(&project.inputs);
+    if let Some(mine) = delays.iter_mut().find(|d| d.0 == id) {
+        (mine.1, mine.2) = (*source, *ms);
+    }
+    let longest = crate::delay::room_ms(&delays, id, w, h, fps);
+    // Each step of a drag would jump the picture and the sound on air: the
+    // time is taken once the slider is let go.
+    let dragging = egui::Id::unique(("retard-glisse", id));
+    let mut shown = ui.data(|d| d.get_temp::<u32>(dragging)).unwrap_or(*ms);
+    let slider =
+        egui::Slider::new(&mut shown, 0..=longest).suffix(" ms").text(t!("input_settings.delay.time"));
+    let r = ui.add(slider);
+    if r.dragged() {
+        ui.data_mut(|d| d.insert_temp(dragging, shown));
+    } else {
+        ui.data_mut(|d| d.remove::<u32>(dragging));
+        if r.changed() || r.drag_stopped() {
+            *ms = shown;
+        }
+    }
+    let note = |ui: &mut egui::Ui, text: &str| {
+        ui.label(RichText::new(text).small().color(DIM));
+    };
+    let seconds = format!("{:.1}", longest as f32 / 1000.0);
+    note(ui, &t!("input_settings.delay.longest", seconds = seconds, w = w, h = h, fps = fps));
+    let (_, used) = crate::delay::share(&delays, w, h, fps);
+    let gb = |bytes: usize| format!("{:.1}", bytes as f64 / 1e9);
+    note(ui, &t!("input_settings.delay.memory", used = gb(used), limit = gb(crate::delay::BUDGET)));
+    note(ui, t!("input_settings.delay.sound"));
 }
 
 /// Labels of the four crop sliders: left, right, top, bottom.

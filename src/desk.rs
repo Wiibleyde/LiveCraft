@@ -72,6 +72,8 @@ pub struct Closed {
     pub playlist: Vec<(usize, PlaylistItem)>,
     pub was_preview: bool,
     pub was_program: bool,
+    /// Video Delays that showed it.
+    pub delays: Vec<u64>,
 }
 
 /// The show clock: time since the show started, which the operator can pause.
@@ -593,30 +595,71 @@ impl State {
         self.with_layers(set)
     }
 
-    /// Adds whatever the inputs in `set` show, however deep.
-    pub fn with_layers(&self, mut set: HashSet<u64>) -> HashSet<u64> {
-        let mut todo: Vec<u64> = set.iter().copied().collect();
-        while let Some(id) = todo.pop() {
-            let Some(input) = self.input(id) else { continue };
-            let mut inner: Vec<u64> = input.layers.iter().filter(|l| l.visible).map(|l| l.input).collect();
-            match input.kind {
-                Kind::Mix { preview, output, .. } => {
-                    inner.extend(preview);
-                    inner.extend(output);
-                }
-                Kind::VirtualSet { background, foreground, .. } => {
-                    inner.extend(background);
-                    inner.extend(foreground);
-                }
-                _ => {}
-            }
-            for i in inner {
-                if set.insert(i) {
-                    todo.push(i);
-                }
-            }
+    /// Adds whatever the inputs in `set` show, however deep. A Video Delay
+    /// shows its source later, not now: that source is not on air with it.
+    pub fn with_layers(&self, set: HashSet<u64>) -> HashSet<u64> {
+        shown_by(set, Reach::Now, |id| self.input(id))
+    }
+
+    /// The sources of every Video Delay: a delay records whether anyone
+    /// watches it or not, so its source is always being watched, with all
+    /// its picture is made of, a key's fill too: a page used as fill off
+    /// air would otherwise send a picture or two a second, and the delay
+    /// would record that.
+    pub fn delay_sources(&self) -> HashSet<u64> {
+        let sources = self.project.inputs.iter().filter_map(|i| match i.kind {
+            Kind::VideoDelay { source, .. } => source,
+            _ => None,
+        });
+        shown_by(sources.collect(), Reach::Composed, |id| self.input(id))
+    }
+
+    /// Points a Video Delay at another input, or at nothing. An input that
+    /// would bring the delay back into its own picture is refused.
+    pub fn set_delay_source(&mut self, id: u64, source: Option<u64>) -> Result<(), String> {
+        if let Some(s) = source
+            && (self.input(s).is_none() || delay_loops(id, s, |i| self.input(i)))
+        {
+            return Err(t!("functions.delay_loops").into());
         }
-        set
+        let Some(Kind::VideoDelay { source: slot, .. }) = self.input_mut(id).map(|i| &mut i.kind) else {
+            return Err(t!("functions.not_a_delay").into());
+        };
+        // The same source again asks nothing more: what it holds stays.
+        if std::mem::replace(slot, source) != source {
+            self.fit_delay(id);
+        }
+        Ok(())
+    }
+
+    /// Holds Video Delay `id`, once it has a source, to the memory the other
+    /// delays leave: one given a source, or a source back, must not take what
+    /// delays already on air keep, nor make them drop pictures. Only for a
+    /// delay that asks for more: one left as it was keeps its time, even
+    /// past what is left, as a file or a larger format can leave it.
+    pub fn fit_delay(&mut self, id: u64) {
+        let p = &self.project;
+        let room = crate::delay::room_ms(&listed_delays(&p.inputs), id, p.out_w, p.out_h, p.fps);
+        let delay = self.project.inputs.iter_mut().find(|i| i.id == id).map(|i| &mut i.kind);
+        if let Some(Kind::VideoDelay { source: Some(_), ms }) = delay
+            && *ms > room
+        {
+            *ms = room;
+            self.version += 1;
+        }
+    }
+
+    /// Sets how late a Video Delay shows its source, held to the memory the
+    /// other delays leave at the project's size and frame rate. Returns what
+    /// was set.
+    pub fn set_delay_ms(&mut self, id: u64, ms: u32) -> Result<u32, String> {
+        let p = &self.project;
+        let ms = ms.min(crate::delay::room_ms(&listed_delays(&p.inputs), id, p.out_w, p.out_h, p.fps));
+        let Some(Kind::VideoDelay { ms: slot, .. }) = self.input_mut(id).map(|i| &mut i.kind) else {
+            return Err(t!("functions.not_a_delay").into());
+        };
+        *slot = ms;
+        Ok(ms)
     }
 
     pub fn close_input(&mut self, id: u64) {
@@ -631,6 +674,7 @@ impl State {
             playlist: Vec::new(),
             was_preview: p.preview == Some(id),
             was_program: p.program == Some(id),
+            delays: Vec::new(),
         };
         if closed.was_preview {
             p.preview = None;
@@ -665,6 +709,13 @@ impl State {
                 Kind::VirtualSet { background, foreground, .. } => {
                     forget(background);
                     forget(foreground);
+                }
+                // What it holds still plays out, then the delay shows nothing.
+                Kind::VideoDelay { source, .. } => {
+                    if *source == Some(id) {
+                        closed.delays.push(i.id);
+                    }
+                    forget(source);
                 }
                 _ => {}
             }
@@ -708,12 +759,18 @@ impl State {
         self.version += 1;
     }
 
-    /// Puts a closed input back in every place it was.
-    pub fn restore(&mut self, closed: Closed) {
+    /// Puts a closed input back in every place it was. A Video Delay that
+    /// would show itself through it, as edits since the close can make it,
+    /// is left showing nothing instead; their names are returned.
+    pub fn restore(&mut self, closed: Closed) -> Vec<String> {
+        let looping = self.looping_delays();
         let input = closed.input;
         let id = input.id;
         let at = closed.at.min(self.project.inputs.len());
         self.project.inputs.insert(at, input);
+        // A delay brought back keeps its source: it takes only what the
+        // delays given memory since its close leave.
+        self.fit_delay(id);
         for (owner, n, layer) in closed.layers {
             if let Some(i) = self.input_mut(owner) {
                 let n = n.min(i.layers.len());
@@ -737,8 +794,200 @@ impl State {
             self.project.program = Some(id);
             self.note_arriving(id, &before);
         }
+        for delay in closed.delays {
+            if let Some(Kind::VideoDelay { source: source @ None, .. }) =
+                self.input_mut(delay).map(|i| &mut i.kind)
+            {
+                *source = Some(id);
+                self.fit_delay(delay);
+            }
+        }
+        let mut unlinked = Vec::new();
+        for delay in self.looping_delays().difference(&looping) {
+            if let Some(i) = self.input_mut(*delay) {
+                if let Kind::VideoDelay { source, .. } = &mut i.kind {
+                    *source = None;
+                }
+                unlinked.push(i.name.clone());
+            }
+        }
         self.version += 1;
+        unlinked
     }
+
+    /// The Video Delays that can show themselves now.
+    fn looping_delays(&self) -> HashSet<u64> {
+        looping_delays(self.project.inputs.iter(), |id| self.input(id))
+    }
+
+    /// Puts an edited input in place of its former self, unless the edit lets
+    /// a Video Delay show itself: through a new layer, a key's fill, a Mix's
+    /// picture, a set's backdrop or desk. Then nothing changes, and the reason
+    /// is returned.
+    pub fn put_input(&mut self, next: Input) -> Result<(), String> {
+        let id = next.id;
+        let find = |i: u64| if i == id { Some(&next) } else { self.input(i) };
+        let after =
+            looping_delays(self.project.inputs.iter().map(|i| if i.id == id { &next } else { i }), find);
+        if let Some(delay) = after.difference(&self.looping_delays()).next() {
+            let name = find(*delay).map_or(String::new(), |i| i.name.clone());
+            return Err(t!("functions.edit_loops", name = name));
+        }
+        // A delay given another source or more time takes only what is left;
+        // renamed or keyed, it keeps what it holds.
+        let asks_more = match (self.input(id).map(|i| &i.kind), &next.kind) {
+            (Some(Kind::VideoDelay { source: was, ms: had }), Kind::VideoDelay { source, ms }) => {
+                source != was || ms > had
+            }
+            _ => true,
+        };
+        if let Some(slot) = self.input_mut(id) {
+            *slot = next;
+        }
+        if asks_more {
+            self.fit_delay(id);
+        }
+        Ok(())
+    }
+}
+
+/// The Video Delays among `inputs` that can show themselves.
+fn looping_delays<'a>(
+    inputs: impl Iterator<Item = &'a Input>,
+    find: impl Fn(u64) -> Option<&'a Input> + Copy,
+) -> HashSet<u64> {
+    inputs
+        .filter_map(|i| match i.kind {
+            Kind::VideoDelay { source: Some(s), .. } => delay_loops(i.id, s, find).then_some(i.id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `owner` showing `target`, as a layer, a key's fill, a Mix's
+/// picture or a set's backdrop or desk, would let a Video Delay show itself:
+/// for the lists to leave out.
+pub fn link_loops(inputs: &[Input], owner: u64, target: u64) -> bool {
+    let find = |id: u64| inputs.iter().find(|i| i.id == id);
+    let mut from_target: Option<HashSet<u64>> = None;
+    for i in inputs {
+        let Kind::VideoDelay { source: Some(s), .. } = i.kind else { continue };
+        let reached = from_target.get_or_insert_with(|| shown_by(HashSet::from([target]), Reach::Ever, find));
+        if reached.contains(&i.id) && shown_by(HashSet::from([s]), Reach::Ever, find).contains(&owner) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The Video Delays of a project in its order, as (input, source, time).
+pub fn listed_delays(inputs: &[Input]) -> Vec<(u64, Option<u64>, u32)> {
+    inputs
+        .iter()
+        .filter_map(|i| match i.kind {
+            Kind::VideoDelay { source, ms } => Some((i.id, source, ms)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every Video Delay as the loops run it, in the order to feed them, its
+/// time held to its share of the memory all of them may use.
+pub fn delays_to_run(p: &Project) -> Vec<crate::delay::Run> {
+    let (runs, _) = crate::delay::share(&listed_delays(&p.inputs), p.out_w, p.out_h, p.fps);
+    delays_in_order(&p.inputs)
+        .iter()
+        .filter_map(|(id, ..)| runs.iter().find(|r| r.id == *id).copied())
+        .collect()
+}
+
+/// How far `shown_by` looks.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Reach {
+    /// What is on air with an input: its visible layers, a Mix's two
+    /// pictures, a set's backdrop and desk. Tally, auto-play and sound that
+    /// follows the air go by this.
+    Now,
+    /// What its picture is made of now: that, and a key's fill too.
+    Composed,
+    /// All it can ever bring on screen: hidden layers, which a button shows
+    /// at any moment, a key's fill, and what a Video Delay shows later.
+    Ever,
+}
+
+/// `set` with every input its members show, however deep.
+pub fn shown_by<'a>(
+    mut set: HashSet<u64>,
+    reach: Reach,
+    input: impl Fn(u64) -> Option<&'a Input>,
+) -> HashSet<u64> {
+    let ever = reach == Reach::Ever;
+    let fills = reach != Reach::Now;
+    let mut todo: Vec<u64> = set.iter().copied().collect();
+    while let Some(id) = todo.pop() {
+        let Some(input) = input(id) else { continue };
+        let mut inner: Vec<u64> =
+            input.layers.iter().filter(|l| ever || l.visible).map(|l| l.input).collect();
+        inner.extend(input.key.fill_input.filter(|_| fills && input.key.mode == KeyMode::Fill));
+        match input.kind {
+            Kind::Mix { preview, output, .. } => {
+                inner.extend(preview);
+                inner.extend(output);
+            }
+            Kind::VirtualSet { background, foreground, .. } => {
+                inner.extend(background);
+                inner.extend(foreground);
+            }
+            Kind::VideoDelay { source, .. } if ever => inner.extend(source),
+            _ => {}
+        }
+        for i in inner {
+            if set.insert(i) {
+                todo.push(i);
+            }
+        }
+    }
+    set
+}
+
+/// Whether Video Delay `delay` showing `source` would show itself again: its
+/// own input, or one able to show it however deep, through other delays too.
+pub fn delay_loops<'a>(delay: u64, source: u64, input: impl Fn(u64) -> Option<&'a Input>) -> bool {
+    shown_by(HashSet::from([source]), Reach::Ever, input).contains(&delay)
+}
+
+/// Every Video Delay with its source and time, in the order to feed them: a
+/// delay that shows another one, even inside a scene, comes after it, so it
+/// gets that one's picture of the same tick. A loop, which the desk refuses
+/// but a file might hold, is broken anywhere.
+pub fn delays_in_order(inputs: &[Input]) -> Vec<(u64, Option<u64>, u32)> {
+    let find = |id: u64| inputs.iter().find(|i| i.id == id);
+    let mut waiting: Vec<(u64, Option<u64>, u32, HashSet<u64>)> = inputs
+        .iter()
+        .filter_map(|i| match i.kind {
+            Kind::VideoDelay { source, ms } => {
+                let shown =
+                    source.map_or_else(HashSet::new, |s| shown_by(HashSet::from([s]), Reach::Composed, find));
+                let before = shown
+                    .into_iter()
+                    .filter(|o| {
+                        *o != i.id && find(*o).is_some_and(|o| matches!(o.kind, Kind::VideoDelay { .. }))
+                    })
+                    .collect();
+                Some((i.id, source, ms, before))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut order: Vec<(u64, Option<u64>, u32)> = Vec::with_capacity(waiting.len());
+    while !waiting.is_empty() {
+        let ready = waiting
+            .iter()
+            .position(|(_, _, _, before)| before.iter().all(|b| order.iter().any(|(done, _, _)| done == b)));
+        let (id, source, ms, _) = waiting.remove(ready.unwrap_or(0));
+        order.push((id, source, ms));
+    }
+    order
 }
 
 #[cfg(test)]
@@ -1167,5 +1416,255 @@ mod tests {
             s.input(id).unwrap().kind,
             Kind::VirtualSet { background: None, foreground: Some(6), .. }
         ));
+    }
+
+    fn delay(id: u64, source: Option<u64>) -> Input {
+        Input::new(id, "Retard", Kind::VideoDelay { source, ms: 1000 })
+    }
+
+    #[test]
+    fn a_delay_never_ends_up_showing_itself() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(1)));
+        s.project.inputs.push(delay(51, Some(50)));
+        assert!(s.set_delay_source(50, Some(50)).is_err(), "itself");
+        assert!(s.set_delay_source(50, Some(51)).is_err(), "through the delay that shows it");
+        let mut hidden = Layer::new(51, Placement::FULL);
+        hidden.visible = false;
+        s.input_mut(9).unwrap().layers.push(hidden);
+        assert!(s.set_delay_source(50, Some(9)).is_err(), "through a scene that can show that delay");
+        assert!(s.set_delay_source(50, Some(999)).is_err(), "no such input");
+        assert!(s.set_delay_source(1, Some(2)).is_err(), "not a delay");
+        assert!(matches!(s.input(50).unwrap().kind, Kind::VideoDelay { source: Some(1), .. }), "unchanged");
+        assert!(s.set_delay_source(50, Some(2)).is_ok());
+        assert!(matches!(s.input(50).unwrap().kind, Kind::VideoDelay { source: Some(2), .. }));
+        assert!(s.set_delay_source(50, None).is_ok());
+    }
+
+    #[test]
+    fn a_delay_is_held_to_the_memory_the_others_leave() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(1)));
+        s.project.inputs.push(delay(51, Some(1)));
+        s.project.inputs.push(delay(52, Some(2)));
+        assert_eq!(s.set_delay_ms(50, 60_000), Ok(10_000), "ten seconds of 1080p30 fit");
+        assert_eq!(s.set_delay_ms(51, 60_000), Ok(10_000), "the same camera's pictures, kept once");
+        assert_eq!(s.set_delay_ms(52, 60_000), Ok(2866), "what the first camera leaves");
+        let runs = delays_to_run(&s.project);
+        assert_eq!(runs.iter().map(|r| r.ms).collect::<Vec<_>>(), [10_000, 10_000, 2866]);
+        s.project.fps = 60;
+        let runs = delays_to_run(&s.project);
+        assert_eq!(runs[2].ms, 0, "at twice the rate the first camera takes it all");
+        assert!(s.set_delay_ms(1, 100).is_err(), "not a delay");
+    }
+
+    #[test]
+    fn delays_are_fed_after_the_delays_they_show() {
+        let mut s = state();
+        // 52 shows a scene holding 51, which shows 50.
+        s.project.inputs.push(delay(52, Some(60)));
+        let scene = Input::new(60, "Scène", Kind::Scene).with_layers(vec![Layer::new(51, Placement::FULL)]);
+        s.project.inputs.push(scene);
+        s.project.inputs.push(delay(51, Some(50)));
+        s.project.inputs.push(delay(50, Some(1)));
+        let order: Vec<u64> = delays_in_order(&s.project.inputs).iter().map(|d| d.0).collect();
+        assert_eq!(order, [50, 51, 52]);
+        // A loop read from a file is broken somewhere, not followed forever.
+        s.project.inputs.push(delay(53, Some(54)));
+        s.project.inputs.push(delay(54, Some(53)));
+        assert_eq!(delays_in_order(&s.project.inputs).len(), 5);
+    }
+
+    /// A delay records whether shown or not, so its source is watched; but
+    /// on air, it plays its source later, and the source itself stays off.
+    #[test]
+    fn a_delays_source_is_watched_but_not_on_air_with_it() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(9)));
+        let watched = s.delay_sources();
+        assert!([9, 1, 2].iter().all(|i| watched.contains(i)), "{watched:?}");
+        s.cut_to(50);
+        let air = s.on_air();
+        assert!(air.contains(&50) && !air.contains(&9) && !air.contains(&1), "{air:?}");
+    }
+
+    #[test]
+    fn closing_a_delays_source_leaves_it_pointing_at_nothing_until_undone() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(1)));
+        s.close_input(1);
+        assert!(matches!(s.input(50).unwrap().kind, Kind::VideoDelay { source: None, ms: 1000 }));
+        let closed = s.undo.take().unwrap();
+        assert_eq!(s.restore(closed), Vec::<String>::new());
+        assert!(matches!(s.input(50).unwrap().kind, Kind::VideoDelay { source: Some(1), .. }));
+    }
+
+    /// The review's case at 1080p30: delay A of camera 1 comes first; camera 1
+    /// is closed and delay B of camera 2 takes all ten seconds; Undo gives A
+    /// its camera back. B is on air with its pictures: A gets what is left,
+    /// and B keeps every one of them. The same through the setter.
+    #[test]
+    fn a_delay_given_its_source_back_takes_only_what_is_left() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(1)));
+        s.project.inputs.push(delay(51, Some(2)));
+        assert_eq!(s.set_delay_ms(50, 10_000), Ok(10_000));
+        s.close_input(1);
+        assert_eq!(s.set_delay_ms(51, 10_000), Ok(10_000), "camera 1 gone, B takes it all");
+        let closed = s.undo.take().unwrap();
+        s.restore(closed);
+        let runs = delays_to_run(&s.project);
+        let run = |id: u64| *runs.iter().find(|r| r.id == id).unwrap();
+        assert_eq!((run(51).ms, run(51).pictures), (10_000, 301), "B keeps what it holds");
+        assert_eq!((run(50).source, run(50).ms), (Some(1), 2866), "A gets what B leaves");
+        s.project.inputs.push(Input::new(52, "Retard", Kind::VideoDelay { source: None, ms: 10_000 }));
+        s.set_delay_source(52, Some(3)).unwrap();
+        assert!(matches!(s.input(52).unwrap().kind, Kind::VideoDelay { ms: 0, .. }), "nothing is left");
+        let runs = delays_to_run(&s.project);
+        assert!(runs.iter().all(|r| r.id != 51 || (r.ms, r.pictures) == (10_000, 301)));
+
+        // The same when delay A itself is closed and brought back: it keeps
+        // its camera, and comes back with what B leaves.
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(1)));
+        s.project.inputs.push(delay(51, Some(2)));
+        assert_eq!(s.set_delay_ms(50, 10_000), Ok(10_000));
+        s.close_input(50);
+        assert_eq!(s.set_delay_ms(51, 10_000), Ok(10_000), "A gone, B takes it all");
+        let closed = s.undo.take().unwrap();
+        s.restore(closed);
+        assert_eq!(s.project.inputs.iter().position(|i| i.id == 50), Some(16), "A back ahead of B");
+        let runs = delays_to_run(&s.project);
+        let run = |id: u64| *runs.iter().find(|r| r.id == id).unwrap();
+        assert_eq!((run(51).ms, run(51).pictures), (10_000, 301), "B keeps what it holds");
+        assert_eq!((run(50).source, run(50).ms), (Some(1), 2866), "A gets what B leaves");
+    }
+
+    /// A delay records its source whole, a key's fill included: the fill is
+    /// watched, so a page used as fill keeps its rate off air, yet it is not
+    /// on air for all that.
+    #[test]
+    fn a_delays_source_is_watched_with_its_keys_fill() {
+        let mut s = state();
+        let keyed =
+            with(&s, 2, |i| i.key = Key { mode: KeyMode::Fill, fill_input: Some(15), ..Key::default() });
+        s.put_input(keyed).unwrap();
+        s.project.inputs.push(delay(50, Some(2)));
+        let watched = s.delay_sources();
+        assert!(watched.contains(&2) && watched.contains(&15), "{watched:?}");
+        assert!(!s.on_air().contains(&15), "watched, not on air");
+    }
+
+    /// Only a delay that asks for more is held to what is left. Two delays of
+    /// ten seconds at 1080p30, more than memory allows, as a file can hold:
+    /// renaming the first or giving it its own source again changes nothing,
+    /// while the second, given another source, gets what the first leaves.
+    #[test]
+    fn an_edit_that_asks_no_more_memory_keeps_the_time() {
+        let mut s = state();
+        s.project.inputs.push(Input::new(50, "Retard", Kind::VideoDelay { source: Some(1), ms: 10_000 }));
+        s.project.inputs.push(Input::new(51, "Retard", Kind::VideoDelay { source: Some(2), ms: 10_000 }));
+        let renamed = with(&s, 50, |i| i.name = "Retard A".into());
+        s.put_input(renamed).unwrap();
+        s.set_delay_source(50, Some(1)).unwrap();
+        assert_eq!(s.input(50).unwrap().kind, Kind::VideoDelay { source: Some(1), ms: 10_000 });
+        let moved = with(&s, 51, |i| i.kind = Kind::VideoDelay { source: Some(3), ms: 10_000 });
+        s.put_input(moved).unwrap();
+        assert_eq!(s.input(51).unwrap().kind, Kind::VideoDelay { source: Some(3), ms: 2866 });
+    }
+
+    /// Edits since a close can make its undo close a loop: that delay is
+    /// left without a source and named, the rest comes back.
+    #[test]
+    fn an_undo_never_lets_a_delay_show_itself() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(60)));
+        s.project
+            .inputs
+            .push(Input::new(60, "Scène", Kind::Scene).with_layers(vec![Layer::new(8, Placement::FULL)]));
+        s.close_input(60);
+        // Scene 8, which 60 shows, now holds the delay.
+        let edited = s.input(8).cloned().map(|mut i| {
+            i.layers.push(Layer::new(50, Placement::FULL));
+            i
+        });
+        s.put_input(edited.unwrap()).unwrap();
+        let closed = s.undo.take().unwrap();
+        assert_eq!(s.restore(closed), vec!["Retard".to_string()]);
+        assert!(s.input(60).is_some());
+        assert!(matches!(s.input(50).unwrap().kind, Kind::VideoDelay { source: None, .. }));
+    }
+
+    fn with(s: &State, id: u64, edit: impl FnOnce(&mut Input)) -> Input {
+        let mut i = s.input(id).unwrap().clone();
+        edit(&mut i);
+        i
+    }
+
+    /// The loop rule holds for every way an input comes to show another,
+    /// whatever edit makes it: the edit is refused and says which delay.
+    #[test]
+    fn no_edit_lets_a_delay_show_itself() {
+        let mut s = state();
+        s.project.inputs.push(delay(50, Some(9)));
+        s.project.inputs.push(Input::new(61, "Mix", Kind::Mix { preview: None, output: None, ms: 500 }));
+        s.project.inputs.push(Input::new(62, "Plateau", crate::sets::new_set(SetLook::Studio)));
+        let layer = with(&s, 1, |i| i.layers.push(Layer::new(50, Placement::FULL)));
+        let fill =
+            with(&s, 2, |i| i.key = Key { mode: KeyMode::Fill, fill_input: Some(50), ..Key::default() });
+        let mix = with(&s, 61, |i| i.kind = Kind::Mix { preview: None, output: Some(50), ms: 500 });
+        let set = with(&s, 62, |i| {
+            if let Kind::VirtualSet { background, .. } = &mut i.kind {
+                *background = Some(50);
+            }
+        });
+        // Scene 9 shows 1 and 2; the mix and the set get shown by scene 9 below.
+        let shown = with(&s, 9, |i| {
+            i.layers.extend([Layer::new(61, Placement::FULL), Layer::new(62, Placement::FULL)])
+        });
+        s.put_input(shown).unwrap();
+        for (what, edit) in [("layer", layer), ("fill", fill), ("mix", mix), ("set", set)] {
+            let before = s.project.clone();
+            let refused = s.put_input(edit).expect_err(what);
+            assert!(refused.contains("Retard"), "{what}: {refused}");
+            assert_eq!(s.project, before, "{what}: nothing changed");
+            for owner in [1, 2, 61, 62] {
+                assert!(link_loops(&s.project.inputs, owner, 50), "{what}: the lists leave the delay out");
+            }
+        }
+        assert!(!link_loops(&s.project.inputs, 1, 3), "an input that shows no delay is offered");
+        let renamed = with(&s, 1, |i| i.name = "Caméra un".into());
+        assert!(s.put_input(renamed).is_ok(), "other edits go through");
+    }
+
+    /// A key's fill is part of the picture, for loops and for the order
+    /// delays are fed in, but it does not go on air with its keyed input:
+    /// no tally, no auto-play, and no sound that follows the air.
+    #[test]
+    fn a_keys_fill_is_composed_in_but_not_on_air() {
+        let mut s = state();
+        s.project.inputs.push(clip(70));
+        let keyed =
+            with(&s, 1, |i| i.key = Key { mode: KeyMode::Fill, fill_input: Some(70), ..Key::default() });
+        s.put_input(keyed).unwrap();
+        s.notes.clear();
+        s.cut_to(1);
+        let air = s.on_air();
+        assert!(air.contains(&1) && !air.contains(&70), "{air:?}");
+        assert!(!s.notes.contains(&Note::Play(70)), "the fill does not start with it");
+        let find = |id: u64| s.input(id);
+        assert!(shown_by(HashSet::from([1]), Reach::Composed, find).contains(&70));
+        assert!(shown_by(HashSet::from([1]), Reach::Ever, find).contains(&70));
+        let off = with(&s, 1, |i| i.key.mode = KeyMode::Chroma);
+        s.put_input(off).unwrap();
+        let find = |id: u64| s.input(id);
+        assert!(!shown_by(HashSet::from([1]), Reach::Ever, find).contains(&70), "only while the key fills");
+        s.project.inputs.push(delay(50, Some(15)));
+        s.project.inputs.push(delay(51, Some(2)));
+        let keyed =
+            with(&s, 2, |i| i.key = Key { mode: KeyMode::Fill, fill_input: Some(50), ..Key::default() });
+        s.put_input(keyed).unwrap();
+        let order: Vec<u64> = delays_in_order(&s.project.inputs).iter().map(|d| d.0).collect();
+        assert_eq!(order, [50, 51], "a delay keyed into another's source is fed first");
     }
 }

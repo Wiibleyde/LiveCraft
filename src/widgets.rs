@@ -484,7 +484,10 @@ pub fn input_combo(ui: &mut egui::Ui, salt: &str, value: &mut Option<u64>, proje
         .map_or(t!("widgets.none").to_string(), |i| i.name.clone());
     egui::ComboBox::from_id_salt(salt).selected_text(shown).show_ui(ui, |ui| {
         ui.selectable_value(value, None, t!("widgets.none"));
-        let list = project.inputs.iter().filter(|i: &&Input| i.id != skip && i.kind.has_picture());
+        // `skip` shows the choice: nothing that would let a delay show itself.
+        let list = project.inputs.iter().filter(|i: &&Input| {
+            i.id != skip && i.kind.has_picture() && !crate::desk::link_loops(&project.inputs, skip, i.id)
+        });
         for i in list {
             ui.selectable_value(value, Some(i.id), &i.name);
         }

@@ -52,8 +52,10 @@ impl App {
             let undo = self.with(|s| s.undo.as_ref().map(|c| c.input.name.clone()));
             if let Some(name) = undo {
                 let b = bar_button(ui, t!("bars.undo"), false);
-                if b.on_hover_text(t!("bars.undo_tip", name = name)).clicked() {
-                    self.engine.undo();
+                if b.on_hover_text(t!("bars.undo_tip", name = name)).clicked()
+                    && let Some(note) = self.engine.undo()
+                {
+                    self.say(note);
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -354,6 +356,7 @@ impl App {
                 ui.add_space(16.0);
                 ui.label(RichText::new(msg).size(11.0).color(ORANGE));
             }
+            self.update_notice(ui);
         });
     }
 
