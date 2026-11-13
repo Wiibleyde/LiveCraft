@@ -602,6 +602,15 @@ pub fn list_encoders() -> Vec<String> {
     crate::ffmpeg::capabilities().encoders.clone()
 }
 
+/// A stopped encoder around a process that never reads, whose picture and
+/// sound never reach the end.
+#[cfg(test)]
+pub(crate) fn never_ending() -> Encoder {
+    let encoder = tests::finishing(tests::idle_process(30), Duration::ZERO, 0);
+    encoder.stop();
+    encoder
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,7 +640,7 @@ mod tests {
     /// An encoder of 1080p at 30 fps around `child` in place of ffmpeg, whose
     /// picture writer hands its pipe back after `busy`, `behind` pictures
     /// short of ten seconds of sound.
-    fn finishing(mut child: Child, busy: Duration, behind: u64) -> Encoder {
+    pub(super) fn finishing(mut child: Child, busy: Duration, behind: u64) -> Encoder {
         let pipe = child.stdin.take().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let sock = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -674,7 +683,7 @@ mod tests {
     }
 
     /// Runs for about `seconds` and never reads its input.
-    fn idle_process(seconds: u32) -> Child {
+    pub(super) fn idle_process(seconds: u32) -> Child {
         #[cfg(windows)]
         let mut idle = {
             let mut c = Command::new("ping");

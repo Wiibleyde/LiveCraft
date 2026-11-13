@@ -20,16 +20,49 @@ fn finish_later(list: Vec<Encoder>, patience: Duration) {
     drop(finish_all(list, patience));
 }
 
-/// How long a stopped recording or stream waits for the picture under way
-/// and its sound. Longer means a loop is stuck, and its end is padded.
+/// How long a stopped recording waits for the picture under way and its
+/// sound. Longer means a loop is stuck, and its end is padded.
 const END_WAIT: Duration = Duration::from_secs(1);
 
-/// A recording or stream stopped, which the loops keep feeding the program
-/// until its picture and its sound reach where it ends.
+/// A recording stopped, which the loops keep feeding until its picture and
+/// its sound reach where it ends.
 pub(crate) struct Ending {
     pub(crate) encoder: Encoder,
+    /// The input a multi-recording records, `None` for the program.
+    pub(crate) input: Option<u64>,
     patience: Duration,
     since: Instant,
+}
+
+/// Recordings being ended, and those being finished. Streams are not ended
+/// this way: their last pictures do not matter, and a publisher kept a moment
+/// longer would make a quick restart to the same key fail.
+///
+/// Locked before the lists recordings are taken from, so that the loops,
+/// which visit it after them, find each recording in one or the other.
+#[derive(Default)]
+pub(crate) struct Endings {
+    pub(crate) list: Vec<Ending>,
+    /// Closing the program waits for these: killed with it, ffmpeg would
+    /// leave a file without its end.
+    finishing: Vec<thread::JoinHandle<bool>>,
+    /// Closing has begun: it finishes the recordings left here itself.
+    closing: bool,
+}
+
+impl Endings {
+    fn end(&mut self, list: impl IntoIterator<Item = (Encoder, Option<u64>)>, patience: Duration) {
+        let since = Instant::now();
+        for (encoder, input) in list {
+            encoder.stop();
+            self.list.push(Ending { encoder, input, patience, since });
+        }
+    }
+
+    fn finish(&mut self, list: Vec<Encoder>, patience: Duration) {
+        self.finishing.retain(|job| !job.is_finished());
+        self.finishing.extend(finish_all(list, patience));
+    }
 }
 
 /// Stamp to the millisecond: stopping and starting within a second must not
@@ -141,46 +174,37 @@ impl Engine {
         Ok(first)
     }
 
-    pub fn stop_recording(&self) {
-        let list = std::mem::take(&mut *self.recorders.lock().unwrap());
-        *self.record_started.lock().unwrap() = None;
-        self.end_later(list, Duration::from_secs(15));
-    }
-
-    /// Ends each file where it was stopped, with the picture under way and
+    /// Each file ends where it was stopped, with the picture under way and
     /// the sound already made: the loops feed it until then, out of sight.
-    fn end_later(&self, list: Vec<Encoder>, patience: Duration) {
-        let since = Instant::now();
+    pub fn stop_recording(&self) {
         let mut ending = self.ending.lock().unwrap();
-        for encoder in list {
-            encoder.stop();
-            ending.push(Ending { encoder, patience, since });
-        }
+        let list = std::mem::take(&mut *self.recorders.lock().unwrap());
+        ending.end(list.into_iter().map(|e| (e, None)), Duration::from_secs(15));
+        drop(ending);
+        *self.record_started.lock().unwrap() = None;
     }
 
-    /// Finishes the stopped recordings and streams that reached their end,
-    /// or waited too long for it.
+    /// Finishes the stopped recordings that reached their end, or waited too
+    /// long for it. Both loops call it, so that one stuck cannot hold a file
+    /// open.
     pub(crate) fn finish_ended(&self) {
-        let done: Vec<Ending> = {
-            let mut ending = self.ending.lock().unwrap();
-            if ending.is_empty() {
-                return;
-            }
-            ending.extract_if(.., |e| e.encoder.ended() || e.since.elapsed() > END_WAIT).collect()
-        };
+        let mut ending = self.ending.lock().unwrap();
+        if ending.closing || ending.list.is_empty() {
+            return;
+        }
+        let done: Vec<Ending> =
+            ending.list.extract_if(.., |e| e.encoder.ended() || e.since.elapsed() > END_WAIT).collect();
         for e in done {
-            finish_later(vec![e.encoder], e.patience);
+            ending.finish(vec![e.encoder], e.patience);
         }
     }
 
-    /// Every encoder the loops feed, stopped ones included.
-    fn each_encoder(&self, mut visit: impl FnMut(&Encoder)) {
+    /// Every encoder that closing the program lets reach its end.
+    fn each_ending_encoder(&self, mut visit: impl FnMut(&Encoder)) {
         self.recorders.lock().unwrap().iter().for_each(&mut visit);
-        self.streamers.lock().unwrap().iter().for_each(&mut visit);
-        self.ending.lock().unwrap().iter().for_each(|e| visit(&e.encoder));
         self.multi.lock().unwrap().iter().for_each(|(_, e)| visit(e));
-        self.srt.lock().unwrap().iter().for_each(|(_, e)| visit(e));
         self.replay.lock().unwrap().cams.iter().for_each(|c| visit(&c.encoder));
+        self.ending.lock().unwrap().list.iter().for_each(|e| visit(&e.encoder));
     }
 
     /// Destinations sharing destination 1's quality go through one encoder.
@@ -233,7 +257,7 @@ impl Engine {
     pub fn stop_streaming(&self) {
         let list = std::mem::take(&mut *self.streamers.lock().unwrap());
         *self.stream_started.lock().unwrap() = None;
-        self.end_later(list, Duration::from_secs(5));
+        finish_later(list, Duration::from_secs(5));
     }
 
     /// One file per live input, with the chosen sound. Returns how many.
@@ -282,9 +306,26 @@ impl Engine {
         Ok(n)
     }
 
+    /// Each file ends where it was stopped, as a recording does.
     pub fn stop_multi(&self) {
+        let mut ending = self.ending.lock().unwrap();
         let list = std::mem::take(&mut *self.multi.lock().unwrap());
-        finish_later(list.into_iter().map(|(_, e)| e).collect(), Duration::from_secs(15));
+        ending.end(list.into_iter().map(|(id, e)| (e, Some(id))), Duration::from_secs(15));
+    }
+
+    /// Ends at once what records the inputs `which` picks, those already
+    /// ending included: such an input is closing, or about to be another one
+    /// carrying the same number in a new project.
+    pub(crate) fn stop_multi_at_once(&self, which: impl Fn(u64) -> bool) {
+        let mut ending = self.ending.lock().unwrap();
+        let mut multi = self.multi.lock().unwrap();
+        let (gone, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut *multi).into_iter().partition(|(i, _)| which(*i));
+        *multi = kept;
+        drop(multi);
+        let mut list: Vec<Encoder> = gone.into_iter().map(|(_, e)| e).collect();
+        list.extend(ending.list.extract_if(.., |e| e.input.is_some_and(&which)).map(|e| e.encoder));
+        ending.finish(list, Duration::from_secs(15));
     }
 
     pub fn start_srt(&self) -> Result<usize, String> {
@@ -374,12 +415,7 @@ impl Engine {
 
     /// An input closing ends whatever was recording it on its own.
     pub(crate) fn stop_outputs_of(&self, id: u64) {
-        let mut multi = self.multi.lock().unwrap();
-        let (gone, kept): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *multi).into_iter().partition(|(i, _)| *i == id);
-        *multi = kept;
-        drop(multi);
-        finish_later(gone.into_iter().map(|(_, e)| e).collect(), Duration::from_secs(15));
+        self.stop_multi_at_once(|i| i == id);
         for (route, _) in self.srt.lock().unwrap().iter_mut() {
             if *route == Route::Input(id) {
                 *route = Route::Output;
@@ -389,13 +425,20 @@ impl Engine {
 
     /// For closing the program: waits for files to be complete.
     pub fn shutdown(&self) {
+        // Streams and network senders stop at once, as when stopped by hand.
+        let mut streams = std::mem::take(&mut *self.streamers.lock().unwrap());
+        streams.extend(std::mem::take(&mut *self.srt.lock().unwrap()).into_iter().map(|(_, e)| e));
+        let mut jobs = finish_all(streams, Duration::from_secs(15));
+        drop(std::mem::take(&mut *self.net.lock().unwrap()));
         // Every file ends where it was stopped, while the loops still run to
-        // bring it the picture under way.
-        self.each_encoder(Encoder::stop);
+        // bring it the picture under way. Those already ending stay to be fed
+        // too, but the loops no longer hand them on: they are finished here.
+        self.ending.lock().unwrap().closing = true;
+        self.each_ending_encoder(Encoder::stop);
         let asked = Instant::now();
         while asked.elapsed() < END_WAIT {
             let mut all = true;
-            self.each_encoder(|e| all &= e.ended());
+            self.each_ending_encoder(|e| all &= e.ended());
             if all {
                 break;
             }
@@ -403,13 +446,14 @@ impl Engine {
         }
         self.quit.store(true, Ordering::Relaxed);
         self.replay_stop();
+        let ended = std::mem::take(&mut *self.ending.lock().unwrap());
         let mut list = std::mem::take(&mut *self.recorders.lock().unwrap());
-        list.extend(std::mem::take(&mut *self.streamers.lock().unwrap()));
-        list.extend(std::mem::take(&mut *self.ending.lock().unwrap()).into_iter().map(|e| e.encoder));
+        list.extend(ended.list.into_iter().map(|e| e.encoder));
         list.extend(std::mem::take(&mut *self.multi.lock().unwrap()).into_iter().map(|(_, e)| e));
-        list.extend(std::mem::take(&mut *self.srt.lock().unwrap()).into_iter().map(|(_, e)| e));
-        drop(std::mem::take(&mut *self.net.lock().unwrap()));
-        for job in finish_all(list, Duration::from_secs(15)) {
+        jobs.extend(finish_all(list, Duration::from_secs(15)));
+        // Those stopped earlier and still being finished.
+        jobs.extend(ended.finishing);
+        for job in jobs {
             let _ = job.join();
         }
         for rt in self.rts.lock().unwrap().values() {
@@ -465,5 +509,31 @@ impl Engine {
         if problem.is_some() {
             *self.output_error.lock().unwrap() = problem;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stopped recording whose picture or sound never comes, as when a loop
+    /// is stuck, is left to reach its end for a second, then finished padded
+    /// rather than left open; closing the program waits for its file.
+    #[test]
+    fn a_recording_that_never_reaches_its_end_is_finished_after_a_second() {
+        let engine = Engine::start(Project::blank());
+        let stopped = Instant::now();
+        engine.ending.lock().unwrap().end([(crate::output::never_ending(), None)], Duration::from_secs(1));
+        engine.finish_ended();
+        assert_eq!(engine.ending.lock().unwrap().list.len(), 1, "finished before its end");
+        // Both loops hand it on once the second is up.
+        while !engine.ending.lock().unwrap().list.is_empty() {
+            assert!(stopped.elapsed() < END_WAIT * 2, "still open after {:?}", stopped.elapsed());
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(stopped.elapsed() >= END_WAIT);
+        assert_eq!(engine.ending.lock().unwrap().finishing.len(), 1);
+        engine.shutdown();
+        assert!(engine.ending.lock().unwrap().finishing.is_empty(), "closing did not wait for it");
     }
 }

@@ -78,6 +78,11 @@ fn paddings(engine: &Engine) -> Vec<(String, Pad)> {
     engine.recorders.lock().unwrap().iter().map(|e| (e.label.clone(), e.padded.clone())).collect()
 }
 
+/// The same for each multi-recording.
+fn multi_paddings(engine: &Engine) -> Vec<(String, Pad)> {
+    engine.multi.lock().unwrap().iter().map(|(_, e)| (e.label.clone(), e.padded.clone())).collect()
+}
+
 /// The longest end padding in seconds, and where each recording's picture
 /// and sound ended before it. Picture and sound follow one clock, and a
 /// stopped file is fed both up to the same picture boundary: what had to be
@@ -361,11 +366,30 @@ fn check(dir: &str) -> Result<String, String> {
     if let Some(e) = engine.output_error.lock().unwrap().clone() {
         return Err(e);
     }
-    let pads = paddings(&engine);
+    // The recorders stop as by the button, and are finished once both their
+    // picture and their sound reach their end: nothing may be added. Closing
+    // ends the multi-recording the same way, within a picture.
+    let (pads, multi_pads) = (paddings(&engine), multi_paddings(&engine));
+    engine.stop_recording();
+    let stopped = Instant::now();
+    while pads.iter().any(|(_, p)| p.lock().unwrap().is_none()) && stopped.elapsed() < Duration::from_secs(10)
+    {
+        sleep(Duration::from_millis(20));
+    }
     engine.shutdown();
     let (padded, endings) = most_padded(&pads, project_fps)?;
-    if padded > frame_s + 1e-9 {
-        return Err(format!("{:.0} ms ajoutées à la fin d'un enregistrement ({endings})", padded * 1000.0));
+    if padded > 0.0 {
+        return Err(format!(
+            "{:.0} ms ajoutées à la fin d'un enregistrement arrêté ({endings})",
+            padded * 1000.0
+        ));
+    }
+    let (multi_padded, multi_end) = most_padded(&multi_pads, project_fps)?;
+    if multi_padded > frame_s + 1e-9 {
+        return Err(format!(
+            "{:.0} ms ajoutées à la fin d'un enregistrement ({multi_end})",
+            multi_padded * 1000.0
+        ));
     }
     let _ = server.wait();
     sleep(Duration::from_millis(500));
@@ -405,9 +429,9 @@ fn check(dir: &str) -> Result<String, String> {
     Ok(format!(
         "enregistreurs {one}/ {second}| diffusion {streamed}(images coupées {cut}) | cadence {fps}/s, rendu {mix_us} µs \
          par {by}, images perdues {dropped}, répétées {repeated}, écart son-image {}, fin égalisée de {:.0} ms \
-         ({endings}), crête son {peak:.2}| {call}",
+         ({endings} ; {multi_end}), crête son {peak:.2}| {call}",
         apart.join(" / "),
-        padded * 1000.0
+        padded.max(multi_padded) * 1000.0
     ))
 }
 

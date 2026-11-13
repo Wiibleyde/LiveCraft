@@ -25,8 +25,9 @@ the sound loop learns how fast each one runs and takes a frame more or less now 
 keeping what waits near 10 ms, so a fast device does not fall further and further behind the picture.
 The speed only ever moves by a few dozen ppm at a time, so a tone keeps its pitch. A block of sound is
 made at the start of the time it stands for and a picture after it is composed, so at any moment the
-sound is ahead. A stopped recording or stream therefore keeps being fed, out of sight, until both reach
-the first picture boundary after the stop; only what fails to come in time is padded.
+sound is ahead. A stopped recording therefore keeps being fed, out of sight, until both reach the first
+picture boundary after the stop; only what fails to come within a second is padded. Closing the program
+waits for that, and for every file still being finished. Streams stop at once.
 
 ## Files
 

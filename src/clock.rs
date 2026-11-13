@@ -39,7 +39,8 @@ pub fn end_slot(origin: u64, t: u64, fps: u32) -> u64 {
     (since * fps.max(1) as u128).div_ceil(NS as u128) as u64
 }
 
-/// Sound frames up to a picture boundary.
+/// Sound frames up to a picture boundary. One that falls between two sound
+/// frames, as at 144 pictures a second, ends on the later one.
 pub fn samples_to(slot: u64, fps: u32) -> u64 {
     (slot as u128 * AUDIO_RATE as u128).div_ceil(fps.max(1) as u128) as u64
 }
@@ -225,9 +226,14 @@ impl SampleLine {
 /// Where an encoder's picture and sound both end, as (pictures, samples):
 /// the later of the two, on a picture boundary, so neither stops short.
 pub fn even_end(frames: u64, samples: u64, fps: u32) -> (u64, u64) {
-    let (fps, rate) = (fps.max(1) as u128, AUDIO_RATE as u128);
-    let frames = frames.max((samples as u128 * fps).div_ceil(rate) as u64);
-    (frames, (frames as u128 * rate).div_ceil(fps) as u64)
+    // The first boundary whose sound, as `samples_to` counts it, holds all
+    // of it: sound already ending on a boundary is not taken past it.
+    let covered = match samples {
+        0 => 0,
+        s => ((s as u128 - 1) * fps.max(1) as u128 / AUDIO_RATE as u128) as u64 + 1,
+    };
+    let frames = frames.max(covered);
+    (frames, samples_to(frames, fps))
 }
 
 /// Sound a live input holds beyond the block about to be taken, in frames:
@@ -711,6 +717,21 @@ mod tests {
         assert_eq!(even_end(300, 480_000, 30), (300, 480_000));
         assert_eq!(even_end(300, 480_100, 30), (301, 481_600));
         assert_eq!(even_end(302, 480_000, 30), (302, 483_200));
+    }
+
+    /// At 144 pictures a second a boundary falls between two sound frames: a
+    /// stopped file whose sound ends on one, as `samples_to` puts it, is not
+    /// padded a picture more, at any rate.
+    #[test]
+    fn sound_ending_between_two_of_its_frames_is_not_padded() {
+        assert_eq!(samples_to(10, 144), 3334);
+        for fps in [144, 30, 29, 60, 7] {
+            for end in [0, 1, 10, 143, 100_000] {
+                let samples = samples_to(end, fps);
+                assert_eq!(even_end(end, samples, fps), (end, samples), "{end} pictures at {fps}/s");
+            }
+        }
+        assert_eq!(even_end(10, 3335, 144), (11, 3667));
     }
 
     #[test]

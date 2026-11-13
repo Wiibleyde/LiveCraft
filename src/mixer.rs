@@ -785,6 +785,7 @@ impl Engine {
         self.srt.lock().unwrap().iter().for_each(|(r, _)| route(r));
         ids.extend(self.multi.lock().unwrap().iter().map(|(id, _)| *id));
         ids.extend(self.replay.lock().unwrap().cams.iter().map(|c| c.input));
+        ids.extend(self.ending.lock().unwrap().list.iter().filter_map(|e| e.input));
         (ids, everything)
     }
 
@@ -1014,13 +1015,9 @@ impl Engine {
         for enc in self.streamers.lock().unwrap().iter() {
             enc.push_video(out.clone(), at);
         }
-        for e in self.ending.lock().unwrap().iter() {
-            e.encoder.push_video(out.clone(), at);
-        }
         for net in self.net.lock().unwrap().iter() {
             net.push_video(out.clone());
         }
-        drop(out);
         for (id, enc) in self.multi.lock().unwrap().iter() {
             if let Some(f) = m.picture(*id, c, 0) {
                 enc.push_video(f, at);
@@ -1040,6 +1037,19 @@ impl Engine {
                 && let Some(cam) = self.replay.lock().unwrap().cams.get(n)
             {
                 cam.encoder.push_video(f, at);
+            }
+        }
+        // Last, after the lists a stopped recording leaves: see `Endings`.
+        let inputs: Vec<u64> = self.ending.lock().unwrap().list.iter().filter_map(|e| e.input).collect();
+        let pictures: Vec<(u64, Arc<Frame>)> =
+            inputs.into_iter().filter_map(|id| m.picture(id, c, 0).map(|f| (id, f))).collect();
+        for e in self.ending.lock().unwrap().list.iter() {
+            let picture = match e.input {
+                None => Some(&out),
+                Some(id) => pictures.iter().find(|(i, _)| *i == id).map(|(_, f)| f),
+            };
+            if let Some(f) = picture {
+                e.encoder.push_video(f.clone(), at);
             }
         }
     }
