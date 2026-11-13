@@ -589,15 +589,7 @@ impl App {
             "mp3" | "wav" | "m4a" | "flac" | "ogg" | "aac" => {
                 self.add_input(&name, Kind::AudioFile { path, looped: false });
             }
-            "livecraft" | "regie" | "vmix" => {
-                if self.with(|s| s.padlock) {
-                    self.say(t!("inputs.locked_open_project"));
-                } else if self.with(|s| s.project.inputs.is_empty()) {
-                    self.open_path(path);
-                } else {
-                    self.confirm_open = Some(path);
-                }
-            }
+            "livecraft" | "regie" | "vmix" => self.open_from_outside(path),
             _ if crate::slides::is_presentation(&path) => {
                 self.add_input(&name, Kind::PowerPoint { path });
             }
@@ -619,7 +611,7 @@ impl App {
         let (opened, _) = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
             ui.set_min_width(230.0);
             if ui.button(t!("inputs.add_video")).clicked() {
-                let picked = rfd::FileDialog::new()
+                let picked = FileDialog::new()
                     .add_filter(
                         t!("inputs.filter_video"),
                         &["mp4", "mov", "mkv", "avi", "webm", "m4v", "ts", "mxf", "wmv", "mpg"],
@@ -631,7 +623,7 @@ impl App {
                 ui.close();
             }
             if ui.button(t!("inputs.add_video_list")).clicked() {
-                let picked = rfd::FileDialog::new().pick_files().unwrap_or_default();
+                let picked = FileDialog::new().pick_files().unwrap_or_default();
                 let items: Vec<ListItem> = picked
                     .iter()
                     .map(|p| ListItem { path: p.to_string_lossy().into_owned(), enabled: true })
@@ -724,14 +716,14 @@ impl App {
                     }
                 }
                 if ui.button(t!("inputs.dvd_folder")).clicked() {
-                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                    if let Some(p) = FileDialog::new().pick_folder() {
                         self.add_dvd(&p);
                     }
                     ui.close();
                 }
                 if ui.button(t!("inputs.dvd_image")).clicked() {
                     if let Some(p) =
-                        rfd::FileDialog::new().add_filter(t!("inputs.dvd_image_filter"), &["iso"]).pick_file()
+                        FileDialog::new().add_filter(t!("inputs.dvd_image_filter"), &["iso"]).pick_file()
                     {
                         self.add_dvd(&p);
                     }
@@ -740,7 +732,7 @@ impl App {
             });
             ui.separator();
             if ui.button(t!("inputs.add_image")).clicked() {
-                let picked = rfd::FileDialog::new()
+                let picked = FileDialog::new()
                     .add_filter(t!("inputs.filter_image"), &["png", "jpg", "jpeg", "webp", "bmp"])
                     .pick_files();
                 for p in picked.unwrap_or_default() {
@@ -749,13 +741,13 @@ impl App {
                 ui.close();
             }
             if ui.button(t!("inputs.add_photos")).clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                if let Some(p) = FileDialog::new().pick_folder() {
                     self.add_file(&p);
                 }
                 ui.close();
             }
             if ui.button(t!("inputs.add_powerpoint")).clicked() {
-                let picked = rfd::FileDialog::new()
+                let picked = FileDialog::new()
                     .add_filter(t!("inputs.presentation_filter"), &crate::slides::EXTENSIONS)
                     .pick_files();
                 for p in picked.unwrap_or_default() {
@@ -764,7 +756,7 @@ impl App {
                 ui.close();
             }
             if ui.button(t!("inputs.add_image_sequence")).clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_file() {
+                if let Some(p) = FileDialog::new().pick_file() {
                     let first = p.to_string_lossy().into_owned();
                     self.add_input(&file_name(&p), Kind::ImageSequence { first, fps: 30.0, looped: true });
                 }
@@ -795,7 +787,7 @@ impl App {
                 }
             });
             if ui.button(t!("inputs.add_audio_file")).clicked() {
-                let picked = rfd::FileDialog::new()
+                let picked = FileDialog::new()
                     .add_filter(t!("inputs.filter_audio"), &["mp3", "wav", "m4a", "flac", "ogg", "aac"])
                     .pick_files();
                 for p in picked.unwrap_or_default() {

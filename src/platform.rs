@@ -1,7 +1,8 @@
 //! Everything that differs between Windows, Linux and macOS: how children are
 //! started and ended, which ffmpeg device opens a camera or the screen, where
-//! the browser and the user's folders are, and how secrets are sealed. The rest
-//! of the program asks here and stays the same everywhere.
+//! the browser and the user's folders are, how secrets are sealed, and how a
+//! later start reaches the one running. The rest of the program asks here and
+//! stays the same everywhere.
 
 #[cfg(windows)]
 mod windows;
@@ -29,16 +30,21 @@ pub use os::{
     pictures_dir, screen_input, system_audio_input, videos_dir,
 };
 
+#[cfg(all(windows, test))]
+pub use windows::bind_as_lesser;
 #[cfg(windows)]
 pub use windows::{
-    ProcessTree, end_process_tree, has_exited, open_in_browser, open_sealed, prepare_child, seal,
+    LocalListener, LocalStream, ProcessTree, connect_local, end_process_tree, has_exited, open_in_browser,
+    open_sealed, pass_on_foreground_leave, prepare_child, raise_window, read_some, seal,
     tie_children_to_this_process,
 };
 
+#[cfg(all(unix, test))]
+pub use unix::socket_path;
 #[cfg(unix)]
 pub use unix::{
-    ProcessTree, end_process_tree, has_exited, open_in_browser, open_sealed, prepare_child, seal,
-    tie_children_to_this_process,
+    LocalListener, LocalStream, ProcessTree, connect_local, end_process_tree, has_exited, open_in_browser,
+    open_sealed, prepare_child, raise_window, read_some, seal, tie_children_to_this_process,
 };
 
 /// The file name of a program: `ffmpeg` is `ffmpeg.exe` on Windows.
