@@ -32,6 +32,19 @@ fn position(at: u64, origin: u64, rate: u64) -> i64 {
     (since * rate as i128 + NS as i128 / 2).div_euclid(NS as i128) as i64
 }
 
+/// The picture boundary a file begun at `origin` ends on when it is told to
+/// end at `t`: the first one at or after it, so that its last picture is whole.
+pub fn end_slot(origin: u64, t: u64, fps: u32) -> u64 {
+    let since = t.saturating_sub(origin) as u128;
+    (since * fps.max(1) as u128).div_ceil(NS as u128) as u64
+}
+
+/// Sound frames up to a picture boundary. One that falls between two sound
+/// frames, as at 144 pictures a second, ends on the later one.
+pub fn samples_to(slot: u64, fps: u32) -> u64 {
+    (slot as u128 * AUDIO_RATE as u128).div_ceil(fps.max(1) as u128) as u64
+}
+
 /// Paces a loop making `rate` things a second. Each tick stands for a fixed
 /// time on the clock, so running late never shifts the ticks after it.
 pub struct Pace {
@@ -113,7 +126,7 @@ impl FrameLine {
     /// As `place`, repeating at most `most` times: the rest of the gap is cut
     /// from the line, and the sound must lose as much (`cut_ns`) to stay with it.
     pub fn place_within(&mut self, at: u64, most: u64) -> Option<u64> {
-        let slot = position(at, self.origin + self.cut_ns(), self.fps);
+        let slot = self.slot(at);
         if slot < self.written as i64 {
             return None;
         }
@@ -126,6 +139,27 @@ impl FrameLine {
 
     pub fn written(&self) -> u64 {
         self.written
+    }
+
+    fn slot(&self, at: u64) -> i64 {
+        position(at, self.origin + self.cut_ns(), self.fps)
+    }
+
+    /// The picture boundary the line ends on when told to end at `t`.
+    pub fn end_at(&self, t: u64) -> u64 {
+        end_slot(self.origin + self.cut_ns(), t, self.fps as u32)
+    }
+
+    /// For a picture stamped `at` once the line ends at picture `end`: how
+    /// many times to repeat the picture before it so that the line reaches
+    /// the end, or `None` while this picture still belongs before the end.
+    pub fn close(&mut self, at: u64, end: u64) -> Option<u64> {
+        if self.slot(at) < end as i64 {
+            return None;
+        }
+        let gap = end.saturating_sub(self.written);
+        self.written += gap;
+        Some(gap)
     }
 
     /// Pictures cut from the line so far.
@@ -146,6 +180,9 @@ pub struct Fit {
     pub silence: u64,
     /// Frames at the start of the block that the stream already holds.
     pub skip: usize,
+    /// Frames of the block written after those: all the rest, unless the
+    /// stream ends within it.
+    pub take: usize,
 }
 
 /// An encoder's sound, one frame per sample period from the moment it started.
@@ -160,15 +197,25 @@ impl SampleLine {
     }
 
     /// Places a block of `frames` stamped `at`, the time of its first frame.
+    #[cfg(test)]
     pub fn place(&mut self, at: u64, frames: usize) -> Fit {
+        self.place_before(at, frames, u64::MAX)
+    }
+
+    /// As `place`, for a stream that ends after `end` frames: nothing goes
+    /// beyond them.
+    pub fn place_before(&mut self, at: u64, frames: usize, end: u64) -> Fit {
         let pos = position(at, self.origin, AUDIO_RATE as u64);
-        let fit = if pos >= self.written as i64 {
-            Fit { silence: pos as u64 - self.written, skip: 0 }
+        let (silence, skip) = if pos >= self.written as i64 {
+            (pos as u64 - self.written, 0)
         } else {
-            Fit { silence: 0, skip: ((self.written as i64 - pos) as u64).min(frames as u64) as usize }
+            (0, ((self.written as i64 - pos) as u64).min(frames as u64) as usize)
         };
-        self.written += fit.silence + (frames - fit.skip) as u64;
-        fit
+        let room = end.saturating_sub(self.written);
+        let silence = silence.min(room);
+        let take = ((frames - skip) as u64).min(room - silence) as usize;
+        self.written += silence + take as u64;
+        Fit { silence, skip, take }
     }
 
     pub fn written(&self) -> u64 {
@@ -179,9 +226,14 @@ impl SampleLine {
 /// Where an encoder's picture and sound both end, as (pictures, samples):
 /// the later of the two, on a picture boundary, so neither stops short.
 pub fn even_end(frames: u64, samples: u64, fps: u32) -> (u64, u64) {
-    let (fps, rate) = (fps.max(1) as u128, AUDIO_RATE as u128);
-    let frames = frames.max((samples as u128 * fps).div_ceil(rate) as u64);
-    (frames, (frames as u128 * rate).div_ceil(fps) as u64)
+    // The first boundary whose sound, as `samples_to` counts it, holds all
+    // of it: sound already ending on a boundary is not taken past it.
+    let covered = match samples {
+        0 => 0,
+        s => ((s as u128 - 1) * fps.max(1) as u128 / AUDIO_RATE as u128) as u64 + 1,
+    };
+    let frames = frames.max(covered);
+    (frames, samples_to(frames, fps))
 }
 
 /// Sound a live input holds beyond the block about to be taken, in frames:
@@ -614,32 +666,82 @@ mod tests {
         let mut pictures = FrameLine::new(0, 25);
         let mut sound = SampleLine::new(0);
         assert_eq!(pictures.place_within(0, 12), Some(0));
-        assert_eq!(sound.place(0, 960), Fit { silence: 0, skip: 0 });
+        assert_eq!(sound.place(0, 960), Fit { silence: 0, skip: 0, take: 960 });
         assert_eq!(pictures.place_within(10 * NS, 12), Some(12));
         assert_eq!(pictures.cut(), 237);
         assert_eq!(pictures.place_within(10 * NS + 40 * MS, 12), Some(0));
         let cut = pictures.cut_ns();
         assert_eq!(cut, 237 * 40 * MS);
         // The picture and the sound of 10.04 s start at the same place in the file.
-        assert_eq!(sound.place(10 * NS + 40 * MS - cut, 960), Fit { silence: 14 * 1920 - 960, skip: 0 });
+        let fit = sound.place(10 * NS + 40 * MS - cut, 960);
+        assert_eq!(fit, Fit { silence: 14 * 1920 - 960, skip: 0, take: 960 });
         assert_eq!((pictures.written() - 1) * 1920, sound.written() - 960);
     }
 
     #[test]
     fn lost_sound_becomes_silence_and_overlap_is_trimmed() {
         let mut line = SampleLine::new(0);
-        assert_eq!(line.place(0, 960), Fit { silence: 0, skip: 0 });
-        assert_eq!(line.place(60 * MS, 960), Fit { silence: 1920, skip: 0 });
-        assert_eq!(line.place(70 * MS, 960), Fit { silence: 0, skip: 480 });
-        assert_eq!(line.place(0, 960), Fit { silence: 0, skip: 960 });
+        assert_eq!(line.place(0, 960), Fit { silence: 0, skip: 0, take: 960 });
+        assert_eq!(line.place(60 * MS, 960), Fit { silence: 1920, skip: 0, take: 960 });
+        assert_eq!(line.place(70 * MS, 960), Fit { silence: 0, skip: 480, take: 480 });
+        assert_eq!(line.place(0, 960), Fit { silence: 0, skip: 960, take: 0 });
         assert_eq!(line.written(), 4320);
     }
 
     #[test]
     fn sound_from_before_the_start_is_cut_at_the_start() {
         let mut line = SampleLine::new(10 * MS);
-        assert_eq!(line.place(0, 960), Fit { silence: 0, skip: 480 });
+        assert_eq!(line.place(0, 960), Fit { silence: 0, skip: 480, take: 480 });
         assert_eq!(line.written(), 480);
+    }
+
+    /// Told to end 1.02 s after a start 7 ms off the picture loop's ticks, a
+    /// file at 25 pictures a second ends on its 26th picture boundary, at
+    /// 1.04 s: the picture under way when it was stopped is whole, and its
+    /// sound ends there too, whichever of the two reached the encoder first.
+    #[test]
+    fn a_stopped_file_ends_on_the_next_picture_boundary_with_both() {
+        let origin = 7 * MS;
+        let mut pictures = FrameLine::new(origin, 25);
+        let mut sound = SampleLine::new(origin);
+        let end = pictures.end_at(origin + 1020 * MS);
+        assert_eq!(end, 26);
+        let samples = samples_to(end, 25);
+        assert_eq!(samples, 49_920);
+        for n in 0..24 {
+            assert_eq!(pictures.close(origin + n * 40 * MS, end), None);
+            assert_eq!(pictures.place(origin + n * 40 * MS), Some(0));
+        }
+        // The 25th picture was late and given up, the 27th is past the end:
+        // the 24th is repeated for the 25th, and the line stops at the 26th.
+        assert_eq!(pictures.close(origin + 25 * 40 * MS, end), None);
+        assert_eq!(pictures.place(origin + 25 * 40 * MS), Some(1));
+        assert_eq!(pictures.close(origin + 26 * 40 * MS, end), Some(0));
+        assert_eq!(pictures.written(), end);
+        let fits: Vec<Fit> =
+            (0..56).map(|n| sound.place_before(origin + n * 20 * MS, 960, samples)).collect();
+        assert_eq!(fits[51], Fit { silence: 0, skip: 0, take: 960 });
+        assert_eq!(fits[52], Fit { silence: 0, skip: 0, take: 0 });
+        assert_eq!(sound.written(), samples);
+        // Sound lost just before the end is silence up to the end, no further.
+        let mut gap = SampleLine::new(origin);
+        gap.place_before(origin, 960, 2000);
+        assert_eq!(gap.place_before(origin + 40 * MS, 960, 2000), Fit { silence: 960, skip: 0, take: 80 });
+        assert_eq!(gap.written(), 2000);
+    }
+
+    /// A picture placed after the last one before the end fills what is
+    /// missing up to the end, then nothing more is written.
+    #[test]
+    fn pictures_missing_before_the_end_repeat_the_last_one() {
+        let mut pictures = FrameLine::new(0, 30);
+        for n in 0..10 {
+            pictures.place(n * NS / 30);
+        }
+        assert_eq!(pictures.close(14 * NS / 30, 12), Some(2));
+        assert_eq!(pictures.written(), 12);
+        assert_eq!(pictures.close(15 * NS / 30, 12), Some(0));
+        assert_eq!(pictures.written(), 12);
     }
 
     #[test]
@@ -647,6 +749,21 @@ mod tests {
         assert_eq!(even_end(300, 480_000, 30), (300, 480_000));
         assert_eq!(even_end(300, 480_100, 30), (301, 481_600));
         assert_eq!(even_end(302, 480_000, 30), (302, 483_200));
+    }
+
+    /// At 144 pictures a second a boundary falls between two sound frames: a
+    /// stopped file whose sound ends on one, as `samples_to` puts it, is not
+    /// padded a picture more, at any rate.
+    #[test]
+    fn sound_ending_between_two_of_its_frames_is_not_padded() {
+        assert_eq!(samples_to(10, 144), 3334);
+        for fps in [144, 30, 29, 60, 7] {
+            for end in [0, 1, 10, 143, 100_000] {
+                let samples = samples_to(end, fps);
+                assert_eq!(even_end(end, samples, fps), (end, samples), "{end} pictures at {fps}/s");
+            }
+        }
+        assert_eq!(even_end(10, 3335, 144), (11, 3667));
     }
 
     #[test]

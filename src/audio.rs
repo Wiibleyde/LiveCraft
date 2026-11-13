@@ -370,6 +370,7 @@ impl Engine {
             let default = default_name.lock().unwrap().clone();
             play_routes(&mix, &buses, &solo, &mut devices, &default);
             self.feed_encoders(&buses, pace.stamp());
+            self.finish_ended();
             self.feed_calls(&mix, &buses, (&dry, &own), &mut back);
             rack.idle();
 
@@ -408,6 +409,10 @@ impl Engine {
         }
         for cam in self.replay.lock().unwrap().cams.iter() {
             cam.encoder.push_audio(pcm(cam.encoder.pick), at);
+        }
+        // Last, after the lists a stopped recording leaves: see `Endings`.
+        for e in self.ending.lock().unwrap().list.iter() {
+            e.encoder.push_audio(pcm(e.encoder.pick), at);
         }
     }
 

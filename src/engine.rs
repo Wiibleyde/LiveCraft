@@ -7,6 +7,7 @@ use crate::frame::Frame;
 use crate::model::*;
 use crate::netvideo::NetOut;
 use crate::output::Encoder;
+use crate::outputs::Endings;
 use crate::plugins::PluginHost;
 use crate::replay::ReplayState;
 use crate::sources::{self, InputRt};
@@ -99,6 +100,8 @@ pub struct Engine {
     pub plugins: PluginHost,
     pub recorders: Mutex<Vec<Encoder>>,
     pub streamers: Mutex<Vec<Encoder>>,
+    /// Recordings stopped, fed until they reach their end.
+    pub(crate) ending: Mutex<Endings>,
     pub multi: Mutex<Vec<(u64, Encoder)>>,
     pub srt: Mutex<Vec<(Route, Encoder)>>,
     /// NDI and OMT senders of the program.
@@ -142,6 +145,7 @@ impl Engine {
             plugins: PluginHost::default(),
             recorders: Mutex::new(Vec::new()),
             streamers: Mutex::new(Vec::new()),
+            ending: Mutex::new(Endings::default()),
             multi: Mutex::new(Vec::new()),
             srt: Mutex::new(Vec::new()),
             net: Mutex::new(Vec::new()),
@@ -310,7 +314,7 @@ impl Engine {
     pub fn load_project(&self, project: Project) {
         // Anything recording a single input must not end up on another one
         // that happens to carry the same number in the new project.
-        self.stop_multi();
+        self.stop_multi_at_once(|_| true);
         self.stop_srt();
         self.replay_stop();
         let next = project.inputs.iter().map(|i| i.id).max().unwrap_or(0) + 1;

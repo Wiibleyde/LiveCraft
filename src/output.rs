@@ -69,18 +69,46 @@ pub struct Encoder {
     warning: Arc<Mutex<Option<String>>>,
     child: Arc<Mutex<Option<Child>>>,
     pictures: Arc<Mutex<FrameLog>>,
+    /// Where the file starts on the shared clock, `NOT_YET` until ffmpeg is ready.
+    began: Arc<AtomicU64>,
+    end: Arc<End>,
+    /// Where the latest sound sent ends on the clock. Sending holds it, so
+    /// that a stop sees everything sent before it.
+    sound_until: Mutex<u64>,
 }
 
-/// Pictures and sound frames added at the end of a file. Both lines follow
-/// the same clock, so more than a frame means they had drifted apart.
+/// Pictures and sound frames added at the end of a file, and where its
+/// picture and sound ended before, in seconds. A stopped file is fed both up
+/// to the same picture boundary, so anything added means one of them did not
+/// arrive in time.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Padding {
     pub pictures: u64,
     pub samples: u64,
+    pub picture_end: f64,
+    pub sound_end: f64,
 }
 
-/// Where a file starts on the shared clock until ffmpeg is ready.
+/// Where a file starts, or ends, on the shared clock until it is known.
 const NOT_YET: u64 = u64::MAX;
+
+/// Where a stopped output ends. The sound loop makes each block at the start
+/// of the time it stands for, the picture loop each picture after composing
+/// it, so at any moment the sound is ahead: cut off there, a file had up to
+/// two pictures repeated at its end for sound already written. A stopped
+/// output keeps being fed instead, until both have reached its end.
+struct End {
+    /// On the clock: the file's last picture boundary is the first at or after it.
+    at: AtomicU64,
+    pictures: AtomicBool,
+    sound: AtomicBool,
+}
+
+impl End {
+    fn new() -> Self {
+        Self { at: AtomicU64::new(NOT_YET), pictures: AtomicBool::new(false), sound: AtomicBool::new(false) }
+    }
+}
 
 /// Writes `frames` of silence a second at a time at most: after the machine
 /// slept or a virtual machine was paused, the gap can be hours long.
@@ -123,7 +151,12 @@ fn join_by<T>(job: JoinHandle<Option<T>>, deadline: Instant) -> Result<Option<T>
 fn padding(p: &PictureTail, s: &SoundTail, fps: u32) -> Option<Padding> {
     p.last.as_ref()?;
     let (frames, samples) = clock::even_end(p.frames, s.samples, fps);
-    Some(Padding { pictures: frames - p.frames, samples: samples - s.samples })
+    Some(Padding {
+        pictures: frames - p.frames,
+        samples: samples - s.samples,
+        picture_end: p.frames as f64 / fps.max(1) as f64,
+        sound_end: s.samples as f64 / AUDIO_RATE as f64,
+    })
 }
 
 /// Pads the shorter of picture and sound to the end of the other: a file
@@ -362,23 +395,35 @@ impl Encoder {
         let (vtx, vrx) = sync_channel::<(u64, Arc<Frame>)>(6);
         let (fail, start, again, fps) = (failed.clone(), began.clone(), repeated.clone(), s.fps);
         let (taken, dropped_time, cut_count) = (pictures.clone(), cut_ns.clone(), cut.clone());
+        let end = Arc::new(End::new());
+        let ending = end.clone();
         let picture_writer = thread::spawn(move || {
             let mut line: Option<FrameLine> = None;
             let mut last: Option<(u64, Arc<Frame>)> = None;
             while let Ok((at, f)) = vrx.recv() {
                 let origin = start.load(Ordering::Acquire);
-                if origin == NOT_YET {
+                if origin == NOT_YET || ending.pictures.load(Ordering::Relaxed) {
                     continue;
                 }
                 let line = line.get_or_insert_with(|| FrameLine::new(origin, fps));
-                let before = line.cut();
-                let Some(gap) = line.place_within(at, most) else {
-                    continue;
+                // The first picture past the end closes the line, in place of
+                // being written.
+                let stop = ending.at.load(Ordering::Acquire);
+                let closing = if stop == NOT_YET { None } else { line.close(at, line.end_at(stop)) };
+                let gap = match closing {
+                    Some(gap) => gap,
+                    None => {
+                        let before = line.cut();
+                        let Some(gap) = line.place_within(at, most) else {
+                            continue;
+                        };
+                        if line.cut() > before {
+                            cut_count.store(line.cut(), Ordering::Relaxed);
+                            dropped_time.store(line.cut_ns(), Ordering::Release);
+                        }
+                        gap
+                    }
                 };
-                if line.cut() > before {
-                    cut_count.store(line.cut(), Ordering::Relaxed);
-                    dropped_time.store(line.cut_ns(), Ordering::Release);
-                }
                 // A copy shows the picture before it, and is logged as taken
                 // when that one was: a replay finds pictures by that moment.
                 let (fill_at, fill) = last.as_ref().map_or((at, &f), |(t, p)| (*t, p));
@@ -390,6 +435,10 @@ impl Encoder {
                     taken.lock().unwrap().push(clock::instant(fill_at));
                 }
                 again.fetch_add(gap, Ordering::Relaxed);
+                if closing.is_some() {
+                    ending.pictures.store(true, Ordering::Release);
+                    continue;
+                }
                 if pipe.write_all(&f.data).is_err() {
                     fail.store(true, Ordering::Relaxed);
                     return None;
@@ -401,7 +450,8 @@ impl Encoder {
         });
 
         let (atx, arx) = sync_channel::<(u64, Vec<i16>)>(100);
-        let (fail, start, dropped_time) = (failed.clone(), began.clone(), cut_ns.clone());
+        let (fail, start, dropped_time, ending) =
+            (failed.clone(), began.clone(), cut_ns.clone(), end.clone());
         let sound = thread::spawn(move || {
             let _ = listener.set_nonblocking(true);
             let deadline = Instant::now() + Duration::from_secs(15);
@@ -423,16 +473,28 @@ impl Encoder {
             let mut line = SampleLine::new(origin);
             let mut bytes = Vec::new();
             while let Ok((at, block)) = arx.recv() {
-                let at = at.saturating_sub(dropped_time.load(Ordering::Acquire));
-                let fit = line.place(at, block.len() / channels);
+                let cut = dropped_time.load(Ordering::Acquire);
+                let at = at.saturating_sub(cut);
+                // The sound ends on the picture line's last boundary.
+                let stop = ending.at.load(Ordering::Acquire);
+                let limit = if stop == NOT_YET {
+                    u64::MAX
+                } else {
+                    clock::samples_to(clock::end_slot(origin, stop.saturating_sub(cut), fps), fps)
+                };
+                let fit = line.place_before(at, block.len() / channels, limit);
                 bytes.clear();
-                bytes.extend(block[fit.skip * channels..].iter().flat_map(|v| v.to_le_bytes()));
+                let kept = &block[fit.skip * channels..(fit.skip + fit.take) * channels];
+                bytes.extend(kept.iter().flat_map(|v| v.to_le_bytes()));
                 if write_silence(&mut sock, fit.silence, channels)
                     .and_then(|()| sock.write_all(&bytes))
                     .is_err()
                 {
                     fail.store(true, Ordering::Relaxed);
                     return None;
+                }
+                if line.written() >= limit {
+                    ending.sound.store(true, Ordering::Release);
                 }
             }
             Some(SoundTail { sock, samples: line.written() })
@@ -460,6 +522,9 @@ impl Encoder {
             warning,
             child: Arc::new(Mutex::new(Some(child))),
             pictures,
+            began,
+            end,
+            sound_until: Mutex::new(0),
         })
     }
 
@@ -474,6 +539,11 @@ impl Encoder {
     pub fn push_video(&self, f: Arc<Frame>, at: u64) {
         // A frame of another size would scramble the raw stream.
         if (f.w, f.h) != self.size {
+            return;
+        }
+        // Held while sending, so that a stop comes before or after this picture.
+        let _sending = self.sound_until.lock().unwrap();
+        if self.end.pictures.load(Ordering::Relaxed) {
             return;
         }
         if let Some(tx) = &self.video {
@@ -491,11 +561,41 @@ impl Encoder {
 
     /// `at` is the time on the shared clock of the block's first frame.
     pub fn push_audio(&self, s: Vec<i16>, at: u64) {
+        let mut until = self.sound_until.lock().unwrap();
+        if self.end.sound.load(Ordering::Relaxed) {
+            return;
+        }
         if let Some(tx) = &self.audio {
             let samples = (s.len() / (self.pick.count.max(1) as usize * 2)) as u64;
-            let counter = if tx.try_send((at, s)).is_ok() { &self.audio_sent } else { &self.audio_dropped };
+            let counter = if tx.try_send((at, s)).is_ok() {
+                *until = (*until).max(at + samples * clock::NS / AUDIO_RATE as u64);
+                &self.audio_sent
+            } else {
+                &self.audio_dropped
+            };
             counter.fetch_add(samples, Ordering::Relaxed);
         }
+    }
+
+    /// Ends the file on the first picture boundary after the stop, the
+    /// picture under way included, and after any sound it already has. The
+    /// loops keep feeding it until `ended`.
+    pub fn stop(&self) {
+        let until = self.sound_until.lock().unwrap();
+        if self.end.at.load(Ordering::Relaxed) == NOT_YET {
+            // Everything sent so far was made by now, and a picture made now
+            // ends within a period.
+            let picture = clock::now() + clock::NS / self.fps.max(1) as u64;
+            self.end.at.store(picture.max(*until), Ordering::Release);
+        }
+    }
+
+    /// Stopped, and picture and sound have both reached the end, or there is
+    /// no file to end.
+    pub fn ended(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
+            || self.began.load(Ordering::Acquire) == NOT_YET
+            || (self.end.pictures.load(Ordering::Acquire) && self.end.sound.load(Ordering::Acquire))
     }
 
     /// The error to show, once the process gave up.
@@ -560,6 +660,15 @@ impl Encoder {
 /// the first time, so not from the interface thread.
 pub fn list_encoders() -> Vec<String> {
     crate::ffmpeg::capabilities().encoders.clone()
+}
+
+/// A stopped encoder around a process that never reads, whose picture and
+/// sound never reach the end.
+#[cfg(test)]
+pub(crate) fn never_ending() -> Encoder {
+    let encoder = tests::finishing(tests::idle_process(30), Duration::ZERO, 0);
+    encoder.stop();
+    encoder
 }
 
 #[cfg(test)]
@@ -679,7 +788,7 @@ mod tests {
     /// An encoder of 1080p at 30 fps around `child` in place of ffmpeg, whose
     /// picture writer hands its pipe back after `busy`, `behind` pictures
     /// short of ten seconds of sound.
-    fn finishing(mut child: Child, busy: Duration, behind: u64) -> Encoder {
+    pub(super) fn finishing(mut child: Child, busy: Duration, behind: u64) -> Encoder {
         let pipe = child.stdin.take().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let sock = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -715,11 +824,14 @@ mod tests {
             warning: Arc::default(),
             child: Arc::new(Mutex::new(Some(child))),
             pictures: log,
+            began: Arc::new(AtomicU64::new(0)),
+            end: Arc::new(End::new()),
+            sound_until: Mutex::new(0),
         }
     }
 
     /// Runs for about `seconds` and never reads its input.
-    fn idle_process(seconds: u32) -> Child {
+    pub(super) fn idle_process(seconds: u32) -> Child {
         #[cfg(windows)]
         let mut idle = {
             let mut c = Command::new("ping");
@@ -756,6 +868,7 @@ mod tests {
         let (done, finished) = std::sync::mpsc::channel();
         thread::spawn(move || done.send(enc.finish(Duration::from_secs(1))));
         assert_eq!(finished.recv_timeout(Duration::from_secs(60)), Ok(false));
-        assert_eq!(*padded.lock().unwrap(), Some(Padding { pictures: 30, samples: 0 }));
+        let ends = Padding { pictures: 30, samples: 0, picture_end: 9.0, sound_end: 10.0 };
+        assert_eq!(*padded.lock().unwrap(), Some(ends));
     }
 }

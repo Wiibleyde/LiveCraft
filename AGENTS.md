@@ -29,5 +29,7 @@ and is easy to test, `src/mixer.rs` makes pictures, `src/sources.rs` and `src/pl
   to a new renderer without them, never draws it and crashes it, and the window stays on about:blank.
 - Saved data must keep loading: every saved struct has `#[serde(default)]`.
 - An encoder's file starts when the encoder is ready, not when the button was pressed.
+- A file ends where it was stopped only if fed after the stop: sound is made ahead of its time and
+  pictures after composing, so cut off at once a file repeats its last pictures for sound it had.
 - Stopping a child process must end its whole tree, as ffmpeg may be started through a launcher.
 - Do not measure speed by feel. Find what costs time on a real project before changing anything.
