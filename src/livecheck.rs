@@ -878,6 +878,22 @@ mod tests {
         assert!(e.starts_with("pas de son"), "{e}");
     }
 
+    /// A live input is kept in step by playing it up to a thousandth faster
+    /// or slower, and the virtual cable dropped 10 ms now and then on CI, the
+    /// tone coming back out of step with itself (#40): neither is another
+    /// sound. A pitch a percent off is.
+    #[test]
+    fn a_tone_a_thousandth_off_or_missing_a_moment_is_still_heard() {
+        assert!(judge_tone(&sine(TONE_HZ * 1.001, TONE_LEVEL, 4.0), SAMPLE_RATE).is_ok());
+        let mut gap = sine(TONE_HZ, TONE_LEVEL, 2.0);
+        // 10.4 ms: the tone comes back 0.4 of a period out of step.
+        gap.extend(std::iter::repeat_n(0.0, 500));
+        gap.extend(sine(TONE_HZ, TONE_LEVEL, 2.0));
+        assert!(judge_tone(&gap, SAMPLE_RATE).is_ok());
+        let e = judge_tone(&sine(TONE_HZ * 1.01, TONE_LEVEL, 4.0), SAMPLE_RATE).unwrap_err();
+        assert!(e.starts_with("son brouillé"), "{e}");
+    }
+
     #[test]
     fn another_sound_fails() {
         assert!(judge_tone(&sine(440.0, TONE_LEVEL, 4.0), SAMPLE_RATE).is_err());
