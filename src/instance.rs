@@ -44,10 +44,16 @@ pub const TIMING: Timing = Timing {
 
 /// How often a window that found the session taken asks for it again.
 const RETRY_EVERY: Duration = Duration::from_secs(3);
+/// How long a start told the window is full waits before calling again.
+const RETRY_PAUSE: Duration = Duration::from_millis(100);
 /// Room for any path, and no more.
 const MAX_REQUEST: usize = 256 * 1024;
 /// Callers answered at once; more are told to try again.
 const MAX_CALLERS: usize = 8;
+/// Callers told to try again at once, each apart; more are told in turn. With
+/// the callers answered and the way in, within the pipe instances Windows
+/// keeps for the name.
+const MAX_TURNED_AWAY: usize = 4;
 /// How long a caller has to say what it wants, and to hang up after the answer.
 const SPEAK_WITHIN: Duration = Duration::from_secs(2);
 /// How often a busy window says so.
@@ -147,18 +153,26 @@ pub fn hand_over(name: &str, request: &Request, timing: Timing) -> Handed {
     line.push('\n');
     let name = name.to_string();
     let (tx, rx) = mpsc::channel();
-    // Whatever blocks on the way, a write to a window frozen whole say, is
-    // left behind: this start waits so long at most.
-    std::thread::spawn(move || {
-        let _ = tx.send(exchange(&name, line.as_bytes(), timing));
-    });
     let longest = timing.window * 2 + timing.patience + Duration::from_secs(2);
+    // A second early, so that the answer is in before this start stops waiting.
+    let until = Instant::now() + longest - Duration::from_secs(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(exchange(&name, line.as_bytes(), timing, until));
+    });
+    // Only what blocks on the way, a write to a window frozen whole say, is
+    // left behind: this start waits so long at most.
     rx.recv_timeout(longest).unwrap_or(Handed::NoAnswer)
 }
 
-fn exchange(name: &str, line: &[u8], timing: Timing) -> Handed {
+/// Tries again only while a whole try fits before `until`, so it ends before
+/// the start stops waiting, unless reaching or writing to the window blocks (a
+/// window frozen whole): once a start has given up, a request still on its way
+/// could be opened by the window as well.
+fn exchange(name: &str, line: &[u8], timing: Timing, until: Instant) -> Handed {
     // Between two words from the window: long enough for one free to take it.
     let silence = timing.window + Duration::from_secs(2);
+    // What one more try takes at most: the pause, reaching the window, its answer.
+    let one_try = RETRY_PAUSE + timing.window + silence;
     let mut connected = None::<Instant>;
     loop {
         let mut conn = match connect_local(name, Instant::now() + timing.window) {
@@ -182,15 +196,18 @@ fn exchange(name: &str, line: &[u8], timing: Timing) -> Handed {
                 Ok("ok") => return Handed::Taken,
                 Ok("wait") if since.elapsed() >= timing.patience => return Handed::Kept,
                 Ok("wait") => {}
-                // Too many callers at once: this one tries again shortly.
-                Ok("full") if since.elapsed() < timing.patience => break,
+                // Too many callers at once: this one tries again shortly, if
+                // a whole try still fits. Turned away, it left nothing behind.
+                Ok("full") if since.elapsed() < timing.patience && Instant::now() + one_try < until => {
+                    break;
+                }
                 Ok("gone") => return Handed::NobodyThere,
                 Ok("bad") => return Handed::Refused,
                 _ => return Handed::NoAnswer,
             }
         }
         drop(conn);
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(RETRY_PAUSE);
     }
 }
 
@@ -231,11 +248,14 @@ impl Lines {
     }
 }
 
-/// Says the last word, then lets the caller hang up first: hanging up at
-/// once could lose the word before it is read.
-fn say_last(conn: &mut LocalStream, lines: &mut Lines, word: &[u8]) {
+/// Says the last word, then lets the caller hang up first, for so long at
+/// most: hanging up at once could lose the word before it is read. What the
+/// caller sent before, its request say, is no reason to hang up.
+fn say_last(conn: &mut LocalStream, word: &[u8]) {
     if conn.write_all(word).is_ok() {
-        let _ = lines.next(conn, 0, Instant::now() + SPEAK_WITHIN);
+        let until = Instant::now() + SPEAK_WITHIN;
+        let mut chunk = [0; 8192];
+        while matches!(read_some(conn, &mut chunk, until), Ok(n) if n > 0) {}
     }
 }
 
@@ -274,6 +294,7 @@ struct Shared {
     claimed: Instant,
     startup: Duration,
     callers: AtomicUsize,
+    turned_away: AtomicUsize,
     /// The window let the name go: callers still there are told so.
     gone: AtomicBool,
 }
@@ -311,6 +332,7 @@ impl First {
             claimed: Instant::now(),
             startup: timing.startup,
             callers: AtomicUsize::new(0),
+            turned_away: AtomicUsize::new(0),
             gone: AtomicBool::new(false),
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -330,10 +352,20 @@ impl First {
                             s.callers.fetch_sub(1, Ordering::AcqRel);
                         });
                     }
-                    // Too many at once: this one is told to try again shortly.
+                    // Too many at once: this one is told to try again shortly,
+                    // apart, so that one slow to hang up holds up no other.
                     Ok(mut conn) => {
                         s.callers.fetch_sub(1, Ordering::AcqRel);
-                        say_last(&mut conn, &mut Lines::default(), b"full\n");
+                        if s.turned_away.fetch_add(1, Ordering::AcqRel) < MAX_TURNED_AWAY {
+                            let s = s.clone();
+                            std::thread::spawn(move || {
+                                say_last(&mut conn, b"full\n");
+                                s.turned_away.fetch_sub(1, Ordering::AcqRel);
+                            });
+                        } else {
+                            s.turned_away.fetch_sub(1, Ordering::AcqRel);
+                            say_last(&mut conn, b"full\n");
+                        }
                     }
                     // A caller that left at once, or no instance free: never spin.
                     Err(_) => std::thread::sleep(Duration::from_millis(50)),
@@ -391,7 +423,7 @@ fn serve(mut conn: LocalStream, tickets: &Sender<Arc<Ticket>>, shared: &Shared, 
     };
     let Some(request) = request else {
         // Said at once, so that the caller does not wait for nothing.
-        return say_last(&mut conn, &mut lines, b"bad\n");
+        return say_last(&mut conn, b"bad\n");
     };
     let ticket = Arc::new(Ticket::new(request));
     if tickets.send(ticket.clone()).is_ok() {
@@ -400,10 +432,10 @@ fn serve(mut conn: LocalStream, tickets: &Sender<Arc<Ticket>>, shared: &Shared, 
     let (mut free_since, mut said_wait) = (None::<Instant>, None::<Instant>);
     loop {
         if ticket.taken() {
-            return say_last(&mut conn, &mut lines, b"ok\n");
+            return say_last(&mut conn, b"ok\n");
         }
         if shared.gone.load(Ordering::Acquire) && ticket.settle(GIVEN_UP) {
-            return say_last(&mut conn, &mut lines, b"gone\n");
+            return say_last(&mut conn, b"gone\n");
         }
         if shared.busy() {
             free_since = None;
@@ -621,20 +653,99 @@ mod tests {
             .collect();
         std::thread::sleep(Duration::from_secs(1));
         first.set_ready();
-        let mut taken = std::collections::HashSet::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while taken.len() < starts.len() && Instant::now() < deadline {
+        let mut expected: Vec<String> =
+            (0..starts.len()).map(|i| format!("{:?}", Request::Open(format!("{i}.livecraft")))).collect();
+        // Taken until every start ended, and a little after: one taken twice shows.
+        let (mut taken, mut all_ended) = (Vec::new(), None::<Instant>);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while all_ended.is_none_or(|t| t.elapsed() < Duration::from_millis(300)) && Instant::now() < deadline
+        {
+            if all_ended.is_none() && starts.iter().all(|start| start.is_finished()) {
+                all_ended = Some(Instant::now());
+            }
             match first.next() {
-                Some(request) => {
-                    taken.insert(format!("{request:?}"));
-                }
+                Some(request) => taken.push(format!("{request:?}")),
                 None => std::thread::sleep(Duration::from_millis(10)),
             }
         }
-        assert_eq!(taken.len(), starts.len(), "each one taken once");
-        for start in starts {
-            assert!(start.join().unwrap().is_none(), "and each start ended");
+        let ended: Vec<String> = starts
+            .into_iter()
+            .map(|start| match start.join().unwrap() {
+                None => "handed over".to_string(),
+                Some(Role::First(_)) => "became the first".to_string(),
+                Some(Role::Second(_)) => "runs as a second window".to_string(),
+                Some(Role::Alone { foreign }) => format!("runs alone, foreign: {foreign}"),
+            })
+            .collect();
+        taken.sort();
+        expected.sort();
+        assert_eq!(taken, expected, "each one taken once; the starts: {ended:?}");
+        assert!(ended.iter().all(|e| e == "handed over"), "each start ended: {ended:?}");
+    }
+
+    /// However a crowd of starts ends, left with a busy window or turned away
+    /// to run on their own, each project opens in one window only.
+    #[test]
+    fn crowded_starts_open_each_project_in_one_window_only() {
+        let name = unique("crowd");
+        let timing = Timing {
+            window: Duration::from_secs(1),
+            patience: Duration::from_millis(600),
+            startup: Duration::from_secs(60),
+        };
+        // Busy starting throughout: the first callers are kept, the others turned away.
+        let first = First::claim(&name, timing).unwrap();
+        let request = |i: usize| format!("{:?}", Request::Open(format!("{i}.livecraft")));
+        let starts: Vec<_> = (0..MAX_CALLERS + MAX_TURNED_AWAY + 3)
+            .map(|i| later_start(&name, Request::Open(format!("{i}.livecraft")), timing))
+            .collect();
+        let mut left_with_it: Vec<String> = Vec::new();
+        for (i, start) in starts.into_iter().enumerate() {
+            match start.join().unwrap() {
+                None => left_with_it.push(request(i)),
+                Some(Role::Second(_)) => {}
+                Some(_) => panic!("start {i} took the name"),
+            }
         }
+        first.set_ready();
+        let mut taken: Vec<String> = std::iter::from_fn(|| first.next()).map(|r| format!("{r:?}")).collect();
+        taken.sort();
+        left_with_it.sort();
+        assert_eq!(taken, left_with_it, "opened by the first exactly when left with it");
+    }
+
+    /// A caller turned away hears so even when slow to read: the window hangs
+    /// up only after it, though the caller spoke first.
+    #[test]
+    fn the_last_word_waits_for_the_caller_to_hang_up() {
+        let name = unique("linger");
+        let mut listener = crate::platform::LocalListener::bind(&name).unwrap();
+        let mut caller = connect_local(&name, Instant::now() + WAIT).unwrap();
+        let mut answering = listener.accept().unwrap();
+        caller.write_all(b"{\"Open\":\"x.livecraft\"}\n").unwrap();
+        let speaking = std::thread::spawn(move || say_last(&mut answering, b"full\n"));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!speaking.is_finished(), "still on the line while the word is not read");
+        let heard = Lines::default().next(&mut caller, 16, Instant::now() + WAIT);
+        assert_eq!(heard, Ok("full".to_string()));
+        drop(caller);
+        speaking.join().unwrap();
+    }
+
+    /// The last word before the other side hangs up is still heard, however
+    /// late it is read: macOS refuses a read time limit once the other side
+    /// is gone, so waiting must not need one.
+    #[test]
+    fn a_last_word_is_heard_after_the_other_side_hung_up() {
+        let name = unique("lastword");
+        let mut listener = crate::platform::LocalListener::bind(&name).unwrap();
+        let mut caller = connect_local(&name, Instant::now() + WAIT).unwrap();
+        let mut answering = listener.accept().unwrap();
+        answering.write_all(b"full\n").unwrap();
+        drop(answering);
+        std::thread::sleep(Duration::from_millis(100));
+        let heard = Lines::default().next(&mut caller, 16, Instant::now() + WAIT);
+        assert_eq!(heard, Ok("full".to_string()));
     }
 
     /// Only one side ever settles a request, whichever comes first.

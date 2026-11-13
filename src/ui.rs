@@ -260,6 +260,23 @@ pub struct App {
     /// This window does not save the session: another one holds it, or what
     /// that one saved last could not be set aside.
     not_saving: bool,
+    /// What the other window saved last, when it could not be set aside yet,
+    /// and when to try again.
+    set_aside_later: Option<(PathBuf, Instant)>,
+}
+
+/// How often a session that could not be set aside is tried again.
+const SET_ASIDE_AGAIN: Duration = Duration::from_secs(10);
+
+/// Copies the session another window saved last beside it, named for `stamp`.
+/// A copy that failed halfway is not left to pass for one.
+fn set_aside(session: &std::path::Path, stamp: &str) -> std::io::Result<PathBuf> {
+    let aside = session.with_file_name(format!("session.{stamp}.json"));
+    std::fs::copy(session, &aside).map(|_| aside.clone()).inspect_err(|_| {
+        if aside.is_file() {
+            let _ = std::fs::remove_file(&aside);
+        }
+    })
 }
 
 /// A window that found the session held by another one.
@@ -415,8 +432,13 @@ impl App {
             first.set_ready();
             self.become_first(ctx, first);
             if let Some(held) = self.second.take() {
-                self.take_session_back(held);
+                self.take_session_back(held.session);
             }
+        }
+        if let Some((session, at)) = &self.set_aside_later
+            && Instant::now() >= *at
+        {
+            self.take_session_back(Some(session.clone()));
         }
         let handed: Vec<_> =
             self.first.as_ref().map(|f| std::iter::from_fn(|| f.next()).collect()).unwrap_or_default();
@@ -431,21 +453,30 @@ impl App {
 
     /// The other window is gone, and saved the session as it closed. This
     /// window keeps its own desk, which may be on air, and first copies that
-    /// save aside, so that it is never overwritten silently.
-    fn take_session_back(&mut self, held: SessionHeld) {
-        if let Some(path) = held.session.as_ref().filter(|p| p.is_file()) {
-            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-            let aside = path.with_file_name(format!("session.{stamp}.json"));
-            if std::fs::copy(path, &aside).is_err() {
-                self.say(t!("app.session_not_set_aside"));
-                return;
+    /// save aside, so that it is never overwritten silently. Until that copy
+    /// is made, this window does not save, and tries again now and then.
+    fn take_session_back(&mut self, session: Option<PathBuf>) {
+        if let Some(path) = session.as_ref().filter(|p| p.is_file()) {
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+            match set_aside(path, &stamp) {
+                Ok(aside) => {
+                    let shown =
+                        aside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.say(t!("app.session_set_aside", file = shown));
+                }
+                Err(_) => {
+                    if self.set_aside_later.is_none() {
+                        self.say(t!("app.session_not_set_aside", seconds = SET_ASIDE_AGAIN.as_secs()));
+                    }
+                    self.set_aside_later = Some((path.clone(), Instant::now() + SET_ASIDE_AGAIN));
+                    return;
+                }
             }
-            let shown = aside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            self.say(t!("app.session_set_aside", file = shown));
         } else {
             self.say(t!("app.first_again"));
         }
-        self.session_file = held.session;
+        self.set_aside_later = None;
+        self.session_file = session;
         self.not_saving = false;
     }
 
@@ -647,6 +678,7 @@ impl App {
             first: None,
             second: None,
             not_saving: false,
+            set_aside_later: None,
         }
     }
 
