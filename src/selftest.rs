@@ -290,10 +290,14 @@ fn loop_back(net: Net) -> Result<String, String> {
     result
 }
 
-/// The least sound waiting at a live input over `span`, in ms. Its sender
-/// runs on its own clock, and the sound loop keeps what waits near its margin
-/// (`Drift`), cutting back at the end of each second sound that piled up: over
-/// a few seconds, it must come down to that margin at least once.
+/// The least sound waiting at a live input over `span`, in ms. The sound loop
+/// keeps what waits near its margin (`Drift`) and cuts back sound that piled
+/// up: over a few seconds, it must come down to within a tenth of a second at
+/// least once. A smoke check of the real path only: sent from this desk, on
+/// our own clock, the sound would stay that low without `Drift` too. Keeping
+/// a sender on another clock in step is checked by
+/// `sound_on_another_clock_is_kept_in_step` and the long runs in `clock.rs`
+/// and `audio.rs`.
 pub(crate) fn least_waiting(rt: &crate::sources::InputRt, span: Duration) -> Result<usize, String> {
     let ring = rt.audio.as_ref().ok_or("sans son")?;
     let started = Instant::now();
@@ -303,7 +307,7 @@ pub(crate) fn least_waiting(rt: &crate::sources::InputRt, span: Duration) -> Res
         sleep(Duration::from_millis(5));
     }
     let ms = least * 1000 / 48_000;
-    if ms > 150 {
+    if ms > 100 {
         return Err(format!("en retard : jamais moins de {ms} ms en attente en {} s", span.as_secs()));
     }
     Ok(ms)
