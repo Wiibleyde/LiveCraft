@@ -387,6 +387,10 @@ mod tests {
         last_hour_mean: f64,
         picture_s: f64,
         sound_s: f64,
+        /// After the first half hour: times the input was cut back to its
+        /// margin, and given silence to rebuild it.
+        cuts: u64,
+        silences: u64,
     }
 
     /// A pipe that stops reading for a moment now and then, as an encoder
@@ -417,22 +421,134 @@ mod tests {
         }
     }
 
+    /// How a live input's sound reaches its ring.
+    #[derive(Clone, Copy)]
+    struct Feed {
+        /// How far the sender's clock is off ours.
+        ppm: f64,
+        /// Frames in each delivery.
+        chunk: u64,
+        /// Each delivery is up to this many ms late, at random...
+        jitter_ms: u64,
+        /// ...and one in `every` is `late_ms` late, holding up those behind it.
+        every: u64,
+        late_ms: u64,
+        /// Frames the input's ring holds; beyond, it drops the oldest.
+        ring: u64,
+        /// The sender's pictures come with its sound and the mixer shows the
+        /// latest, as an NDI or OMT input's do. Otherwise a picture is of the
+        /// moment the mixer takes it, as a camera's or a web page's is.
+        pictures: bool,
+    }
+
+    impl Feed {
+        /// A microphone delivering 10 ms at a time.
+        fn microphone(ppm: f64) -> Self {
+            Self {
+                ppm,
+                chunk: 480,
+                jitter_ms: 0,
+                every: 0,
+                late_ms: 0,
+                ring: AUDIO_RATE as u64,
+                pictures: false,
+            }
+        }
+
+        /// An NDI or OMT sender at 30 pictures a second, sending the sound of
+        /// each picture with it: a few ms of network jitter, and every two
+        /// seconds or so a piece held up 40 ms, with those behind it.
+        fn network_video(ppm: f64) -> Self {
+            let ring = AUDIO_RATE as u64;
+            Self { ppm, chunk: 1600, jitter_ms: 4, every: 61, late_ms: 40, ring, pictures: true }
+        }
+
+        /// A video call guest, as the browser receiving the call hands their
+        /// sound over: 2048 frames at a time, up to 15 ms late while the page
+        /// or the connection is busy and now and then 60 ms, into a ring of
+        /// 0.3 s. Their picture is the page's, as the mixer takes it.
+        fn guest(ppm: f64) -> Self {
+            let ring = AUDIO_RATE as u64 * 3 / 10;
+            Self { ppm, chunk: 2048, jitter_ms: 15, every: 47, late_ms: 60, ring, pictures: false }
+        }
+    }
+
+    /// A live source on its own clock, and what waits in its input's ring:
+    /// `queued` frames from frame `head` on.
+    struct Source {
+        feed: Feed,
+        rate: f64,
+        dice: Dice,
+        delivered: u64,
+        head: u64,
+        queued: u64,
+        /// When the next piece lands.
+        due: u64,
+        /// When the latest picture delivered was taken.
+        picture: Option<i64>,
+    }
+
+    impl Source {
+        fn new(feed: Feed) -> Self {
+            let rate = AUDIO_RATE as f64 * (1.0 + feed.ppm * 1e-6);
+            let mut source =
+                Self { feed, rate, dice: Dice(7), delivered: 0, head: 0, queued: 0, due: 0, picture: None };
+            source.due = source.captured(feed.chunk) as u64;
+            source
+        }
+
+        /// When the source took `frame`, on our clock.
+        fn captured(&self, frame: u64) -> i64 {
+            (frame as f64 / self.rate * NS as f64) as i64
+        }
+
+        /// Everything that has landed by `t`, in order.
+        fn deliver_until(&mut self, t: u64) {
+            let feed = self.feed;
+            while self.due <= t {
+                self.delivered += feed.chunk;
+                self.queued += feed.chunk;
+                let over = self.queued.saturating_sub(feed.ring);
+                (self.head, self.queued) = (self.head + over, self.queued - over);
+                self.picture = Some(self.captured(self.delivered));
+                let late = if feed.every > 0 && (self.delivered / feed.chunk).is_multiple_of(feed.every) {
+                    feed.late_ms * MS
+                } else if feed.jitter_ms > 0 {
+                    self.dice.below(feed.jitter_ms * MS)
+                } else {
+                    0
+                };
+                self.due = self.due.max(self.captured(self.delivered + feed.chunk) as u64 + late);
+            }
+        }
+
+        /// Takes a block from the ring as `take` says, and gives the first
+        /// frame heard when the block starts with sound.
+        fn take(&mut self, take: &Take) -> Option<u64> {
+            let gone = (take.discard as u64).min(self.queued);
+            (self.head, self.queued) = (self.head + gone, self.queued - gone);
+            let have = (take.frames as u64).min(self.queued);
+            let first = (have > 0 && take.silence == 0).then_some(self.head);
+            (self.head, self.queued) = (self.head + have, self.queued - have);
+            first
+        }
+    }
+
     /// Hours of a show through the real pacing, drift and placing code: a
-    /// microphone `mic_ppm` off our clock in 10 ms deliveries, pictures that
-    /// take too long one tick in fifty, a sound loop that stalls now and then,
-    /// and an encoder whose pipes stop reading for a while.
-    fn simulate(hours: u64, mic_ppm: f64) -> Report {
+    /// live source off our clock, pictures that take too long one tick in
+    /// fifty, a sound loop that stalls now and then, and an encoder whose
+    /// pipes stop reading for a while.
+    fn simulate(hours: u64, feed: Feed) -> Report {
         let end = hours * 3600 * NS;
         let origin = 5 * NS + 370_000;
+        let settled = origin + 1800 * NS;
         let mut dice = Dice(42);
-
-        let mic_rate = AUDIO_RATE as f64 * (1.0 + mic_ppm * 1e-6);
-        let captured = |frame: u64| (frame as f64 / mic_rate * NS as f64) as i64;
-        let (mut delivered, mut head, mut queued) = (0u64, 0u64, 0u64);
+        let mut source = Source::new(feed);
 
         let (mut sound_pace, mut picture_pace) = (Pace::new(0, 50), Pace::new(0, FPS));
         let (mut sound_at, mut picture_at) = (0u64, 0u64);
         let mut drift = Drift::default();
+        let mut resynced = false;
         let (mut short_stall, mut long_stall) = (1201 * NS, 4001 * NS);
 
         let mut pictures = Pipe { queue: VecDeque::new(), cap: 6 };
@@ -443,23 +559,21 @@ mod tests {
 
         let mut span = (f64::MAX, f64::MIN);
         let mut hours_seen: Vec<(f64, u64)> = vec![(0.0, 0); hours as usize];
+        let (mut cuts, mut silences) = (0, 0);
 
         while sound_at.min(picture_at) < end {
             if sound_at <= picture_at {
                 let t = sound_at;
-                while captured(delivered + 480) as u64 <= t {
-                    delivered += 480;
-                    queued += 480;
-                    // The ring holds one second and drops the oldest.
-                    let over = queued.saturating_sub(AUDIO_RATE as u64);
-                    (head, queued) = (head + over, queued - over);
+                source.deliver_until(t);
+                let take = drift.take(source.queued as usize, BLOCK, false);
+                if t >= settled {
+                    // A cut right after the sound loop skipped ahead is not
+                    // the source's doing.
+                    cuts += (take.discard > 0 && !resynced) as u64;
+                    silences += (take.silence > 0) as u64;
                 }
-                let take = drift.take(queued as usize, BLOCK, false);
-                let gone = (take.discard as u64).min(queued);
-                (head, queued) = (head + gone, queued - gone);
-                let have = (take.frames as u64).min(queued);
-                let first = (have > 0 && take.silence == 0).then_some(head);
-                (head, queued) = (head + have, queued - have);
+                resynced = false;
+                let first = source.take(&take);
 
                 let mut done = t + 200_000;
                 if done >= short_stall {
@@ -480,7 +594,7 @@ mod tests {
                         }
                         let pos = samples.written() - (BLOCK - fit.skip) as u64;
                         let frame = first + fit.skip as u64 * took as u64 / BLOCK as u64;
-                        let heard = (origin + pos * NS / AUDIO_RATE as u64) as i64 - captured(frame);
+                        let heard = (origin + pos * NS / AUDIO_RATE as u64) as i64 - source.captured(frame);
                         let offset = (heard - picture) as f64 / MS as f64;
                         span = (span.0.min(offset), span.1.max(offset));
                         let hour = &mut hours_seen[(at / (3600 * NS)) as usize];
@@ -490,18 +604,23 @@ mod tests {
                 let step = sound_pace.advance(done, 500 * MS);
                 if step.skipped > 0 {
                     drift.resync();
+                    resynced = true;
                 }
                 sound_at = done + step.wait.as_nanos() as u64 + dice.below(1_500_000);
             } else {
                 let t = picture_at;
+                source.deliver_until(t);
+                let shown = if feed.pictures { source.picture } else { Some(t as i64) };
                 let stamp = picture_pace.stamp();
                 let busy = if dice.below(50) == 0 { 35 + dice.below(85) } else { 3 + dice.below(10) };
                 let done = t + busy * MS;
                 if done >= origin {
-                    for (at, shown) in pictures.push(done, (stamp, t)) {
-                        if frames.place(at).is_some() {
+                    for (at, shown) in pictures.push(done, (stamp, shown)) {
+                        if frames.place(at).is_some()
+                            && let Some(shown) = shown
+                        {
                             let slot = frames.written() - 1;
-                            picture_lag = Some((origin + slot * NS / FPS as u64) as i64 - shown as i64);
+                            picture_lag = Some((origin + slot * NS / FPS as u64) as i64 - shown);
                         }
                     }
                 }
@@ -516,26 +635,82 @@ mod tests {
             last_hour_mean: mean(&hours_seen[hours as usize - 1]),
             picture_s: frames.written() as f64 / FPS as f64,
             sound_s: samples.written() as f64 / AUDIO_RATE as f64,
+            cuts,
+            silences,
         }
     }
 
+    /// Sound comes after its picture by up to `behind` ms, and before it by
+    /// less than `ahead`; what matters is that it stays there, however long
+    /// the show.
+    fn check_within(what: &str, r: &Report, ahead: f64, behind: f64) {
+        let frame_ms = 1000.0 / FPS as f64;
+        assert!(r.span.0 > -ahead && r.span.1 < behind, "{what}: {r:?}");
+        assert!((r.last_hour_mean - r.first_hour_mean).abs() < 2.0, "{what}: {r:?}");
+        assert!((r.picture_s - r.sound_s).abs() * 1000.0 < frame_ms, "{what}: {r:?}");
+    }
+
+    /// Sound comes a block and the device's delivery after the picture.
     fn check(r: &Report) {
         let frame_ms = 1000.0 / FPS as f64;
-        // Sound comes a block and the device's delivery after the picture; what
-        // matters is that it stays there, however long the show.
-        assert!(r.span.0 > -frame_ms && r.span.1 < 2.0 * frame_ms + 20.0, "{r:?}");
-        assert!((r.last_hour_mean - r.first_hour_mean).abs() < 2.0, "{r:?}");
-        assert!((r.picture_s - r.sound_s).abs() * 1000.0 < frame_ms, "{r:?}");
+        check_within("microphone", r, frame_ms, 2.0 * frame_ms + 20.0);
     }
+
+    /// How far a feed's sound may come after its picture once its speed is
+    /// followed: as a microphone's, plus a whole delivery and the most it is
+    /// late, which the margin learns to cover.
+    fn behind_ms(feed: Feed) -> f64 {
+        let piece_ms = feed.chunk as f64 * 1000.0 / AUDIO_RATE as f64;
+        2000.0 / FPS as f64 + 20.0 + piece_ms + (feed.late_ms + feed.jitter_ms) as f64
+    }
+
+    const FEEDS: [(&str, fn(f64) -> Feed); 2] = [("NDI/OMT", Feed::network_video), ("guest", Feed::guest)];
 
     #[test]
     fn hours_with_a_fast_microphone_and_late_pictures_stay_in_step() {
-        check(&simulate(6, 300.0));
+        check(&simulate(6, Feed::microphone(300.0)));
     }
 
     #[test]
     fn hours_with_a_slow_microphone_and_late_pictures_stay_in_step() {
-        check(&simulate(6, -300.0));
+        check(&simulate(6, Feed::microphone(-300.0)));
+    }
+
+    /// An NDI or OMT sender, or the browser a guest is heard through, whose
+    /// clock is 0.1 % off ours, further than real devices drift: its speed is
+    /// followed for hours, with its uneven deliveries. It is never cut back,
+    /// and runs dry no more often than the same feed on our clock does.
+    #[test]
+    fn hours_of_network_video_or_a_guest_a_thousandth_off_stay_in_step() {
+        let frame_ms = 1000.0 / FPS as f64;
+        for (name, feed) in FEEDS {
+            let steady = simulate(6, feed(0.0));
+            for ppm in [1000.0, -1000.0] {
+                let r = simulate(6, feed(ppm));
+                check_within(&format!("{name} {ppm} ppm"), &r, frame_ms, behind_ms(feed(ppm)));
+                assert!(r.cuts == 0 && r.silences <= steady.silences + 10, "{name} {ppm}: {r:?}, {steady:?}");
+            }
+        }
+    }
+
+    /// 1 % off is more than a frame per block can follow: a fast sender is
+    /// cut back to the margin now and then, and a slow one given it back as
+    /// a moment of silence. Hours later its sound is still where it was, no
+    /// more than the margin's limit further behind than a followed one.
+    #[test]
+    fn hours_of_network_video_or_a_guest_a_hundredth_off_stay_near_the_margin() {
+        let frame_ms = 1000.0 / FPS as f64;
+        let most = SPARE_CUT as f64 * 1000.0 / AUDIO_RATE as f64;
+        for (name, feed) in FEEDS {
+            for ppm in [10_000.0, -10_000.0] {
+                let r = simulate(6, feed(ppm));
+                // A cut while the sound loop catches up after a stall puts
+                // sound of now in a block stamped earlier: for a moment, it
+                // comes before its picture.
+                check_within(&format!("{name} {ppm} ppm"), &r, 2.0 * frame_ms, behind_ms(feed(ppm)) + most);
+                assert!(r.cuts + r.silences > 0, "{name} {ppm}: {r:?}");
+            }
+        }
     }
 
     #[test]
