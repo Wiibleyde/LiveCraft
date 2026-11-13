@@ -139,6 +139,24 @@ fn even_ends(mut p: PictureTail, mut s: SoundTail, pad: Padding, channels: usize
     let _ = write_silence(&mut s.sock, pad.samples, channels);
 }
 
+/// The BT.709 an editor reads HD pictures as: swscale's own default for RGB
+/// to YUV is BT.601, so the conversion and the tags both say 709.
+const BT709: [&str; 8] = [
+    "-vf",
+    "scale=out_color_matrix=bt709:out_range=tv",
+    "-colorspace",
+    "bt709",
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "bt709",
+];
+
+/// Whether the encoder belongs to a recording profile for editing.
+fn is_editing(codec: &str) -> bool {
+    matches!(codec, "prores_ks" | "dnxhd" | "magicyuv")
+}
+
 /// Recording profiles for editing: intra-only pictures and uncompressed sound,
 /// so no bitrate. The container is chosen by the file's extension.
 fn add_editing(cmd: &mut Command, codec: &str) -> bool {
@@ -146,11 +164,13 @@ fn add_editing(cmd: &mut Command, codec: &str) -> bool {
         // 4:2:2 10 bit, profile 3 is 422 HQ; the vendor tag makes editors accept it.
         "prores_ks" => {
             cmd.args(["-c:v", "prores_ks", "-profile:v", "3", "-vendor", "apl0", "-pix_fmt", "yuv422p10le"])
+                .args(BT709)
                 .args(["-c:a", "pcm_s24le"]);
         }
         // DNxHR HQ takes 8 bit 4:2:2 at any size and rate; MXF carries 24 bit PCM.
         "dnxhd" => {
             cmd.args(["-c:v", "dnxhd", "-profile:v", "dnxhr_hq", "-pix_fmt", "yuv422p"])
+                .args(BT709)
                 .args(["-c:a", "pcm_s24le"]);
         }
         // Lossless: planar RGB keeps every value of the picture; AVI wants 16 bit PCM.
@@ -202,20 +222,32 @@ pub fn audio_maps(tracks: usize) -> Vec<String> {
 }
 
 /// A file killed mid-way stays playable: pieces are complete as they go.
-fn add_file_target(cmd: &mut Command, path: &str, split_minutes: u32) {
+///
+/// Every picture of an editing profile is a keyframe, so fragments there are
+/// cut every second, not at every keyframe.
+fn add_file_target(cmd: &mut Command, path: &str, split_minutes: u32, editing: bool) {
     let (stem, ext) = path.rsplit_once('.').unwrap_or((path, "mp4"));
     let fragmented = matches!(ext, "mp4" | "mov");
     if split_minutes > 0 {
         let seconds = (split_minutes * 60).to_string();
         cmd.args(["-f", "segment", "-segment_time", &seconds, "-reset_timestamps", "1"]);
         if fragmented {
-            cmd.args(["-segment_format_options", "movflags=+frag_keyframe+empty_moov"]);
+            let options = if editing {
+                "movflags=+empty_moov+default_base_moof:frag_duration=1000000"
+            } else {
+                "movflags=+frag_keyframe+empty_moov"
+            };
+            cmd.args(["-segment_format_options", options]);
         }
         // The pattern is read by ffmpeg, so a % in a folder name must be doubled.
         cmd.arg(format!("{}-%03d.{ext}", stem.replace('%', "%%")));
     } else {
         if fragmented {
-            cmd.args(["-movflags", "+frag_keyframe+empty_moov+default_base_moof"]);
+            if editing {
+                cmd.args(["-movflags", "+empty_moov+default_base_moof", "-frag_duration", "1000000"]);
+            } else {
+                cmd.args(["-movflags", "+frag_keyframe+empty_moov+default_base_moof"]);
+            }
         }
         cmd.arg(path);
     }
@@ -261,7 +293,9 @@ impl Encoder {
         let live = matches!(s.target, Target::Srt(_) | Target::Growing(_));
         add_quality(&mut cmd, &s, live);
         match &s.target {
-            Target::File { path, split_minutes } => add_file_target(&mut cmd, path, *split_minutes),
+            Target::File { path, split_minutes } => {
+                add_file_target(&mut cmd, path, *split_minutes, is_editing(&s.codec))
+            }
             Target::Rtmp(urls) if urls.len() == 1 => {
                 cmd.args(["-f", "flv", "-flvflags", "no_duration_filesize"]).arg(&urls[0]);
             }
@@ -546,7 +580,7 @@ mod tests {
         };
         let mut cmd = Command::new("ffmpeg");
         add_quality(&mut cmd, &spec, false);
-        add_file_target(&mut cmd, path, split);
+        add_file_target(&mut cmd, path, split, is_editing(codec));
         cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
     }
 
@@ -562,6 +596,14 @@ mod tests {
         {
             assert!(has(&a, pair), "{pair:?} in {a:?}");
         }
+        assert!(
+            has(&a, ["-vf", "scale=out_color_matrix=bt709:out_range=tv"])
+                && has(&a, ["-colorspace", "bt709"])
+        );
+        assert!(
+            has(&a, ["-frag_duration", "1000000"]) && !a.iter().any(|x| x.contains("frag_keyframe")),
+            "{a:?}"
+        );
         assert!(!a.iter().any(|x| x == "-b:v" || x == "aac"), "no bitrate, no compressed sound: {a:?}");
         assert_eq!(a.last().unwrap(), "out.mov");
     }
@@ -590,6 +632,15 @@ mod tests {
     fn streaming_codecs_keep_their_arguments() {
         let a = arguments("libx264", "out.mp4", 0);
         assert!(has(&a, ["-c:a", "aac"]) && has(&a, ["-pix_fmt", "yuv420p"]), "{a:?}");
+    }
+
+    #[test]
+    fn prores_split_files_cut_fragments_every_second() {
+        let a = arguments("prores_ks", "dir/out.mov", 10);
+        assert!(has(
+            &a,
+            ["-segment_format_options", "movflags=+empty_moov+default_base_moof:frag_duration=1000000"]
+        ));
     }
 
     #[test]

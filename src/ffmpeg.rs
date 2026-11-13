@@ -30,10 +30,6 @@ const HARDWARE: [&str; 7] =
 /// Software encoders offered besides libx264, when the build has them.
 const SOFTWARE: [&str; 2] = ["libx265", "libsvtav1"];
 
-/// Encoders of the recording profiles for editing, kept apart from the ones
-/// offered for streaming: they are only asked for by a profile.
-pub const EDITING: [&str; 3] = ["prores_ks", "dnxhd", "magicyuv"];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum How {
     /// Named by `LIVECRAFT_FFMPEG`.
@@ -163,6 +159,8 @@ pub struct Capabilities {
     pub encoders: Vec<String>,
     /// The encoders of the editing recording profiles it lists.
     pub editing: Vec<String>,
+    /// `-encoders` answered, so a missing encoder is known to be missing.
+    pub encoders_listed: bool,
 }
 
 impl Capabilities {
@@ -177,7 +175,7 @@ impl Capabilities {
 
     /// Whether an editing encoder is missing, which is only known once ffmpeg answered.
     pub fn lacks_editing(&self, encoder: &str) -> bool {
-        self.answered() && !self.editing.iter().any(|e| e == encoder)
+        self.answered() && self.encoders_listed && !self.editing.iter().any(|e| e == encoder)
     }
 
     fn silent() -> Self {
@@ -230,12 +228,19 @@ fn probe() -> Capabilities {
         return Capabilities::silent();
     };
     let srt = ask(&["-protocols"]).is_some_and(|t| parse_srt(&t));
-    let listed = ask(&["-encoders"]).map(|t| parse_encoders(&t)).unwrap_or_default();
+    let asked = ask(&["-encoders"]).map(|t| parse_encoders(&t));
+    let encoders_listed = asked.as_ref().is_some_and(|l| !l.is_empty());
+    let listed = asked.unwrap_or_default();
     let has = |n: &&&str| listed.iter().any(|l| l == **n);
     let mut encoders = vec!["libx264".to_string()];
     encoders.extend(SOFTWARE.iter().filter(has).chain(HARDWARE.iter().filter(has)).map(|n| n.to_string()));
-    let editing = EDITING.iter().filter(has).map(|n| n.to_string()).collect();
-    Capabilities { version: Some(version), srt, encoders, editing }
+    let editing = crate::model::EDITING_PROFILES
+        .iter()
+        .map(|p| p.encoder)
+        .filter(|n| listed.iter().any(|l| l == n))
+        .map(String::from)
+        .collect();
+    Capabilities { version: Some(version), srt, encoders, editing, encoders_listed }
 }
 
 static CAPABILITIES: OnceLock<Capabilities> = OnceLock::new();
@@ -523,17 +528,24 @@ mod tests {
             srt: true,
             encoders: vec!["libx264".into(), "libx265".into(), "h264_nvenc".into()],
             editing: vec![],
+            encoders_listed: true,
         };
         assert_eq!(c.hardware(), ["h264_nvenc"]);
     }
 
     #[test]
     fn an_editing_encoder_is_missing_only_once_ffmpeg_answered() {
-        let c =
-            Capabilities { version: Some("9".into()), editing: vec!["dnxhd".into()], ..Default::default() };
+        let c = Capabilities {
+            version: Some("9".into()),
+            editing: vec!["dnxhd".into()],
+            encoders_listed: true,
+            ..Default::default()
+        };
         assert!(!c.lacks_editing("dnxhd"));
         assert!(c.lacks_editing("prores_ks"));
         assert!(!Capabilities::default().lacks_editing("prores_ks"), "not answered is not a fault");
+        let unlisted = Capabilities { encoders_listed: false, ..c };
+        assert!(!unlisted.lacks_editing("prores_ks"), "an encoder list that did not come is not a fault");
     }
 
     #[test]

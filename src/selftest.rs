@@ -83,6 +83,17 @@ fn stream_of(path: &str, kind: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
+/// The colour space, primaries and transfer ffprobe reads on the picture.
+fn color_of(path: &str) -> Result<String, String> {
+    let out = Command::new(crate::ffmpeg::program("ffprobe"))
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-show_entries", "stream=color_space,color_primaries,color_transfer", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Records a short clip with each recording profile for editing and reads
 /// the file back: codec, frame rate, and sound present and ending with the
 /// picture. A profile whose encoder this ffmpeg lacks is skipped, and said so.
@@ -136,6 +147,12 @@ fn editing_profiles(dir: &str) -> Result<String, String> {
         let want = format!("{codec},{fps}/1");
         if video != want {
             return Err(format!("{} : image « {video} » au lieu de « {want} »", profile.id));
+        }
+        if profile.encoder != "magicyuv" {
+            let tags = color_of(&file)?;
+            if tags != "bt709,bt709,bt709" {
+                return Err(format!("{} : couleurs « {tags} » au lieu de bt709", profile.id));
+            }
         }
         if !sound.starts_with("pcm_") {
             return Err(format!("{} : son « {sound} », pas du PCM", profile.id));

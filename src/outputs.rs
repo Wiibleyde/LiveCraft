@@ -89,6 +89,16 @@ impl Engine {
         let (w, h, fps) = self.format();
         let cfgs = self.state.lock().unwrap().project.records.clone();
         let stamp = stamp();
+        // Before anything starts, so that no recorder leaves a file behind for
+        // another that cannot. Asked without waiting: not known yet is let
+        // through, and ffmpeg then says what is wrong itself.
+        for (n, cfg) in cfgs.iter().enumerate().filter(|(_, c)| c.enabled) {
+            if let Some(p) = cfg.editing()
+                && crate::ffmpeg::capabilities_if_known().is_some_and(|c| c.lacks_editing(p.encoder))
+            {
+                return Err(t!("outputs.profile_missing", n = n + 1, encoder = p.encoder));
+            }
+        }
         let mut started = Vec::new();
         let mut first = String::new();
         for (n, cfg) in cfgs.iter().enumerate().filter(|(_, c)| c.enabled) {
@@ -97,12 +107,6 @@ impl Engine {
                 .join(format!("{stamp}-{}.{}", n + 1, cfg.extension()))
                 .to_string_lossy()
                 .into_owned();
-            if let Some(p) = cfg.editing()
-                && crate::ffmpeg::capabilities().lacks_editing(p.encoder)
-            {
-                finish_later(started, Duration::from_secs(5));
-                return Err(t!("outputs.profile_missing", n = n + 1, encoder = p.encoder));
-            }
             let opened = std::fs::create_dir_all(dir).map_err(|e| e.to_string()).and_then(|()| {
                 Encoder::start(Spec {
                     label: t!("outputs.recording_n", n = n + 1),
@@ -207,19 +211,25 @@ impl Engine {
             let picked: Vec<Input> = p.inputs.iter().filter(|i| ids.contains(&i.id)).cloned().collect();
             (picked, p.records[0].clone())
         };
+        if let Some(p) = cfg.editing()
+            && crate::ffmpeg::capabilities_if_known().is_some_and(|c| c.lacks_editing(p.encoder))
+        {
+            return Err(t!("outputs.profile_missing", n = 1, encoder = p.encoder));
+        }
         let stamp = stamp();
         let mut started: Vec<(u64, Encoder)> = Vec::new();
         for input in inputs {
             let safe: String =
                 input.name.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+            let ext = if cfg.editing().is_some() { cfg.extension() } else { "mp4" };
             let path = std::path::Path::new(dir)
-                .join(format!("{stamp}-{}-{safe}.mp4", input.id))
+                .join(format!("{stamp}-{}-{safe}.{ext}", input.id))
                 .to_string_lossy()
                 .into_owned();
             let opened = Encoder::start(Spec {
                 label: t!("outputs.multi_label", name = input.name),
                 target: Target::File { path, split_minutes: 0 },
-                codec: cfg.codec.clone(),
+                codec: cfg.encoder().to_string(),
                 w,
                 h,
                 fps,
