@@ -68,7 +68,7 @@ app.capture_failed = Capture impossible : {error}
 app.second_window = LiveCraft est déjà ouvert mais ne répond pas : cette fenêtre n'enregistre pas la session, pour ne pas écraser la sienne.
 app.first_again = L'autre LiveCraft s'est fermé : cette fenêtre enregistre de nouveau la session.
 app.session_set_aside = L'autre LiveCraft s'est fermé : cette fenêtre enregistre de nouveau la session. Sa dernière session est gardée à côté, dans {file}.
-app.session_not_set_aside = L'autre LiveCraft s'est fermé, mais sa session n'a pas pu être mise de côté : cette fenêtre ne l'enregistre toujours pas.
+app.session_not_set_aside = L'autre LiveCraft s'est fermé, mais sa session n'a pas pu être mise de côté : cette fenêtre ne l'enregistre toujours pas, et réessaie toutes les {seconds} secondes.
 app.channel_foreign = Le canal privé de LiveCraft est tenu par un autre compte ou un programme avec moins de droits : cette fenêtre fonctionne seule.
 
 # src/widgets.rs

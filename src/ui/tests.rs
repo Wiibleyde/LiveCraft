@@ -745,6 +745,24 @@ fn opening_a_project_keeps_the_session_and_saving_swaps_atomically() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The session another window saved last is copied beside it before this
+/// one saves over it; a copy that fails can be made again later.
+#[test]
+fn the_other_windows_session_is_set_aside_or_tried_again() {
+    let dir = std::env::temp_dir().join(format!("livecraft-aside-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = dir.join("session.json");
+    std::fs::write(&session, b"theirs").unwrap();
+    let in_the_way = dir.join("session.20261113-180000.json");
+    std::fs::create_dir_all(&in_the_way).unwrap();
+    assert!(super::set_aside(&session, "20261113-180000").is_err(), "something in the way");
+    std::fs::remove_dir(&in_the_way).unwrap();
+    let aside = super::set_aside(&session, "20261113-180000").unwrap();
+    assert_eq!(aside, in_the_way);
+    assert_eq!(std::fs::read(&aside).unwrap(), b"theirs");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_project_opened_from_explorer_saves_back_to_its_own_file() {
     let dir = std::env::temp_dir().join(format!("livecraft-start-{}", std::process::id()));
@@ -943,11 +961,18 @@ fn second_window(tag: &str) -> (Harness<'static, App>, instance::First, std::pat
     (h, first, session)
 }
 
-/// The other window closes: this one takes the session back.
+/// The other window closes: this one takes the session back. It asks every
+/// few seconds, as the name can take a moment to go free; here at once, again
+/// and again.
 fn other_window_closes(h: &mut Harness<'static, App>, first: instance::First) {
     drop(first);
-    h.state_mut().second.as_mut().unwrap().second.ask_now();
-    h.run_steps(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.state().first.is_none() && Instant::now() < deadline {
+        h.state_mut().second.as_mut().unwrap().second.ask_now();
+        h.run_steps(1);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    h.run_steps(1);
     assert!(h.state().first.is_some(), "later starts come here now");
     assert!(h.query_by_label("Session non enregistrée").is_none());
 }

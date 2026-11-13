@@ -203,23 +203,35 @@ pub fn connect_local(name: &str, _until: std::time::Instant) -> std::io::Result<
 pub fn raise_window(_window: Option<isize>) {}
 
 /// Reads what has come, waiting until `until` at most: `TimedOut` then, and
-/// 0 once the other side hung up.
+/// 0 once the other side hung up. It waits with poll, not a read time limit:
+/// macOS refuses to set one once the other side hung up, though what was said
+/// before is still there to read.
 pub fn read_some(
     stream: &mut LocalStream,
     buf: &mut [u8],
     until: std::time::Instant,
 ) -> std::io::Result<usize> {
     use std::io::Read;
-    let left = until.saturating_duration_since(std::time::Instant::now());
-    if left.is_zero() {
-        return Err(std::io::ErrorKind::TimedOut.into());
-    }
-    stream.set_read_timeout(Some(left))?;
-    match stream.read(buf) {
-        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
-            Err(std::io::ErrorKind::TimedOut.into())
+    use std::os::fd::AsRawFd;
+    loop {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
         }
-        read => read,
+        let ms = libc::c_int::try_from(left.as_millis()).unwrap_or(libc::c_int::MAX).max(1);
+        let mut ready = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: one pollfd, for a socket the stream keeps open.
+        match unsafe { libc::poll(&mut ready, 1, ms) } {
+            0 => {}
+            // Something to read, hung up or failed: the read says which, at once.
+            n if n > 0 => return stream.read(buf),
+            _ => {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(e);
+                }
+            }
+        }
     }
 }
 
