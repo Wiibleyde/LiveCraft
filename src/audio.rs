@@ -478,8 +478,18 @@ fn is_always_on(kind: &Kind) -> bool {
 
 /// Sound timed by a device or a sender rather than by our clock, which a
 /// file or the test tone is: it can run fast or slow and must be kept in step.
+/// An NDI or OMT sender sends at its own clock, and a video call guest is
+/// heard at the pace of the browser receiving the call.
 fn is_live(kind: &Kind) -> bool {
-    matches!(kind, Kind::Microphone { .. } | Kind::SystemAudio | Kind::Network { .. })
+    matches!(
+        kind,
+        Kind::Microphone { .. }
+            | Kind::SystemAudio
+            | Kind::Network { .. }
+            | Kind::Ndi { .. }
+            | Kind::Omt { .. }
+            | Kind::VideoCall { .. }
+    )
 }
 
 /// Whether a stream is fetched as fast as its sound is taken, as a playlist
@@ -748,6 +758,176 @@ mod tests {
         out.resize(at + n, 0.0);
         ring.pull(&mut out[at..]);
         n
+    }
+
+    /// Every input whose sound comes at a pace other than ours is kept in
+    /// step, and always runs; a file or the test tone, timed by our clock, is not.
+    #[test]
+    fn sound_on_another_clock_is_kept_in_step() {
+        let source = String::from("Régie (Caméra 1)");
+        let url = String::from("srt://h:9000");
+        for live in [
+            Kind::Microphone { device: "Micro".into() },
+            Kind::SystemAudio,
+            Kind::Network { url, buffer_ms: 0 },
+            Kind::Ndi { source: source.clone() },
+            Kind::Omt { source },
+            crate::call::new_call(),
+        ] {
+            assert!(is_live(&live) && is_always_on(&live), "{live:?}");
+        }
+        for ours in [Kind::Tone, Kind::AudioFile { path: "a.wav".into(), looped: false }] {
+            assert!(!is_live(&ours), "{ours:?}");
+        }
+    }
+
+    /// What is heard of a live source at the end of a long show.
+    struct Show {
+        /// The last five seconds heard.
+        heard: Vec<f32>,
+        /// During the last minute: the most of the least waiting in any second,
+        /// and the most waiting at all, in ms.
+        floor_ms: usize,
+        peak_ms: usize,
+        /// Frames of silence the loop made up during the last minute, and
+        /// frames it found missing.
+        quiet: usize,
+        missing: usize,
+    }
+
+    /// A long show through the loop's own path (`held`, `Drift`, `fill`): a
+    /// source whose clock runs `ppm` off ours hands its input `piece` frames
+    /// at a time at its rate `rate`, each up to `jitter_ms` late, as `deliver`
+    /// does. It sends a 1 kHz tone: off our clock, it sends more or fewer
+    /// samples a second than it says, and the tone keeps its pitch only if
+    /// its speed is followed.
+    fn long_show(
+        minutes: usize,
+        ppm: f64,
+        (rate, piece, jitter_ms): (usize, usize, u64),
+        ring: &Ring,
+        mut deliver: impl FnMut(&[f32], &Ring),
+    ) -> Show {
+        let mut drift = Drift::default();
+        let (mut raw, mut out) = ([0f32; BLOCK + 2], [0f32; BLOCK]);
+        let mut dice = 11u64;
+        let mut roll = |n: u64| {
+            dice = dice.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (dice >> 33) % n
+        };
+        let sender_rate = rate as f64 * (1.0 + ppm * 1e-6);
+        let w = 1000.0 * std::f64::consts::TAU / sender_rate;
+        let blocks = 50 * 60 * minutes;
+        // Only the end is listened to: before, silence costs less to make.
+        let tone_from = (blocks - 50 * 10) as f64 * 0.02 * sender_rate;
+        let (mut pieces, mut due) = (0usize, 0f64);
+        let mut mono = vec![0f32; piece];
+        let mut show = Show { heard: Vec::new(), floor_ms: 0, peak_ms: 0, quiet: 0, missing: 0 };
+        let mut floor = usize::MAX;
+        for n in 0..blocks {
+            let now = n as f64 * 0.02;
+            while due <= now {
+                let first = pieces * piece;
+                for (i, v) in mono.iter_mut().enumerate() {
+                    let i = (first + i) as f64;
+                    *v = if i < tone_from { 0.0 } else { ((i * w).sin() * 0.25) as f32 };
+                }
+                deliver(&mono, ring);
+                pieces += 1;
+                let late = roll(jitter_ms * 1000 + 1) as f64 / 1e6;
+                due = due.max((pieces + 1) as f64 * piece as f64 / sender_rate + late);
+            }
+            let last_minute = n >= blocks - 50 * 60;
+            if last_minute {
+                show.peak_ms = show.peak_ms.max(ring.queued() * 1000 / AUDIO_RATE);
+            }
+            let queued = ring.queued();
+            let take = drift.take(queued, FRAMES, held(ring, false));
+            fill(ring, &take, &mut raw, &mut out);
+            if last_minute {
+                floor = floor.min(ring.queued());
+                show.quiet += take.silence;
+                show.missing += take.frames.saturating_sub(queued.saturating_sub(take.discard));
+                if n % 50 == 49 {
+                    show.floor_ms = show.floor_ms.max(floor * 1000 / AUDIO_RATE);
+                    floor = usize::MAX;
+                }
+            }
+            if n >= blocks - 50 * 5 {
+                show.heard.extend(out.iter().step_by(2));
+            }
+        }
+        show
+    }
+
+    /// An NDI or OMT sender at 44.1 kHz, sending a picture's worth of sound
+    /// at a time with a few ms of network jitter, through the receiver's own
+    /// `hear` into a ring as its input has.
+    fn ndi_show(ppm: f64) -> Show {
+        let ring = Ring::new(1.0);
+        let mut resampler = crate::netvideo::Resampler::default();
+        let (mut stereo, mut planes) = (Vec::new(), Vec::new());
+        long_show(20, ppm, (44_100, 1470, 4), &ring, |mono, ring| {
+            planes.clear();
+            planes.extend_from_slice(mono);
+            planes.extend_from_slice(mono);
+            let n = mono.len();
+            let sound =
+                crate::netvideo::Sound { data: &planes, channels: 2, samples: n, plane: n, rate: 44_100 };
+            crate::netvideo::hear(&sound, &mut resampler, &mut stereo, ring);
+        })
+    }
+
+    /// A video call guest as the browser receiving the call hands their sound
+    /// over: 2048 frames of 16-bit sound at a time, up to 15 ms late, into the
+    /// ring of 0.3 s a call input has.
+    fn guest_show(ppm: f64) -> Show {
+        let ring = Ring::new(0.3);
+        long_show(20, ppm, (AUDIO_RATE, 2048, 15), &ring, |mono, ring| {
+            let pcm: Vec<f32> =
+                mono.iter().flat_map(|v| [((v * 32767.0) as i16) as f32 / 32768.0; 2]).collect();
+            ring.push(&pcm);
+        })
+    }
+
+    /// A sender 0.1 % off, further than real devices drift, is followed:
+    /// after twenty minutes its tone is whole and at its pitch, and what waits
+    /// stays near the margin, with no moment of silence.
+    #[test]
+    fn network_video_and_guests_a_thousandth_off_are_followed() {
+        for (name, show) in [("ndi", ndi_show as fn(f64) -> Show), ("guest", guest_show)] {
+            for ppm in [1000.0, -1000.0] {
+                let s = show(ppm);
+                let why = format!("{name} {ppm} ppm: {} ms least, {} ms most", s.floor_ms, s.peak_ms);
+                if let Err(e) = crate::clock::judge_tone(&s.heard, AUDIO_RATE) {
+                    panic!("{why}: {e}");
+                }
+                assert!(
+                    s.floor_ms < 30 && s.quiet + s.missing == 0,
+                    "{why}, {} + {} silent",
+                    s.quiet,
+                    s.missing
+                );
+            }
+        }
+    }
+
+    /// A sender 1 % off is more than a frame per block can follow: it is cut
+    /// back now and then when fast, and given back its margin as a moment of
+    /// silence when slow. It must not pile up as it did, to 0.4 s behind for
+    /// NDI and OMT and the whole 0.3 s ring for a guest, nor go quiet for
+    /// more than it falls short.
+    #[test]
+    fn network_video_and_guests_a_hundredth_off_stay_near_the_margin() {
+        for (name, show) in [("ndi", ndi_show as fn(f64) -> Show), ("guest", guest_show)] {
+            for ppm in [10_000.0, -10_000.0] {
+                let s = show(ppm);
+                let why = format!("{name} {ppm} ppm: {} ms least, {} ms most", s.floor_ms, s.peak_ms);
+                assert!(s.floor_ms < 150 && s.peak_ms < 250, "{why}");
+                let short = if ppm < 0.0 { AUDIO_RATE * 60 / 100 } else { 0 };
+                assert!(s.quiet + s.missing <= short, "{why}, {} + {} silent", s.quiet, s.missing);
+            }
+        }
     }
 
     /// The trap of any return feed: the guest hears their own voice come

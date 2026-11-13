@@ -20,11 +20,14 @@ The picture loop, the sound loop and every encoder read one clock (`clock.rs`). 
 stands for a fixed time on it, and what the tick makes is stamped with that time. An encoder places
 pictures and sound by their stamps from the moment it started, not by counting what arrived: a late
 tick or a full queue costs a repeated picture, a lost block a moment of silence, and the two never
-drift apart. Sound from a microphone or a live network sender runs on that device's clock, not ours:
-the sound loop learns how fast each one runs and takes a frame more or less now and then to match,
-keeping what waits near 10 ms, so a fast device does not fall further and further behind the picture.
-The speed only ever moves by a few dozen ppm at a time, so a tone keeps its pitch. When a recording
-stops, the shorter of sound and picture is padded to the other, so both end together.
+drift apart. Sound from a microphone, a live network stream, an NDI or OMT sender or a video call guest
+(heard at the pace of the browser receiving the call) runs on that device's clock, not ours: the sound
+loop learns how fast each one runs and takes a frame more or less now and then to match, keeping what
+waits near 10 ms, so a fast device does not fall further and further behind the picture, which these
+sources show as it arrives. The speed only ever moves by a few dozen ppm at a time, so a tone keeps its
+pitch, and follows up to about 0.1 %; a sender further off is cut back to the margin now and then, or
+given it back as a moment of silence. When a recording stops, the shorter of sound and picture is
+padded to the other, so both end together.
 
 ## Files
 

@@ -157,8 +157,9 @@ impl InputRt {
 
     /// A video call's: it always runs, and passes sound both ways.
     pub(crate) fn for_call() -> Arc<Self> {
-        // A conversation cannot wait: sound that falls behind is dropped
-        // rather than heard late.
+        // A conversation cannot wait: the sound loop keeps the guest's
+        // sound near its margin, and sound that falls further behind than
+        // the ring holds is dropped rather than heard late.
         Self::build(Some(Ring::new(0.3)), true, Some(Arc::default()))
     }
 
