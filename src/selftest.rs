@@ -73,6 +73,8 @@ fn ends(path: &str) -> Result<(f64, f64), String> {
     Ok((picture, sound))
 }
 
+type Pad = std::sync::Arc<std::sync::Mutex<Option<Padding>>>;
+
 /// One stream's `codec_name,r_frame_rate` as ffprobe says it, by kind.
 fn stream_of(path: &str, kind: &str) -> Result<String, String> {
     let out = Command::new(crate::ffmpeg::program("ffprobe"))
@@ -140,7 +142,20 @@ fn editing_profiles(dir: &str) -> Result<String, String> {
             return Err(format!("{} : fichier {file} sans l'extension {}", profile.id, profile.container));
         }
         sleep(Duration::from_secs(3));
+        // Stopped as by the button: the file ends with both, nothing added.
+        let pads = paddings(&engine);
+        engine.stop_recording();
+        let stopped = Instant::now();
+        while pads.iter().any(|(_, p)| p.lock().unwrap().is_none())
+            && stopped.elapsed() < Duration::from_secs(10)
+        {
+            sleep(Duration::from_millis(20));
+        }
         engine.shutdown();
+        let (padded, end) = most_padded(&pads, fps)?;
+        if padded > 0.0 {
+            return Err(format!("{} : {:.0} ms ajoutées à la fin ({end})", profile.id, padded * 1000.0));
+        }
         let video = stream_of(&file, "v:0")?;
         let sound = stream_of(&file, "a:0")?;
         // ffprobe names the codec, not the encoder: prores_ks writes "prores".
@@ -164,7 +179,7 @@ fn editing_profiles(dir: &str) -> Result<String, String> {
             return Err(format!("{file} : image jusqu'à {picture:.3} s, son jusqu'à {heard:.3} s"));
         }
         told.push(format!(
-            "{} {video} / {sound}, écart son-image {:.0} ms",
+            "{} {video} / {sound}, écart son-image {:.0} ms, fin égalisée de 0 ms",
             profile.id,
             (heard - picture) * 1000.0
         ));
@@ -173,20 +188,35 @@ fn editing_profiles(dir: &str) -> Result<String, String> {
 }
 
 /// The end padding of each recorder, to read once they are finished.
-fn paddings(engine: &Engine) -> Vec<std::sync::Arc<std::sync::Mutex<Option<Padding>>>> {
-    engine.recorders.lock().unwrap().iter().map(|e| e.padded.clone()).collect()
+fn paddings(engine: &Engine) -> Vec<(String, Pad)> {
+    engine.recorders.lock().unwrap().iter().map(|e| (e.label.clone(), e.padded.clone())).collect()
 }
 
-/// The longest end padding in seconds. Picture and sound follow one clock,
-/// so they end together and the files end together by construction: what
-/// had to be padded shows whether they drifted apart on the way.
-fn most_padded(pads: &[std::sync::Arc<std::sync::Mutex<Option<Padding>>>], fps: u32) -> Result<f64, String> {
+/// The same for each multi-recording.
+fn multi_paddings(engine: &Engine) -> Vec<(String, Pad)> {
+    engine.multi.lock().unwrap().iter().map(|(_, e)| (e.label.clone(), e.padded.clone())).collect()
+}
+
+/// The longest end padding in seconds, and where each recording's picture
+/// and sound ended before it. Picture and sound follow one clock, and a
+/// stopped file is fed both up to the same picture boundary: what had to be
+/// padded shows that they drifted apart, or that one of them came too late.
+fn most_padded(pads: &[(String, Pad)], fps: u32) -> Result<(f64, String), String> {
     let mut most = 0f64;
-    for pad in pads {
-        let p = (*pad.lock().unwrap()).ok_or("fin d'enregistrement non égalisée")?;
+    let mut each = Vec::new();
+    for (label, pad) in pads {
+        let p =
+            (*pad.lock().unwrap()).ok_or_else(|| format!("{label} : fin d'enregistrement non égalisée"))?;
         most = most.max(p.pictures as f64 / fps.max(1) as f64).max(p.samples as f64 / 48_000.0);
+        each.push(format!(
+            "{label} : image jusqu'à {:.3} s, son jusqu'à {:.3} s, + {} image(s) et {:.0} ms de son",
+            p.picture_end,
+            p.sound_end,
+            p.pictures,
+            p.samples as f64 * 1000.0 / 48_000.0
+        ));
     }
-    Ok(most)
+    Ok((most, each.join(" ; ")))
 }
 
 pub(crate) fn http_get(path: &str) -> Result<String, String> {
@@ -475,11 +505,30 @@ fn check(dir: &str) -> Result<String, String> {
     if let Some(e) = engine.output_error.lock().unwrap().clone() {
         return Err(e);
     }
-    let pads = paddings(&engine);
+    // The recorders stop as by the button, and are finished once both their
+    // picture and their sound reach their end: nothing may be added. Closing
+    // ends the multi-recording the same way, within a picture.
+    let (pads, multi_pads) = (paddings(&engine), multi_paddings(&engine));
+    engine.stop_recording();
+    let stopped = Instant::now();
+    while pads.iter().any(|(_, p)| p.lock().unwrap().is_none()) && stopped.elapsed() < Duration::from_secs(10)
+    {
+        sleep(Duration::from_millis(20));
+    }
     engine.shutdown();
-    let padded = most_padded(&pads, project_fps)?;
-    if padded > frame_s + 1e-9 {
-        return Err(format!("{:.0} ms ajoutées à la fin d'un enregistrement", padded * 1000.0));
+    let (padded, endings) = most_padded(&pads, project_fps)?;
+    if padded > 0.0 {
+        return Err(format!(
+            "{:.0} ms ajoutées à la fin d'un enregistrement arrêté ({endings})",
+            padded * 1000.0
+        ));
+    }
+    let (multi_padded, multi_end) = most_padded(&multi_pads, project_fps)?;
+    if multi_padded > frame_s + 1e-9 {
+        return Err(format!(
+            "{:.0} ms ajoutées à la fin d'un enregistrement ({multi_end})",
+            multi_padded * 1000.0
+        ));
     }
     let _ = server.wait();
     sleep(Duration::from_millis(500));
@@ -518,10 +567,10 @@ fn check(dir: &str) -> Result<String, String> {
     }
     Ok(format!(
         "enregistreurs {one}/ {second}| diffusion {streamed}(images coupées {cut}) | cadence {fps}/s, rendu {mix_us} µs \
-         par {by}, images perdues {dropped}, répétées {repeated}, écart son-image {}, fin égalisée de {:.0} ms, \
-         crête son {peak:.2}| {call}",
+         par {by}, images perdues {dropped}, répétées {repeated}, écart son-image {}, fin égalisée de {:.0} ms \
+         ({endings} ; {multi_end}), crête son {peak:.2}| {call}",
         apart.join(" / "),
-        padded * 1000.0
+        padded.max(multi_padded) * 1000.0
     ))
 }
 
@@ -624,8 +673,8 @@ mod tests {
         let _ = sender.kill();
         let _ = sender.wait();
         let frame = 1.0 / 30.0;
-        let padded = most_padded(&pads, 30).unwrap();
-        println!("ends evened by at most {:.1} ms", padded * 1000.0);
+        let (padded, endings) = most_padded(&pads, 30).unwrap();
+        println!("ends evened by at most {:.1} ms: {endings}", padded * 1000.0);
         assert!(padded <= frame + 1e-9, "sound and picture drifted apart in the file");
         for file in [first.clone(), first.replace("-1.mp4", "-2.mkv")] {
             let (picture, sound) = ends(&file).unwrap();
