@@ -34,6 +34,8 @@ const RETRY: Duration = Duration::from_secs(2);
 /// Up to this far behind, blocks run back to back so that none is missing;
 /// further, the time is given up as silence in recordings.
 const CATCH_UP: u64 = clock::NS / 2;
+/// A block made this late is the sound loop catching up: half a block.
+const HURRIED: u64 = clock::NS * FRAMES as u64 / AUDIO_RATE as u64 / 2;
 
 struct DeviceOut {
     ring: Arc<Ring>,
@@ -131,6 +133,9 @@ struct Strip {
     always_on: bool,
     /// Its sound comes at a device's or a sender's pace, not ours.
     live: bool,
+    /// Its pictures are shown as they arrive, and its sound is kept with
+    /// them through hold-ups (`Drift::beside_pictures`).
+    beside: bool,
     /// A stream fetched as fast as its sound is taken, which can run ahead
     /// and wait for room.
     may_wait: bool,
@@ -169,6 +174,7 @@ impl Engine {
                 solo: s.solo.contains(&i.id),
                 always_on: is_always_on(&i.kind),
                 live: is_live(&i.kind),
+                beside: beside_pictures(&i.kind),
                 may_wait: matches!(&i.kind, Kind::Network { url, .. } if may_run_ahead(url)),
                 call: match i.kind {
                     Kind::VideoCall { return_sound, .. } => Some(return_sound),
@@ -229,7 +235,7 @@ impl Engine {
         let mut devices: HashMap<String, Slot> = HashMap::new();
         let mut chains: HashMap<u64, Chain> = HashMap::new();
         let mut gains: HashMap<u64, f32> = HashMap::new();
-        let mut drifts: HashMap<u64, Drift> = HashMap::new();
+        let mut drifts: HashMap<(u64, bool), Drift> = HashMap::new();
         // What each Video Delay holds of its source's sound, and the blocks
         // its sources made this turn, after their own treatment.
         let mut lines: HashMap<u64, delay::Sound> = HashMap::new();
@@ -248,7 +254,7 @@ impl Engine {
         let mut back = vec![0f32; BLOCK];
         let mut rack = Rack::new(&self.plugins);
         let mut pace = Pace::new(clock::now(), (AUDIO_RATE / FRAMES) as u32);
-        let mut skipped = 0;
+        let (mut skipped, mut hurried) = (0, false);
         while !self.quit.load(Ordering::Relaxed) {
             let mix = self.read_mix();
             rack.refresh();
@@ -256,7 +262,9 @@ impl Engine {
             solo.fill(0.0);
             chains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             gains.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
-            drifts.retain(|id, _| mix.strips.iter().any(|s| s.id == *id && s.live));
+            drifts.retain(|(id, beside), _| {
+                mix.strips.iter().any(|s| s.id == *id && s.live && s.beside == *beside)
+            });
             own.retain(|id, _| mix.strips.iter().any(|s| s.id == *id));
             own.values_mut().for_each(|v| v.fill(0.0));
             // Another project's delays have the last one's numbers, not its sound.
@@ -282,10 +290,17 @@ impl Engine {
                     }
                     // Time the loop gave up went by for every input too: a file's
                     // sound stays with its picture, a live input drops what aged.
-                    let take = match strip.live.then(|| drifts.entry(strip.id).or_default()) {
+                    let fresh = || if strip.beside { Drift::beside_pictures() } else { Drift::default() };
+                    let take = match strip
+                        .live
+                        .then(|| drifts.entry((strip.id, strip.beside)).or_insert_with(fresh))
+                    {
                         Some(drift) => {
                             if skipped > 0 {
                                 drift.resync();
+                            }
+                            if hurried {
+                                drift.hurry();
                             }
                             drift.take(ring.queued(), FRAMES, held(ring, strip.may_wait))
                         }
@@ -374,8 +389,12 @@ impl Engine {
             self.feed_calls(&mix, &buses, (&dry, &own), &mut back);
             rack.idle();
 
-            let step = pace.advance(clock::now(), CATCH_UP);
-            skipped = step.skipped;
+            let now = clock::now();
+            let step = pace.advance(now, CATCH_UP);
+            // Blocks run back to back to catch up, half a block late or more:
+            // what the inputs lack then is the loop's doing, not a sender's
+            // hold-up. A sleep that overshot a little is not that.
+            (skipped, hurried) = (step.skipped, pace.late_by(now) > HURRIED);
             thread::sleep(step.wait);
         }
         rack.stop();
@@ -520,8 +539,27 @@ fn is_always_on(kind: &Kind) -> bool {
 
 /// Sound timed by a device or a sender rather than by our clock, which a
 /// file or the test tone is: it can run fast or slow and must be kept in step.
+/// An NDI or OMT sender sends at its own clock, and a video call guest is
+/// heard at the pace of the browser receiving the call.
 fn is_live(kind: &Kind) -> bool {
-    matches!(kind, Kind::Microphone { .. } | Kind::SystemAudio | Kind::Network { .. })
+    matches!(
+        kind,
+        Kind::Microphone { .. }
+            | Kind::SystemAudio
+            | Kind::Network { .. }
+            | Kind::Ndi { .. }
+            | Kind::Omt { .. }
+            | Kind::VideoCall { .. }
+    )
+}
+
+/// Sound sent beside pictures shown as they arrive, by an NDI or OMT sender or
+/// a video call guest: after a hold-up, its late sound is skipped as its
+/// pictures are. A network stream's pictures come through ffmpeg, which may
+/// deliver its sound a third of a second at a time: it is kept as a
+/// microphone is.
+fn beside_pictures(kind: &Kind) -> bool {
+    matches!(kind, Kind::Ndi { .. } | Kind::Omt { .. } | Kind::VideoCall { .. })
 }
 
 /// Whether a stream is fetched as fast as its sound is taken, as a playlist
@@ -837,6 +875,179 @@ mod tests {
         out.resize(at + n, 0.0);
         ring.pull(&mut out[at..]);
         n
+    }
+
+    /// Every input whose sound comes at a pace other than ours is kept in
+    /// step, and always runs; a file or the test tone, timed by our clock, is
+    /// not. Only those whose sound comes beside their pictures skip what a
+    /// hold-up brings late; microphones and streams are kept as they were.
+    #[test]
+    fn sound_on_another_clock_is_kept_in_step() {
+        let source = String::from("Régie (Caméra 1)");
+        let url = String::from("srt://h:9000");
+        for (live, beside) in [
+            (Kind::Microphone { device: "Micro".into() }, false),
+            (Kind::SystemAudio, false),
+            (Kind::Network { url, buffer_ms: 0 }, false),
+            (Kind::Ndi { source: source.clone() }, true),
+            (Kind::Omt { source }, true),
+            (crate::call::new_call(), true),
+        ] {
+            assert!(is_live(&live) && is_always_on(&live), "{live:?}");
+            assert_eq!(beside_pictures(&live), beside, "{live:?}");
+        }
+        for ours in [Kind::Tone, Kind::AudioFile { path: "a.wav".into(), looped: false }] {
+            assert!(!is_live(&ours), "{ours:?}");
+        }
+    }
+
+    /// What is heard of a live source at the end of a long show.
+    struct Show {
+        /// The last five seconds heard.
+        heard: Vec<f32>,
+        /// During the last minute: the most of the least waiting in any second,
+        /// and the most waiting at all, in ms.
+        floor_ms: usize,
+        peak_ms: usize,
+        /// Frames of silence the loop made up during the last minute, and
+        /// frames it found missing.
+        quiet: usize,
+        missing: usize,
+    }
+
+    /// A long show through the loop's own path (`held`, `Drift`, `fill`): a
+    /// source whose clock runs `ppm` off ours hands its input `piece` frames
+    /// at a time at its rate `rate`, each up to `jitter_ms` late, as `deliver`
+    /// does. It sends a 1 kHz tone: off our clock, it sends more or fewer
+    /// samples a second than it says, and the tone keeps its pitch only if
+    /// its speed is followed.
+    fn long_show(
+        minutes: usize,
+        ppm: f64,
+        (rate, piece, jitter_ms): (usize, usize, u64),
+        ring: &Ring,
+        mut deliver: impl FnMut(&[f32], &Ring),
+    ) -> Show {
+        let mut drift = Drift::beside_pictures();
+        let (mut raw, mut out) = ([0f32; BLOCK + 2], [0f32; BLOCK]);
+        let mut dice = 11u64;
+        let mut roll = |n: u64| {
+            dice = dice.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (dice >> 33) % n
+        };
+        let sender_rate = rate as f64 * (1.0 + ppm * 1e-6);
+        let w = 1000.0 * std::f64::consts::TAU / sender_rate;
+        let blocks = 50 * 60 * minutes;
+        // Only the end is listened to: before, silence costs less to make.
+        let tone_from = (blocks - 50 * 10) as f64 * 0.02 * sender_rate;
+        let (mut pieces, mut due) = (0usize, 0f64);
+        let mut mono = vec![0f32; piece];
+        let mut show = Show { heard: Vec::new(), floor_ms: 0, peak_ms: 0, quiet: 0, missing: 0 };
+        let mut floor = usize::MAX;
+        for n in 0..blocks {
+            let now = n as f64 * 0.02;
+            while due <= now {
+                let first = pieces * piece;
+                for (i, v) in mono.iter_mut().enumerate() {
+                    let i = (first + i) as f64;
+                    *v = if i < tone_from { 0.0 } else { ((i * w).sin() * 0.25) as f32 };
+                }
+                deliver(&mono, ring);
+                pieces += 1;
+                let late = roll(jitter_ms * 1000 + 1) as f64 / 1e6;
+                due = due.max((pieces + 1) as f64 * piece as f64 / sender_rate + late);
+            }
+            let last_minute = n >= blocks - 50 * 60;
+            if last_minute {
+                show.peak_ms = show.peak_ms.max(ring.queued() * 1000 / AUDIO_RATE);
+            }
+            let queued = ring.queued();
+            let take = drift.take(queued, FRAMES, held(ring, false));
+            fill(ring, &take, &mut raw, &mut out);
+            if last_minute {
+                floor = floor.min(ring.queued());
+                show.quiet += take.silence;
+                show.missing += take.frames.saturating_sub(queued.saturating_sub(take.discard));
+                if n % 50 == 49 {
+                    show.floor_ms = show.floor_ms.max(floor * 1000 / AUDIO_RATE);
+                    floor = usize::MAX;
+                }
+            }
+            if n >= blocks - 50 * 5 {
+                show.heard.extend(out.iter().step_by(2));
+            }
+        }
+        show
+    }
+
+    /// An NDI or OMT sender at 44.1 kHz, sending a picture's worth of sound
+    /// at a time with a few ms of network jitter, through the receiver's own
+    /// `hear` into a ring as its input has.
+    fn ndi_show(ppm: f64) -> Show {
+        let ring = Ring::new(1.0);
+        let mut resampler = crate::netvideo::Resampler::default();
+        let (mut stereo, mut planes) = (Vec::new(), Vec::new());
+        long_show(20, ppm, (44_100, 1470, 4), &ring, |mono, ring| {
+            planes.clear();
+            planes.extend_from_slice(mono);
+            planes.extend_from_slice(mono);
+            let n = mono.len();
+            let sound =
+                crate::netvideo::Sound { data: &planes, channels: 2, samples: n, plane: n, rate: 44_100 };
+            crate::netvideo::hear(&sound, &mut resampler, &mut stereo, ring);
+        })
+    }
+
+    /// A video call guest as the browser receiving the call hands their sound
+    /// over: 2048 frames of 16-bit sound at a time, up to 15 ms late, into the
+    /// ring of 0.3 s a call input has.
+    fn guest_show(ppm: f64) -> Show {
+        let ring = Ring::new(0.3);
+        long_show(20, ppm, (AUDIO_RATE, 2048, 15), &ring, |mono, ring| {
+            let pcm: Vec<f32> =
+                mono.iter().flat_map(|v| [((v * 32767.0) as i16) as f32 / 32768.0; 2]).collect();
+            ring.push(&pcm);
+        })
+    }
+
+    /// A sender 0.1 % off, further than real devices drift, is followed:
+    /// after twenty minutes its tone is whole and at its pitch, and what waits
+    /// stays near the margin, with no moment of silence.
+    #[test]
+    fn network_video_and_guests_a_thousandth_off_are_followed() {
+        for (name, show) in [("ndi", ndi_show as fn(f64) -> Show), ("guest", guest_show)] {
+            for ppm in [1000.0, -1000.0] {
+                let s = show(ppm);
+                let why = format!("{name} {ppm} ppm: {} ms least, {} ms most", s.floor_ms, s.peak_ms);
+                if let Err(e) = crate::clock::judge_tone(&s.heard, AUDIO_RATE) {
+                    panic!("{why}: {e}");
+                }
+                assert!(
+                    s.floor_ms < 30 && s.quiet + s.missing == 0,
+                    "{why}, {} + {} silent",
+                    s.quiet,
+                    s.missing
+                );
+            }
+        }
+    }
+
+    /// A sender 1 % off is more than a frame per block can follow: it is cut
+    /// back now and then when fast, and given back its margin as a moment of
+    /// silence when slow. It must not pile up as it did, to 0.4 s behind for
+    /// NDI and OMT and the whole 0.3 s ring for a guest, nor go quiet for
+    /// more than it falls short.
+    #[test]
+    fn network_video_and_guests_a_hundredth_off_stay_near_the_margin() {
+        for (name, show) in [("ndi", ndi_show as fn(f64) -> Show), ("guest", guest_show)] {
+            for ppm in [10_000.0, -10_000.0] {
+                let s = show(ppm);
+                let why = format!("{name} {ppm} ppm: {} ms least, {} ms most", s.floor_ms, s.peak_ms);
+                assert!(s.floor_ms < 150 && s.peak_ms < 250, "{why}");
+                let short = if ppm < 0.0 { AUDIO_RATE * 60 / 100 } else { 0 };
+                assert!(s.quiet + s.missing <= short, "{why}, {} + {} silent", s.quiet, s.missing);
+            }
+        }
     }
 
     /// The trap of any return feed: the guest hears their own voice come

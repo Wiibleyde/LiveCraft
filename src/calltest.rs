@@ -171,6 +171,10 @@ pub fn check(engine: &Arc<Engine>) -> Result<String, String> {
         loudest = loudest.max(rt.peak());
         sleep(Duration::from_millis(10));
     }
+    // The guest is heard at the pace of the browser receiving the call, not
+    // ours: what waits is kept near the margin, as a microphone's is.
+    let waiting = crate::selftest::least_waiting(&rt, Duration::from_secs(3))
+        .map_err(|e| format!("son de l'invité {e}"))?;
     let pictures = rt.seq() - seq;
     let last = rt.latest().ok_or("image perdue")?;
     if pictures < 30 || last.data == first.data {
@@ -199,5 +203,8 @@ pub fn check(engine: &Arc<Engine>) -> Result<String, String> {
         }
         sleep(Duration::from_millis(100));
     }
-    Ok(format!("appel vidéo : {pictures} images en 4 s, crête son {loudest:.2}, retour {width} px"))
+    Ok(format!(
+        "appel vidéo : {pictures} images en 4 s, crête son {loudest:.2}, son en attente {waiting} ms au plus bas, \
+         retour {width} px"
+    ))
 }

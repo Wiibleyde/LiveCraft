@@ -3,7 +3,7 @@
 //! and works without them, and says what is missing when one is asked for.
 
 use crate::frame::{Frame, ROWS};
-use crate::sources::{AUDIO_RATE, InputRt};
+use crate::sources::{AUDIO_RATE, InputRt, Ring};
 use crate::{ndi, omt};
 use rayon::prelude::*;
 #[cfg(windows)]
@@ -203,10 +203,6 @@ pub(crate) trait Sender: Send {
     fn connections(&self) -> u32;
 }
 
-/// Sound waiting beyond this is late already: dropping it keeps a source
-/// whose clock runs a little fast from drifting behind its picture.
-const MOST_BUFFERED: usize = AUDIO_RATE * 2 / 5;
-
 /// An NDI or OMT input: the latest picture fitted to the output size, and
 /// the sound in stereo at the mixer's rate. The runtime reconnects by itself.
 pub fn run_input(rt: &Arc<InputRt>, net: Net, source: &str, w: usize, h: usize) {
@@ -243,10 +239,7 @@ pub fn run_input(rt: &Arc<InputRt>, net: Net, source: &str, w: usize, h: usize) 
                 }
                 Got::Sound(s) => {
                     if let Some(ring) = &rt.audio {
-                        to_stereo(&s, &mut resampler, &mut stereo);
-                        if ring.len() + stereo.len() <= MOST_BUFFERED {
-                            ring.push(&stereo);
-                        }
+                        hear(&s, &mut resampler, &mut stereo, ring);
                     }
                 }
             }
@@ -262,6 +255,17 @@ pub fn run_input(rt: &Arc<InputRt>, net: Net, source: &str, w: usize, h: usize) 
             rt.set_status(t!("netvideo.lost", label = label, source = source));
         }
     }
+}
+
+/// Puts received sound in the input's ring, all of it. The sender runs on its
+/// own clock: the sound loop keeps what waits there in step with the pictures
+/// (`Drift::beside_pictures`), taking a frame more or less now and then, and
+/// cutting back sound that came late or piled up, oldest first, at once when
+/// a burst lands. Dropping the newest sound here instead would leave a sender
+/// that runs a little fast behind its picture for good.
+pub(crate) fn hear(s: &Sound, rs: &mut Resampler, stereo: &mut Vec<f32>, ring: &Ring) {
+    to_stereo(s, rs, stereo);
+    ring.push(stereo);
 }
 
 /// Fills `out` with the picture, letterboxed when its shape differs.

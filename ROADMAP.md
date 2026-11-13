@@ -21,7 +21,7 @@ Nothing here has a date. Open an issue before starting something large; the
 - [x] Virtual sets (#14)
 - [x] Hardware decoding where it pays off (#8)
 - [x] Audio plug-ins (CLAP, #11)
-- [ ] Keep NDI/OMT inputs and video-call guests on the shared clock (#26)
+- [x] Keep NDI/OMT inputs and video-call guests on the shared clock (#26)
 - [x] Video Delay input (#29)
 - [x] One encoder shared by stream destinations with identical settings
 - [x] Recording profiles for editing: ProRes, DNxHR, MagicYUV (#31)

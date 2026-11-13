@@ -20,14 +20,21 @@ The picture loop, the sound loop and every encoder read one clock (`clock.rs`). 
 stands for a fixed time on it, and what the tick makes is stamped with that time. An encoder places
 pictures and sound by their stamps from the moment it started, not by counting what arrived: a late
 tick or a full queue costs a repeated picture, a lost block a moment of silence, and the two never
-drift apart. Sound from a microphone or a live network sender runs on that device's clock, not ours:
-the sound loop learns how fast each one runs and takes a frame more or less now and then to match,
-keeping what waits near 10 ms, so a fast device does not fall further and further behind the picture.
-The speed only ever moves by a few dozen ppm at a time, so a tone keeps its pitch. A block of sound is
-made at the start of the time it stands for and a picture after it is composed, so at any moment the
-sound is ahead. A stopped recording therefore keeps being fed, out of sight, until both reach the first
-picture boundary after the stop; only what fails to come within a second is padded. Closing the program
-waits for that, and for every file still being finished. Streams stop at once.
+drift apart. Sound from a microphone, a live network stream, an NDI or OMT sender or a video call guest
+(heard at the pace of the browser receiving the call) runs on that device's clock, not ours: the sound
+loop learns how fast each one runs and takes a frame more or less now and then to match, keeping what
+waits near 10 ms, so a fast device does not fall further and further behind the picture, which these
+sources show as it arrives. The speed only ever moves by a few dozen ppm at a time, so a tone keeps its
+pitch, and follows up to about 0.1 %; a sender further off is cut back to the margin now and then, or
+given it back as a moment of silence. When the network or the page holds up an NDI or OMT sender or a
+guest, its pictures stop, then jump to the latest: the sound that comes late is skipped the same way,
+as much as the silence played meanwhile, so the two stay together instead of the sound trailing for a
+minute; sound lost on the way is not made up for. A burst of a quarter of a second beyond its usual
+level is cut back as it lands. A block of sound is made at the start of the time it stands for and a
+picture after it is composed, so at any moment the sound is ahead. A stopped recording therefore keeps
+being fed, out of sight, until both reach the first picture boundary after the stop; only what fails to
+come within a second is padded. Closing the program waits for that, and for every file still being
+finished. Streams stop at once.
 
 ## Files
 
