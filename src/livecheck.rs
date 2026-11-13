@@ -6,7 +6,7 @@
 //! and hear the tone. `--break freeze|silence|drop` spoils one link on purpose,
 //! to show that the check notices.
 
-use crate::clock::{TONE_HZ, judge_tone};
+use crate::clock::{TONE_HZ, judge_heard_tone};
 use crate::engine::Engine;
 use crate::functions::Args;
 use crate::model::*;
@@ -148,7 +148,7 @@ fn local(dir: &str, how: &str) -> Result<String, String> {
                         .iter()
                         .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
                         .collect();
-                    judge_tone(&samples, SAMPLE_RATE)
+                    judge_heard_tone(&samples, SAMPLE_RATE)
                 }),
             )
         })
@@ -302,7 +302,7 @@ fn spawn_pull(dir: String, name: &'static str, url: String) -> JoinHandle<Result
         let samples: Vec<f32> =
             pcm.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b) as f32 / 32768.0).collect();
         let picture = judge_pictures(&frames, PULL_W, PULL_H)?;
-        let tone = judge_tone(&samples, SAMPLE_RATE)?;
+        let tone = judge_heard_tone(&samples, SAMPLE_RATE)?;
         Ok(format!("{picture}, {tone}"))
     })
 }
@@ -869,12 +869,12 @@ mod tests {
 
     #[test]
     fn the_tone_is_heard() {
-        assert!(judge_tone(&sine(TONE_HZ, TONE_LEVEL, 4.0), SAMPLE_RATE).is_ok());
+        assert!(judge_heard_tone(&sine(TONE_HZ, TONE_LEVEL, 4.0), SAMPLE_RATE).is_ok());
     }
 
     #[test]
     fn silence_fails() {
-        let e = judge_tone(&vec![0.0; SAMPLE_RATE * 4], SAMPLE_RATE).unwrap_err();
+        let e = judge_heard_tone(&vec![0.0; SAMPLE_RATE * 4], SAMPLE_RATE).unwrap_err();
         assert!(e.starts_with("pas de son"), "{e}");
     }
 
@@ -884,26 +884,29 @@ mod tests {
     /// sound. A pitch a percent off is.
     #[test]
     fn a_tone_a_thousandth_off_or_missing_a_moment_is_still_heard() {
-        assert!(judge_tone(&sine(TONE_HZ * 1.001, TONE_LEVEL, 4.0), SAMPLE_RATE).is_ok());
+        let thousandth = sine(TONE_HZ * 1.001, TONE_LEVEL, 4.0);
+        assert!(judge_heard_tone(&thousandth, SAMPLE_RATE).is_ok());
+        // What the drift tests listen for is its pitch, which this is not.
+        assert!(crate::clock::judge_tone(&thousandth, SAMPLE_RATE).is_err());
         let mut gap = sine(TONE_HZ, TONE_LEVEL, 2.0);
         // 10.4 ms: the tone comes back 0.4 of a period out of step.
         gap.extend(std::iter::repeat_n(0.0, 500));
         gap.extend(sine(TONE_HZ, TONE_LEVEL, 2.0));
-        assert!(judge_tone(&gap, SAMPLE_RATE).is_ok());
-        let e = judge_tone(&sine(TONE_HZ * 1.01, TONE_LEVEL, 4.0), SAMPLE_RATE).unwrap_err();
+        assert!(judge_heard_tone(&gap, SAMPLE_RATE).is_ok());
+        let e = judge_heard_tone(&sine(TONE_HZ * 1.01, TONE_LEVEL, 4.0), SAMPLE_RATE).unwrap_err();
         assert!(e.starts_with("son brouillé"), "{e}");
     }
 
     #[test]
     fn another_sound_fails() {
-        assert!(judge_tone(&sine(440.0, TONE_LEVEL, 4.0), SAMPLE_RATE).is_err());
+        assert!(judge_heard_tone(&sine(440.0, TONE_LEVEL, 4.0), SAMPLE_RATE).is_err());
         let mut noisy = sine(TONE_HZ, 0.05, 4.0);
         let mut seed = 1u32;
         for v in noisy.iter_mut() {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             *v += (seed >> 8) as f32 / (1 << 24) as f32 - 0.5;
         }
-        let e = judge_tone(&noisy, SAMPLE_RATE).unwrap_err();
+        let e = judge_heard_tone(&noisy, SAMPLE_RATE).unwrap_err();
         assert!(e.starts_with("son brouillé"), "{e}");
     }
 }

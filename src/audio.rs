@@ -703,47 +703,6 @@ mod tests {
         assert!(ms(waiting_after_a_stall("https://h/show.m3u8")) > 900);
     }
 
-    /// A 1 kHz tone from a device 100 ppm fast that delivers 40 ms at a time,
-    /// up to 10 ms late and now and then 45 ms late, as a virtual cable on a
-    /// busy machine does, through the loop's own path. Judged over 3.5 s at
-    /// once, where any change of its pitch shows, it must still be one steady
-    /// tone: correcting a frame per block for a whole second would leave it a
-    /// third of the sound.
-    #[test]
-    fn a_tone_from_an_uneven_device_keeps_its_pitch() {
-        let ring = Ring::new(1.0);
-        let mut drift = Drift::default();
-        let (mut raw, mut out) = ([0f32; BLOCK + 2], [0f32; BLOCK]);
-        let mut dice = 7u64;
-        let mut roll = |n: u64| {
-            dice = dice.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
-            (dice >> 33) % n
-        };
-        let w = 1000.0 * std::f64::consts::TAU / AUDIO_RATE as f64;
-        let device_rate = AUDIO_RATE as f64 * 1.0001;
-        let (mut chunks, mut due) = (0u64, 0f64);
-        let mut heard = Vec::new();
-        for n in 0..50 * 10 {
-            let now = n as f64 * 0.02;
-            while due <= now {
-                let first = chunks * 1920;
-                let chunk: Vec<f32> =
-                    (first..first + 1920).flat_map(|i| [((i as f64 * w).sin() * 0.25) as f32; 2]).collect();
-                ring.push(&chunk);
-                chunks += 1;
-                let late = if chunks % 37 == 0 { 0.045 } else { roll(10_000) as f64 / 1e6 };
-                due = due.max((chunks + 1) as f64 * 1920.0 / device_rate + late);
-            }
-            let take = drift.take(ring.queued(), FRAMES, held(&ring, false));
-            fill(&ring, &take, &mut raw, &mut out);
-            heard.extend(out.iter().step_by(2));
-        }
-        let read = &heard[5 * AUDIO_RATE + AUDIO_RATE / 2..9 * AUDIO_RATE];
-        let power = read.iter().map(|v| v * v).sum::<f32>() / read.len() as f32;
-        let share = crate::clock::tone_power(read, AUDIO_RATE) / power;
-        assert!(share > 0.8, "the tone is {:.0} % of the sound", share * 100.0);
-    }
-
     /// What the live check heard on CI (#40), through the loop's own path: a
     /// virtual cable in step with our clock hands over 40 ms at a time, up to
     /// 3 ms before a block is taken. One in a hundred lands just after
@@ -785,9 +744,49 @@ mod tests {
         assert_eq!(slowest, -1.0, "the margin was built back, a frame at a time");
         for from in [4, 10, 20] {
             let read = &heard[from * AUDIO_RATE..(from + 4) * AUDIO_RATE];
-            if let Err(e) = crate::clock::judge_tone(read, AUDIO_RATE) {
+            if let Err(e) = crate::clock::judge_heard_tone(read, AUDIO_RATE) {
                 panic!("from {from} s: {e}");
             }
+        }
+    }
+
+    /// A 1 kHz tone from a device 100 ppm fast that delivers 40 ms at a time,
+    /// up to 10 ms late and now and then 45 ms late, as a virtual cable on a
+    /// busy machine does, through the loop's own path. Read back as the live
+    /// check reads its streams, it must still be one steady tone: correcting
+    /// a frame per block for a whole second would leave it a third of the sound.
+    #[test]
+    fn a_tone_from_an_uneven_device_keeps_its_pitch() {
+        let ring = Ring::new(1.0);
+        let mut drift = Drift::default();
+        let (mut raw, mut out) = ([0f32; BLOCK + 2], [0f32; BLOCK]);
+        let mut dice = 7u64;
+        let mut roll = |n: u64| {
+            dice = dice.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (dice >> 33) % n
+        };
+        let w = 1000.0 * std::f64::consts::TAU / AUDIO_RATE as f64;
+        let device_rate = AUDIO_RATE as f64 * 1.0001;
+        let (mut chunks, mut due) = (0u64, 0f64);
+        let mut heard = Vec::new();
+        for n in 0..50 * 10 {
+            let now = n as f64 * 0.02;
+            while due <= now {
+                let first = chunks * 1920;
+                let chunk: Vec<f32> =
+                    (first..first + 1920).flat_map(|i| [((i as f64 * w).sin() * 0.25) as f32; 2]).collect();
+                ring.push(&chunk);
+                chunks += 1;
+                let late = if chunks % 37 == 0 { 0.045 } else { roll(10_000) as f64 / 1e6 };
+                due = due.max((chunks + 1) as f64 * 1920.0 / device_rate + late);
+            }
+            let take = drift.take(ring.queued(), FRAMES, held(&ring, false));
+            fill(&ring, &take, &mut raw, &mut out);
+            heard.extend(out.iter().step_by(2));
+        }
+        let read = &heard[5 * AUDIO_RATE..9 * AUDIO_RATE];
+        if let Err(e) = crate::clock::judge_tone(read, AUDIO_RATE) {
+            panic!("{e}");
         }
     }
 
