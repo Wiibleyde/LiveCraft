@@ -283,7 +283,7 @@ impl App {
             Kind::Image { path } => {
                 path_row(ui, path);
                 if ui.button(t!("input_settings.change_image")).clicked() {
-                    change_path = rfd::FileDialog::new().pick_file();
+                    change_path = FileDialog::new().pick_file();
                 }
                 if let Some(p) = change_path.take() {
                     *path = p.to_string_lossy().into_owned();
@@ -292,7 +292,7 @@ impl App {
             Kind::Video { path, looped, mark_in, mark_out, rate } => {
                 path_row(ui, path);
                 if ui.button(t!("input_settings.change_video")).clicked()
-                    && let Some(p) = rfd::FileDialog::new().pick_file()
+                    && let Some(p) = FileDialog::new().pick_file()
                 {
                     *path = p.to_string_lossy().into_owned();
                 }
@@ -335,7 +335,7 @@ impl App {
                 path_row(ui, path);
                 ui.horizontal(|ui| {
                     if ui.button(t!("input_settings.dvd_change_folder")).clicked()
-                        && let Some(p) = rfd::FileDialog::new().pick_folder()
+                        && let Some(p) = FileDialog::new().pick_folder()
                     {
                         match crate::dvd::recognise(&p) {
                             Some(disc) => *path = disc,
@@ -343,9 +343,8 @@ impl App {
                         }
                     }
                     if ui.button(t!("input_settings.dvd_change_image")).clicked()
-                        && let Some(p) = rfd::FileDialog::new()
-                            .add_filter(t!("inputs.dvd_image_filter"), &["iso"])
-                            .pick_file()
+                        && let Some(p) =
+                            FileDialog::new().add_filter(t!("inputs.dvd_image_filter"), &["iso"]).pick_file()
                     {
                         *path = p.to_string_lossy().into_owned();
                     }
@@ -428,7 +427,7 @@ impl App {
                     items.remove(n);
                 }
                 if ui.button(t!("input_settings.add_files")).clicked() {
-                    for p in rfd::FileDialog::new().pick_files().unwrap_or_default() {
+                    for p in FileDialog::new().pick_files().unwrap_or_default() {
                         items.push(ListItem { path: p.to_string_lossy().into_owned(), enabled: true });
                     }
                 }
@@ -443,7 +442,7 @@ impl App {
             Kind::PowerPoint { path } => {
                 path_row(ui, path);
                 if ui.button(t!("slides.change")).clicked()
-                    && let Some(p) = rfd::FileDialog::new()
+                    && let Some(p) = FileDialog::new()
                         .add_filter(t!("inputs.presentation_filter"), &crate::slides::EXTENSIONS)
                         .pick_file()
                 {
@@ -915,7 +914,7 @@ fn tab_effects(ui: &mut egui::Ui, input: &mut Input) {
             if matches!(e.kind, EffectKind::Lut | EffectKind::AlphaMask) {
                 ui.horizontal(|ui| {
                     if ui.button(t!("input_settings.file")).clicked()
-                        && let Some(p) = rfd::FileDialog::new().pick_file()
+                        && let Some(p) = FileDialog::new().pick_file()
                     {
                         e.path = p.to_string_lossy().into_owned();
                     }

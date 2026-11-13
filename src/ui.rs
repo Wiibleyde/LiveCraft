@@ -21,6 +21,7 @@ use crate::api::ApiConfig;
 use crate::engine::{Compositor, Engine, ROUTES, State};
 use crate::functions::Args;
 use crate::i18n::{Lang, language, set_language};
+use crate::instance;
 use crate::model::*;
 use crate::netvideo::Net;
 use crate::output;
@@ -33,6 +34,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use wgpu::rwh::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    WindowHandle,
+};
 
 const CARD_W: f32 = 214.0;
 const CARD_H: f32 = 182.0;
@@ -248,6 +253,96 @@ pub struct App {
     update_fetch: fn(&str) -> Result<Option<crate::update::Release>, String>,
     /// Whether ffmpeg is asked what it can do: a real run, or a look at the About tab.
     asks_ffmpeg: bool,
+    /// Requests from later starts, while this is the first window open.
+    first: Option<instance::First>,
+    /// While another window holds the session.
+    second: Option<SessionHeld>,
+    /// This window does not save the session: another one holds it, or what
+    /// that one saved last could not be set aside.
+    not_saving: bool,
+}
+
+/// A window that found the session held by another one.
+struct SessionHeld {
+    second: instance::Second,
+    /// Where this window will keep the session once the other one is gone.
+    session: Option<PathBuf>,
+}
+
+thread_local! {
+    /// The main window, set as the window starts. File dialogs belong to it,
+    /// so they stay in front of it instead of hiding behind.
+    static MAIN_WINDOW: std::cell::Cell<Option<(RawWindowHandle, RawDisplayHandle)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+struct MainWindow((RawWindowHandle, RawDisplayHandle));
+
+impl HasWindowHandle for MainWindow {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        // SAFETY: the main window lasts as long as its loop, and dialogs only
+        // open on that loop's thread, while it runs.
+        Ok(unsafe { WindowHandle::borrow_raw(self.0.0) })
+    }
+}
+
+impl HasDisplayHandle for MainWindow {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        // SAFETY: as above.
+        Ok(unsafe { DisplayHandle::borrow_raw(self.0.1) })
+    }
+}
+
+/// The main window's number on Windows, which another thread can bring
+/// forward while this one sits in a file dialog.
+fn main_window_id() -> Option<isize> {
+    match MAIN_WINDOW.get()?.0 {
+        RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
+        _ => None,
+    }
+}
+
+/// The system's file dialog, in front of the main window. While one is up
+/// the window cannot take anything else: later starts are told to wait, not
+/// taken for a frozen window.
+struct FileDialog(rfd::FileDialog);
+
+impl FileDialog {
+    fn new() -> Self {
+        let dialog = rfd::FileDialog::new();
+        Self(match MAIN_WINDOW.get() {
+            Some(main) => dialog.set_parent(&MainWindow(main)),
+            None => dialog,
+        })
+    }
+
+    fn add_filter(self, name: impl Into<String>, extensions: &[impl ToString]) -> Self {
+        Self(self.0.add_filter(name, extensions))
+    }
+
+    fn set_directory(self, path: impl AsRef<std::path::Path>) -> Self {
+        Self(self.0.set_directory(path))
+    }
+
+    fn set_file_name(self, name: impl Into<String>) -> Self {
+        Self(self.0.set_file_name(name))
+    }
+
+    fn pick_file(self) -> Option<PathBuf> {
+        instance::while_busy(|| self.0.pick_file())
+    }
+
+    fn pick_files(self) -> Option<Vec<PathBuf>> {
+        instance::while_busy(|| self.0.pick_files())
+    }
+
+    fn pick_folder(self) -> Option<PathBuf> {
+        instance::while_busy(|| self.0.pick_folder())
+    }
+
+    fn save_file(self) -> Option<PathBuf> {
+        instance::while_busy(|| self.0.save_file())
+    }
 }
 
 impl App {
@@ -258,9 +353,13 @@ impl App {
         open: Option<String>,
         project_file: Option<String>,
         lang: Option<Lang>,
+        role: instance::Role,
     ) -> Self {
         let open = open.as_deref().unwrap_or("");
         apply_style(&cc.egui_ctx);
+        if let (Ok(window), Ok(display)) = (cc.window_handle(), cc.display_handle()) {
+            MAIN_WINDOW.set(Some((window.as_raw(), display.as_raw())));
+        }
         // The check picture opens the worked example, as the reference picture
         // shows a project already open. A normal first start is an empty desk.
         let saved = if shot_path.is_some() {
@@ -276,7 +375,78 @@ impl App {
             updates::as_if_found(&mut saved.updates);
         }
         let remote = shot_path.is_none();
-        Self::start(cc, saved, shot_path, open, project_file, remote)
+        let mut app = Self::start(cc, saved, shot_path, open, project_file, remote);
+        app.take_role(&cc.egui_ctx, role);
+        app
+    }
+
+    /// Where this window stands among the LiveCraft windows of this account.
+    fn take_role(&mut self, ctx: &egui::Context, role: instance::Role) {
+        match role {
+            instance::Role::First(first) => self.become_first(ctx, first),
+            instance::Role::Second(second) => {
+                self.second = Some(SessionHeld { second, session: self.session_file.take() });
+                self.not_saving = true;
+                self.say(t!("app.second_window"));
+            }
+            instance::Role::Alone { foreign: true } => self.say(t!("app.channel_foreign")),
+            instance::Role::Alone { foreign: false } => {}
+        }
+    }
+
+    fn become_first(&mut self, ctx: &egui::Context, first: instance::First) {
+        let (ctx, window) = (ctx.clone(), main_window_id());
+        // Brought forward from the thread that took the request: with a file
+        // dialog up, this window's own loop cannot do it, and the dialog
+        // could stay hidden while the later start waits.
+        first.wake_with(move || {
+            crate::platform::raise_window(window);
+            ctx.request_repaint();
+        });
+        self.first = Some(first);
+    }
+
+    /// What later starts handed over: each brings this window to the front,
+    /// and a project opens as one dropped on the window would.
+    fn take_handed_over(&mut self, ctx: &egui::Context) {
+        if let Some(held) = &mut self.second
+            && let Some(first) = held.second.try_first()
+        {
+            first.set_ready();
+            self.become_first(ctx, first);
+            if let Some(held) = self.second.take() {
+                self.take_session_back(held);
+            }
+        }
+        let handed: Vec<_> =
+            self.first.as_ref().map(|f| std::iter::from_fn(|| f.next()).collect()).unwrap_or_default();
+        for request in handed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            if let instance::Request::Open(path) = request {
+                self.open_from_outside(path);
+            }
+        }
+    }
+
+    /// The other window is gone, and saved the session as it closed. This
+    /// window keeps its own desk, which may be on air, and first copies that
+    /// save aside, so that it is never overwritten silently.
+    fn take_session_back(&mut self, held: SessionHeld) {
+        if let Some(path) = held.session.as_ref().filter(|p| p.is_file()) {
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let aside = path.with_file_name(format!("session.{stamp}.json"));
+            if std::fs::copy(path, &aside).is_err() {
+                self.say(t!("app.session_not_set_aside"));
+                return;
+            }
+            let shown = aside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.say(t!("app.session_set_aside", file = shown));
+        } else {
+            self.say(t!("app.first_again"));
+        }
+        self.session_file = held.session;
+        self.not_saving = false;
     }
 
     /// A project named on the command line, as a double-clicked file is,
@@ -474,6 +644,9 @@ impl App {
             open_in_browser: if remote { crate::platform::open_in_browser } else { |_| {} },
             update_fetch: if remote { crate::update::fetch } else { |_| Ok(None) },
             asks_ffmpeg,
+            first: None,
+            second: None,
+            not_saving: false,
         }
     }
 
@@ -715,6 +888,14 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Runs while the window is minimised too, so a later start finds it.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(first) = &self.first {
+            first.set_ready();
+        }
+        self.take_handed_over(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.sync_textures(&ctx);
@@ -800,6 +981,9 @@ impl eframe::App for App {
             self.saved.project = self.with(|s| s.project.clone());
             self.saved.store(&path);
         }
+        // Outputs can take a while to close: a later start meanwhile finds the
+        // name free and the session saved, not a window that will not answer.
+        self.first = None;
         self.engine.shutdown();
     }
 }

@@ -57,12 +57,19 @@ bars.format_vertical = Vertical {fps}
 bars.starting = Starting…
 bars.stats_line = fps: {ticks}   Render: {render} ms   LiveCraft CPU: {me} %   Total: {total} %
 bars.machine_busy = Machine overloaded
+bars.session_not_saved = Session not saved
+bars.session_not_saved_tip = Another open LiveCraft holds the session: this window does not overwrite it. Save your project with Save as. The session comes back to this window as soon as the other one closes.
 bars.nothing_to_capture = Nothing to capture
 bars.image_saved = Image saved: {path}
 bars.snapshot_failed = Snapshot failed: {error}
 
 # src/ui.rs
 app.capture_failed = Capture failed: {error}
+app.second_window = LiveCraft is already open but not answering: to keep its session safe, this window does not save over it.
+app.first_again = The other LiveCraft has closed: this window saves the session again.
+app.session_set_aside = The other LiveCraft has closed: this window saves the session again. Its last session is kept beside it, in {file}.
+app.session_not_set_aside = The other LiveCraft has closed, but its session could not be set aside: this window still does not save it.
+app.channel_foreign = LiveCraft's private channel is held by another account or by a program with fewer rights: this window runs on its own.
 
 # src/widgets.rs
 widgets.input_settings = Input settings

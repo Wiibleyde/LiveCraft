@@ -114,7 +114,7 @@ impl App {
     }
 
     fn open_project(&mut self, append: bool) {
-        let picked = rfd::FileDialog::new()
+        let picked = FileDialog::new()
             .add_filter(t!("bars.projects_filter"), &["livecraft", "regie", "vmix"])
             .pick_file();
         let Some(path) = picked else { return };
@@ -141,6 +141,18 @@ impl App {
                 self.after_load(Some(path), None);
             }
             Err(e) => self.say(t!("bars.unreadable_project", error = e)),
+        }
+    }
+
+    /// A project from outside, dropped on the window or handed over by a later
+    /// start, replaces the desk: it asks first, and never gets past the padlock.
+    pub(super) fn open_from_outside(&mut self, path: String) {
+        if self.with(|s| s.padlock) {
+            self.say(t!("inputs.locked_open_project"));
+        } else if self.with(|s| s.project.inputs.is_empty()) {
+            self.open_path(path);
+        } else {
+            self.confirm_open = Some(path);
         }
     }
 
@@ -186,7 +198,7 @@ impl App {
     fn save_project(&mut self, ask: bool) {
         let target = match (&self.current_file, ask) {
             (Some(p), false) => Some(p.clone()),
-            _ => rfd::FileDialog::new()
+            _ => FileDialog::new()
                 .add_filter(t!("bars.project_filter"), &["livecraft"])
                 .set_file_name("production.livecraft")
                 .save_file()
@@ -350,6 +362,11 @@ impl App {
             if st.struggling.load(Ordering::Relaxed) {
                 ui.label(RichText::new(format!("  {}", t!("bars.machine_busy"))).size(11.0).color(ORANGE));
             }
+            if self.not_saving {
+                ui.add_space(8.0);
+                let said = RichText::new(t!("bars.session_not_saved")).size(11.0).color(ORANGE);
+                ui.label(said).on_hover_text(t!("bars.session_not_saved_tip"));
+            }
             if let Some((msg, at)) = &self.message
                 && at.elapsed() < Duration::from_secs(12)
             {
@@ -373,7 +390,7 @@ impl App {
         let dir = user_dir(crate::platform::pictures_dir());
         let _ = std::fs::create_dir_all(&dir);
         let name = chrono::Local::now().format("instantane-%Y%m%d-%H%M%S.png").to_string();
-        let picked = rfd::FileDialog::new()
+        let picked = FileDialog::new()
             .add_filter("Image", &["png", "jpg", "bmp"])
             .set_directory(&dir)
             .set_file_name(name)

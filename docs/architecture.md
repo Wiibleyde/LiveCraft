@@ -62,7 +62,8 @@ waits for that, and for every file still being finished. Streams stop at once.
 | `vmix_import.rs` | Reading `.vmix` projects |
 | `secret.rs` | Sealing secrets in the session file |
 | `update.rs` | Whether a newer version is out: one request to GitHub's releases, at most once a day |
-| `platform.rs`, `platform/` | What differs between Windows, Linux and macOS: capture devices, ending child processes, screens, browser, folders, the key that seals secrets |
+| `platform.rs`, `platform/` | What differs between Windows, Linux and macOS: capture devices, ending child processes, screens, browser, folders, the key that seals secrets, the private channel between starts |
+| `instance.rs` | One window per person: a later start, such as a double-clicked project, hands its project to the window already open and ends |
 | `ui.rs`, `ui/`, `widgets.rs` | The window |
 | `i18n.rs`, `locales/` | Interface text: `t!("key")` reads it from one catalog per language |
 | `selftest.rs`, `playtest.rs`, `calltest.rs`, `delaytest.rs` | `--selftest`: real end-to-end checks |
