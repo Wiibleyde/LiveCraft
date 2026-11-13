@@ -176,6 +176,24 @@ pub fn connect_local(name: &str) -> std::io::Result<LocalStream> {
     LocalStream::connect(socket_path(name)?)
 }
 
+/// Opens a web page in the person's own browser.
+pub fn open_in_browser(url: &str) {
+    if !url.starts_with("https://") {
+        return;
+    }
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let started = Command::new(opener)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    // Waited for apart, so that it does not linger once done.
+    if let Ok(mut child) = started {
+        std::thread::spawn(move || child.wait());
+    }
+}
+
 pub fn home() -> PathBuf {
     std::env::var_os("HOME").filter(|h| !h.is_empty()).map_or_else(|| PathBuf::from("."), PathBuf::from)
 }

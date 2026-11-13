@@ -32,16 +32,16 @@ pub use os::{
 
 #[cfg(windows)]
 pub use windows::{
-    LocalListener, LocalStream, ProcessTree, connect_local, end_process_tree, has_exited, open_sealed,
-    prepare_child, seal, tie_children_to_this_process,
+    LocalListener, LocalStream, ProcessTree, connect_local, end_process_tree, has_exited, open_in_browser,
+    open_sealed, prepare_child, seal, tie_children_to_this_process,
 };
 
 #[cfg(all(unix, test))]
 pub use unix::socket_path;
 #[cfg(unix)]
 pub use unix::{
-    LocalListener, LocalStream, ProcessTree, connect_local, end_process_tree, has_exited, open_sealed,
-    prepare_child, seal, tie_children_to_this_process,
+    LocalListener, LocalStream, ProcessTree, connect_local, end_process_tree, has_exited, open_in_browser,
+    open_sealed, prepare_child, seal, tie_children_to_this_process,
 };
 
 /// The file name of a program: `ffmpeg` is `ffmpeg.exe` on Windows.

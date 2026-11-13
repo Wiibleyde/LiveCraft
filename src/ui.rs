@@ -13,6 +13,7 @@ mod switcher;
 #[cfg(test)]
 mod tests;
 mod tools;
+mod updates;
 mod virtual_set;
 mod windows;
 
@@ -53,6 +54,7 @@ struct Saved {
     remote_password: String,
     /// Interface language code; empty follows the system's.
     language: String,
+    updates: crate::update::Updates,
 }
 
 fn user_dir(base: PathBuf) -> PathBuf {
@@ -118,6 +120,7 @@ impl Saved {
             remote_lan: false,
             remote_password: String::new(),
             language: String::new(),
+            updates: crate::update::Updates::default(),
         }
     }
 
@@ -235,6 +238,15 @@ pub struct App {
     /// screenshots: they run the real window and must never write over the
     /// person's own session.
     session_file: Option<PathBuf>,
+    /// When to look for a newer version; only a real run ever does.
+    update_at: Option<Instant>,
+    /// What the check running away from the window answered.
+    update_answer: Arc<Mutex<Option<Result<Option<crate::update::Release>, String>>>>,
+    update_checking: updates::Checking,
+    /// The person's browser; the tests look at what it was asked instead.
+    open_in_browser: fn(&str),
+    /// Asks for the newest release; the tests never reach the network.
+    update_fetch: fn(&str) -> Result<Option<crate::update::Release>, String>,
     /// Whether ffmpeg is asked what it can do: a real run, or a look at the About tab.
     asks_ffmpeg: bool,
     /// Requests from later starts, while this is the first window open.
@@ -266,6 +278,9 @@ impl App {
         let mut saved = saved;
         if let Some(lang) = lang {
             saved.language = lang.code().into();
+        }
+        if shot_path.is_some() && open == "apropos" {
+            updates::as_if_found(&mut saved.updates);
         }
         let remote = shot_path.is_none();
         let mut app = Self::start(cc, saved, shot_path, open, project_file, remote);
@@ -496,6 +511,11 @@ impl App {
             shot_done: Arc::new(AtomicBool::new(false)),
             api_lan,
             session_file: remote.then(saved_path),
+            update_at: remote.then(|| Instant::now() + updates::CHECK_AFTER),
+            update_answer: Arc::new(Mutex::new(None)),
+            update_checking: updates::Checking::Idle,
+            open_in_browser: if remote { crate::platform::open_in_browser } else { |_| {} },
+            update_fetch: if remote { crate::update::fetch } else { |_| Ok(None) },
             asks_ffmpeg,
             first: None,
             second: None,
@@ -815,6 +835,7 @@ impl eframe::App for App {
         self.confirm_window(&ctx);
         self.screen_windows(&ctx, &project);
         self.run_pending_restart();
+        self.follow_update_check();
         self.autosave(&project);
         if secret::take_dropped() {
             self.say(t!("secret.not_saved"));
