@@ -154,18 +154,20 @@ pub fn hand_over(name: &str, request: &Request, timing: Timing) -> Handed {
     let name = name.to_string();
     let (tx, rx) = mpsc::channel();
     let longest = timing.window * 2 + timing.patience + Duration::from_secs(2);
-    let until = Instant::now() + longest;
+    // A second early, so that the answer is in before this start stops waiting.
+    let until = Instant::now() + longest - Duration::from_secs(1);
     std::thread::spawn(move || {
         let _ = tx.send(exchange(&name, line.as_bytes(), timing, until));
     });
-    // The exchange ends by `until`. Only what blocks on the way, a write to a
-    // window frozen whole say, is left behind: this start waits so long at most.
-    rx.recv_timeout(longest + Duration::from_secs(2)).unwrap_or(Handed::NoAnswer)
+    // Only what blocks on the way, a write to a window frozen whole say, is
+    // left behind: this start waits so long at most.
+    rx.recv_timeout(longest).unwrap_or(Handed::NoAnswer)
 }
 
-/// Ends by `until`, unless reaching or writing to the window blocks (a window
-/// frozen whole): once a start has given up, a request still on its way could
-/// be opened by the window as well.
+/// Tries again only while a whole try fits before `until`, so it ends before
+/// the start stops waiting, unless reaching or writing to the window blocks (a
+/// window frozen whole): once a start has given up, a request still on its way
+/// could be opened by the window as well.
 fn exchange(name: &str, line: &[u8], timing: Timing, until: Instant) -> Handed {
     // Between two words from the window: long enough for one free to take it.
     let silence = timing.window + Duration::from_secs(2);
