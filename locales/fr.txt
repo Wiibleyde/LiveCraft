@@ -433,6 +433,7 @@ settings.add_source = Ajouter une source
 settings.source_n = Source {n}
 settings.about_tagline = Mélangeur vidéo en direct, reconstruit à partir de la documentation publique.
 settings.about_ffmpeg = Les vidéos, caméras et sorties passent par ffmpeg, à installer séparément.
+settings.about_version = Version {version}
 settings.compositing = Composition de l'image
 settings.compose_on_gpu = Composer sur la carte graphique
 settings.compositor_starting = Démarrage…
@@ -1001,3 +1002,17 @@ settings.ffmpeg_hw_note = Un échec ne retire pas l'encodeur de la liste : il pe
 settings.ffmpeg_hw_recheck = Vérifier à nouveau
 settings.ffmpeg_bad_variable = La variable {name} est définie ({value}) mais ne désigne pas un ffmpeg utilisable : indiquez le chemin complet du fichier ffmpeg ou de son dossier, ou supprimez la variable, puis relancez LiveCraft.
 settings.ffmpeg_no_answer = ffmpeg a été trouvé mais ne répond pas : le fichier est peut-être abîmé ou il manque des bibliothèques (DLL). Réinstallez-le, ou indiquez un autre ffmpeg dans la variable {name}, puis relancez LiveCraft.
+
+# src/ui/updates.rs
+update.available = LiveCraft {version} est disponible
+update.open_page = Ouvrir la page de cette version
+update.dismiss = Masquer pour cette version
+update.title = Mises à jour
+update.at_start = Rechercher les mises à jour au démarrage
+update.checking = Vérification en cours…
+update.failed = La vérification a échoué : {error}
+update.never = Pas encore vérifié.
+update.up_to_date = Vérifié le {when} : LiveCraft est à jour.
+update.found = Vérifié le {when} : LiveCraft {version} est disponible.
+update.check_now = Vérifier maintenant
+update.what_is_sent = Une seule demande à l'API publique de GitHub, quelques secondes après le démarrage et au plus une fois par jour. Elle ne porte que le nom et la version du programme, rien sur vos projets. GitHub voit votre adresse IP, comme pour toute page web ; Windows peut aussi vérifier le certificat de GitHub auprès de son émetteur.
