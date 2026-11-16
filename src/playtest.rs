@@ -314,6 +314,7 @@ impl Desk {
     /// Two moving pages in one browser: both draw, and the one nobody sees
     /// only keeps its card fed.
     fn web_pages(&self) -> Result<(), String> {
+        crate::browser::find_browser().ok_or("Edge ou Chrome introuvable")?;
         let page = "data:text/html,<body style='margin:0'><div id=a style='width:100vw;height:100vh'></div>\
             <script>let n=0;setInterval(()=>{a.style.background='rgb('+(n++%25200+40)+',40,40)'},33)</script>";
         let kind = || Kind::Browser { url: page.into(), alpha: false };

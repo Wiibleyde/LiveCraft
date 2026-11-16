@@ -80,6 +80,13 @@ fn main() -> eframe::Result {
     if let Some(dir) = value_of("--livecheck") {
         std::process::exit(livecheck::run(&dir, value_of("--break").as_deref()));
     }
+    // Its virtual camera and microphone exist on Windows only: elsewhere, say so
+    // instead of opening the window.
+    #[cfg(not(windows))]
+    if args.iter().any(|a| a == "--livecheck") {
+        println!("ECHEC: --livecheck ne tourne que sous Windows (voir README)");
+        std::process::exit(2);
+    }
     // The command line speaks the system's language unless told otherwise; the window
     // then follows its saved choice, which `--lang` also changes.
     let lang = value_of("--lang").as_deref().and_then(i18n::Lang::from_code);
